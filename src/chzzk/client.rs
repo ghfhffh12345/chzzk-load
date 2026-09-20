@@ -1,0 +1,102 @@
+use anyhow::{anyhow, Context, Result};
+use reqwest::header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT};
+
+use crate::chzzk::models::{ChzzkResponse, LiveDetailContent, LiveStreamInfo, PlaybackJson};
+use crate::config::ChzzkConfig;
+
+const DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+
+pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String> {
+    let json_str = playback_json_str
+        .as_ref()
+        .ok_or_else(|| anyhow!("No livePlaybackJson available"))?;
+    let playback: PlaybackJson =
+        serde_json::from_str(json_str).context("Failed to parse livePlaybackJson")?;
+
+    let hls_media = playback
+        .media
+        .into_iter()
+        .find(|m| m.media_id.eq_ignore_ascii_case("HLS"))
+        .ok_or_else(|| anyhow!("No HLS media entry found"))?;
+
+    // Prioritize 1080p, then 720p, then 480p, else fallback to root path
+    if let Some(track) = hls_media
+        .encoding_track
+        .iter()
+        .find(|t| t.encoding_track_id.contains("1080"))
+    {
+        return Ok(track.path.clone());
+    }
+    if let Some(track) = hls_media
+        .encoding_track
+        .iter()
+        .find(|t| t.encoding_track_id.contains("720"))
+    {
+        return Ok(track.path.clone());
+    }
+    if let Some(track) = hls_media.encoding_track.first() {
+        return Ok(track.path.clone());
+    }
+
+    Ok(hls_media.path)
+}
+
+#[derive(Clone)]
+pub struct ChzzkClient {
+    client: reqwest::Client,
+    cookie_header: Option<String>,
+}
+
+impl ChzzkClient {
+    pub fn new(config: &ChzzkConfig) -> Self {
+        let cookie_str = if !config.nid_aut.is_empty() && !config.nid_ses.is_empty() {
+            Some(format!("NID_AUT={}; NID_SES={}", config.nid_aut, config.nid_ses))
+        } else {
+            None
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
+        if let Some(val) = cookie_str.as_deref().and_then(|c| HeaderValue::from_str(c).ok()) {
+            headers.insert(COOKIE, val);
+        }
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap_or_default();
+
+        Self {
+            client,
+            cookie_header: cookie_str,
+        }
+    }
+
+    pub fn cookie_header(&self) -> Option<&str> {
+        self.cookie_header.as_deref()
+    }
+
+    pub async fn get_live_detail(&self, channel_id: &str) -> Result<Option<LiveStreamInfo>> {
+        let url = format!(
+            "https://api.chzzk.naver.com/service/v2/channels/{}/live-detail",
+            channel_id
+        );
+        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let body: ChzzkResponse<LiveDetailContent> = resp.json().await?;
+
+        if let Some(content) = body.content.filter(|c| c.status == "OPEN") {
+            let hls_url = extract_best_hls_url(&content.live_playback_json)?;
+            return Ok(Some(LiveStreamInfo {
+                channel_id: channel_id.to_string(),
+                streamer_name: content.channel.channel_name,
+                title: content
+                    .live_title
+                    .unwrap_or_else(|| "Untitled Broadcast".to_string()),
+                hls_url,
+            }));
+        }
+
+        Ok(None)
+    }
+}
