@@ -111,3 +111,64 @@ fn test_chzzk_client_cookie_configuration() {
     let client_no_auth = ChzzkClient::new(&config_without_cookies);
     assert_eq!(client_no_auth.cookie_header(), None);
 }
+
+#[tokio::test]
+async fn test_get_live_detail_api_error_envelope() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{"code": 404, "message": "Channel not found", "content": null}"#;
+            let response = tiny_http::Response::from_string(mock_body)
+                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{}", port));
+
+    let result = client.get_live_detail("test_chan").await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("404"), "error message should contain code 404: {}", err_msg);
+    assert!(err_msg.contains("Channel not found"), "error message should contain API message: {}", err_msg);
+}
+
+#[tokio::test]
+async fn test_get_live_detail_success() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveTitle": "Test Live",
+                    "channel": {
+                        "channelId": "chan123",
+                        "channelName": "Streamer123"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}"
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body)
+                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{}", port));
+
+    let stream_info = client.get_live_detail("chan123").await.unwrap().expect("stream info");
+    assert_eq!(stream_info.streamer_name, "Streamer123");
+    assert_eq!(stream_info.title, "Test Live");
+    assert_eq!(stream_info.hls_url, "https://test.com/hls.m3u8");
+}

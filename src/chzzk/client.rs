@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT};
 
 use crate::chzzk::models::{ChzzkResponse, LiveDetailContent, LiveStreamInfo, PlaybackJson};
@@ -45,6 +45,7 @@ pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String
 #[derive(Clone)]
 pub struct ChzzkClient {
     client: reqwest::Client,
+    base_url: String,
     cookie_header: Option<String>,
 }
 
@@ -64,13 +65,20 @@ impl ChzzkClient {
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default();
 
         Self {
             client,
+            base_url: "https://api.chzzk.naver.com".to_string(),
             cookie_header: cookie_str,
         }
+    }
+
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
     }
 
     pub fn cookie_header(&self) -> Option<&str> {
@@ -79,11 +87,19 @@ impl ChzzkClient {
 
     pub async fn get_live_detail(&self, channel_id: &str) -> Result<Option<LiveStreamInfo>> {
         let url = format!(
-            "https://api.chzzk.naver.com/service/v2/channels/{}/live-detail",
+            "{}/service/v2/channels/{}/live-detail",
+            self.base_url,
             channel_id
         );
         let resp = self.client.get(&url).send().await?.error_for_status()?;
         let body: ChzzkResponse<LiveDetailContent> = resp.json().await?;
+
+        if body.code != 200 {
+            let msg = body
+                .message
+                .unwrap_or_else(|| "Unknown API error".to_string());
+            bail!("Chzzk API returned error code {}: {}", body.code, msg);
+        }
 
         if let Some(content) = body.content.filter(|c| c.status == "OPEN") {
             let hls_url = extract_best_hls_url(&content.live_playback_json)?;
