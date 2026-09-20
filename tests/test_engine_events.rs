@@ -728,3 +728,128 @@ async fn test_process_sealed_chunk_existing_folder_id_skips_retry() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[tokio::test]
+async fn test_engine_orchestrator_graceful_shutdown() {
+    use tokio_util::sync::CancellationToken;
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            poll_interval_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![],
+        ..Default::default()
+    };
+    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let cancel_token = CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        None,
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let run_handle = tokio::spawn(orchestrator.run());
+
+    // Give run loop a moment to start
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Trigger graceful shutdown
+    cancel_token.cancel();
+
+    // Await run_handle with timeout
+    let res = tokio::time::timeout(std::time::Duration::from_secs(3), run_handle).await;
+    assert!(res.is_ok(), "Engine did not shut down within timeout");
+
+    let mut got_shutdown_log = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(msg) = ev
+            && msg.contains("Engine graceful shutdown complete.")
+        {
+            got_shutdown_log = true;
+        }
+    }
+    assert!(got_shutdown_log, "Expected shutdown completion log");
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_manual_refresh() {
+    use tokio_util::sync::CancellationToken;
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let (req_tx, mut req_rx) = mpsc::channel::<()>(10);
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let _ = req_tx.try_send(());
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "CLOSE",
+                    "liveTitle": null,
+                    "channel": {
+                        "channelId": "chan_refresh",
+                        "channelName": "RefreshStreamer"
+                    },
+                    "livePlaybackJson": null
+                }
+            }"#;
+            let response = Response::from_string(mock_body)
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let _ = request.respond(response);
+        }
+    });
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            poll_interval_seconds: 3600, // 1 hour interval
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_refresh".to_string(),
+            name: "RefreshStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+    let chzzk = ChzzkClient::new(&settings.chzzk)
+        .with_base_url(format!("http://127.0.0.1:{}", port));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let cancel_token = CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        None,
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let run_handle = tokio::spawn(orchestrator.clone().run());
+
+    // First request should happen immediately on startup
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), req_rx.recv())
+        .await
+        .expect("Timeout waiting for initial poll");
+
+    // Clear event queue
+    while event_rx.try_recv().is_ok() {}
+
+    // Trigger manual refresh
+    orchestrator.trigger_refresh();
+
+    // Second request must happen quickly despite 1 hour sleep interval
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), req_rx.recv())
+        .await
+        .expect("Timeout waiting for manual refresh poll");
+
+    // Clean up
+    cancel_token.cancel();
+    let _ = run_handle.await;
+}
+
+

@@ -22,6 +22,7 @@ pub struct App {
     pub reclaimed_mb: f64,
     pub logs: Vec<String>,
     pub should_quit: bool,
+    pub refresh_requested: bool,
 }
 
 impl Default for App {
@@ -43,6 +44,7 @@ impl App {
             reclaimed_mb: 0.0,
             logs: Vec::new(),
             should_quit: false,
+            refresh_requested: false,
         }
     }
 
@@ -94,7 +96,7 @@ impl App {
                 self.active_upload_name = Some(chunk_name);
                 if total_bytes > 0 {
                     self.upload_progress_pct =
-                        ((uploaded_bytes as f64 / total_bytes as f64) * 100.0) as u16;
+                        ((uploaded_bytes as f64 / total_bytes as f64) * 100.0).round().min(100.0) as u16;
                 }
                 self.upload_speed = speed_mb_s;
             }
@@ -117,6 +119,7 @@ impl App {
             }
             AppEvent::Key(key) => match key.code {
                 KeyCode::Char('q') => self.should_quit = true,
+                KeyCode::Char('r') => self.refresh_requested = true,
                 KeyCode::Up | KeyCode::Char('k') => self.prev_channel(),
                 KeyCode::Down | KeyCode::Char('j') => self.next_channel(),
                 _ => {}

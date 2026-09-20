@@ -3,11 +3,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use crossterm::cursor::Show;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
+use tokio_util::sync::CancellationToken;
 
 use chzzk_load::app_path::resolve_path;
 use chzzk_load::chzzk::client::ChzzkClient;
@@ -32,6 +34,14 @@ pub struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Register panic hook to restore terminal on panic
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+        default_panic(panic_info);
+    }));
+
     let args = Cli::parse();
     let config_path = args
         .config
@@ -71,14 +81,25 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let cancel_token = CancellationToken::new();
     let chzzk = ChzzkClient::new(&settings.chzzk);
-    let orchestrator = Arc::new(EngineOrchestrator::new(
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings.clone(),
         chzzk,
         drive_client,
         event_tx.clone(),
+        cancel_token.clone(),
     ));
-    tokio::spawn(orchestrator.run());
+
+    // Handle Ctrl+C for graceful shutdown
+    let cancel_token_ctrlc = cancel_token.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel_token_ctrlc.cancel();
+        }
+    });
+
+    let orch_handle = tokio::spawn(orchestrator.clone().run());
 
     // Setup terminal
     enable_raw_mode()?;
@@ -100,30 +121,49 @@ async fn main() -> anyhow::Result<()> {
     // Main TUI render loop
     let tick_rate = Duration::from_millis(100);
     loop {
+        if cancel_token.is_cancelled() || app.should_quit {
+            cancel_token.cancel();
+            break;
+        }
+
         terminal.draw(|f| draw_ui(f, &app))?;
 
-        if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    break;
-                }
-                app.handle_event(AppEvent::Key(key));
+        if event::poll(tick_rate)?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.code == KeyCode::Char('q') {
+                cancel_token.cancel();
+                break;
             }
+            app.handle_event(AppEvent::Key(key));
         }
 
         while let Ok(ev) = event_rx.try_recv() {
             app.handle_event(ev);
         }
 
-        if app.should_quit {
+        if app.refresh_requested {
+            app.refresh_requested = false;
+            let _ = event_tx
+                .send(AppEvent::Log(
+                    "[INFO] Manual refresh triggered...".to_string(),
+                ))
+                .await;
+            orchestrator.trigger_refresh();
+        }
+
+        if cancel_token.is_cancelled() || app.should_quit {
+            cancel_token.cancel();
             break;
         }
     }
 
     // Restore terminal
     let _ = disable_raw_mode();
-    let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
+    let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, Show);
+
+    // Await graceful engine shutdown (FFmpeg processes exit cleanly & in-flight uploads complete)
+    let _ = orch_handle.await;
 
     Ok(())
 }

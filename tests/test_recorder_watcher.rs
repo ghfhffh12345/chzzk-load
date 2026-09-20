@@ -46,6 +46,28 @@ fn test_n_plus_one_detection_logic() {
 }
 
 #[test]
+fn test_case_insensitive_extension() {
+    let temp_dir = std::env::temp_dir().join(format!("test_watcher_case_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let mut enqueued = HashSet::new();
+    let chunk0 = temp_dir.join("chunk_0000.TS");
+    let mut f0 = File::create(&chunk0).unwrap();
+    f0.write_all(b"content 0").unwrap();
+
+    let chunk1 = temp_dir.join("chunk_0001.Ts");
+    let mut f1 = File::create(&chunk1).unwrap();
+    f1.write_all(b"content 1").unwrap();
+
+    let sealed = detect_sealed_chunks(&temp_dir, &mut enqueued, false);
+    assert_eq!(sealed.len(), 1);
+    assert_eq!(sealed[0], chunk0);
+    assert!(enqueued.contains("chunk_0000.TS"));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_segment_watcher_struct() {
     let temp_dir = std::env::temp_dir().join(format!("test_watcher_struct_{}", rand::random::<u32>()));
     std::fs::create_dir_all(&temp_dir).unwrap();

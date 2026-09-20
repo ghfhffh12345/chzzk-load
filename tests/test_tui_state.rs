@@ -76,14 +76,32 @@ fn test_app_upload_progress_and_completion() {
     assert_eq!(app.upload_progress_pct, 50);
     assert!((app.upload_speed - 12.5).abs() < f64::EPSILON);
 
+    // Test gauge clamping to 100 max
+    app.handle_event(AppEvent::UploadProgress {
+        chunk_name: "chunk_0002.ts".to_string(),
+        uploaded_bytes: 150_000_000,
+        total_bytes: 100_000_000,
+        speed_mb_s: 20.0,
+    });
+    assert_eq!(app.upload_progress_pct, 100);
+
     // Complete chunk
     app.handle_event(AppEvent::UploadCompleted {
         chunk_name: "chunk_0001.ts".to_string(),
         reclaimed_bytes: 100_000_000,
     });
-    assert_eq!(app.active_upload_name, None);
-    assert_eq!(app.upload_progress_pct, 0);
+    assert_eq!(app.active_upload_name, Some("chunk_0002.ts".to_string()));
     assert_eq!(app.uploaded_count, 1);
+}
+
+#[test]
+fn test_app_refresh_keybinding() {
+    let mut app = App::new();
+    assert!(!app.refresh_requested);
+
+    let r_key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+    app.handle_event(AppEvent::Key(r_key));
+    assert!(app.refresh_requested);
 }
 
 #[test]

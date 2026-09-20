@@ -5,6 +5,7 @@ pub fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {
             '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
             other => other,
         })
         .collect::<String>()
@@ -19,6 +20,7 @@ pub fn build_ffmpeg_command(
     cookie_header: Option<&str>,
 ) -> Command {
     let mut cmd = Command::new("ffmpeg");
+    cmd.stdin(std::process::Stdio::piped());
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("warning")
@@ -57,6 +59,13 @@ mod tests {
         let input = "   hello world   ";
         let output = sanitize_filename(input);
         assert_eq!(output, "hello world");
+    }
+
+    #[test]
+    fn test_sanitize_filename_control_characters() {
+        let input = "title\x00with\x1fcontrol\x07chars";
+        let output = sanitize_filename(input);
+        assert_eq!(output, "title_with_control_chars");
     }
 
     #[test]

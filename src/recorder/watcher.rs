@@ -19,7 +19,7 @@ pub fn detect_sealed_chunks(
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
-                && path.extension().and_then(|s| s.to_str()) == Some("ts")
+                && path.extension().and_then(|s| s.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("ts"))
                 && let Some(name) = path.file_name().and_then(|n| n.to_str())
             {
                 let meta = fs::metadata(&path).or_else(|_| entry.metadata());

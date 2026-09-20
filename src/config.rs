@@ -110,7 +110,8 @@ impl Settings {
         } else {
             let settings = Settings::default();
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create parent directory for {}", parent.display()))?;
             }
             let content = serde_json::to_string_pretty(&settings)?;
             fs::write(path, content)
