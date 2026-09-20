@@ -51,7 +51,8 @@ pub struct MediaEntry {
 #[serde(rename_all = "camelCase")]
 pub struct EncodingTrack {
     pub encoding_track_id: String,
-    pub path: String,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

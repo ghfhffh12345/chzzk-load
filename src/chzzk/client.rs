@@ -16,30 +16,37 @@ pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String
 
     let hls_media = playback
         .media
-        .into_iter()
+        .iter()
         .find(|m| m.media_id.eq_ignore_ascii_case("HLS"))
         .ok_or_else(|| anyhow!("No HLS media entry found"))?;
 
-    // Prioritize 1080p, then 720p, then 480p, else fallback to root path
-    if let Some(track) = hls_media
+    // Prioritize 1080p, then 720p, then any video track (excluding audioOnly) if explicit track path is present
+    if let Some(path) = hls_media
         .encoding_track
         .iter()
         .find(|t| t.encoding_track_id.contains("1080"))
+        .and_then(|t| t.path.as_ref())
     {
-        return Ok(track.path.clone());
+        return Ok(path.clone());
     }
-    if let Some(track) = hls_media
+    if let Some(path) = hls_media
         .encoding_track
         .iter()
         .find(|t| t.encoding_track_id.contains("720"))
+        .and_then(|t| t.path.as_ref())
     {
-        return Ok(track.path.clone());
+        return Ok(path.clone());
     }
-    if let Some(track) = hls_media.encoding_track.first() {
-        return Ok(track.path.clone());
+    if let Some(path) = hls_media
+        .encoding_track
+        .iter()
+        .find(|t| !t.encoding_track_id.eq_ignore_ascii_case("audioOnly"))
+        .and_then(|t| t.path.as_ref())
+    {
+        return Ok(path.clone());
     }
 
-    Ok(hls_media.path)
+    Ok(hls_media.path.clone())
 }
 
 #[derive(Clone)]

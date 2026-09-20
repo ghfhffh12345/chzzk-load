@@ -31,6 +31,7 @@ pub fn build_ffmpeg_command(
         headers.push_str(&format!("Cookie: {}\r\n", cookie));
     }
     cmd.arg("-headers").arg(headers);
+    cmd.arg("-extension_picky").arg("0");
 
     cmd.arg("-i").arg(m3u8_url)
         .arg("-c").arg("copy")
@@ -82,17 +83,19 @@ mod tests {
         assert_eq!(args[4], "-headers");
         assert!(args[5].contains("User-Agent:"));
         assert!(!args[5].contains("Cookie:"));
-        assert_eq!(args[6], "-i");
-        assert_eq!(args[7], "http://example.com/live.m3u8");
-        assert_eq!(args[8], "-c");
-        assert_eq!(args[9], "copy");
-        assert_eq!(args[10], "-f");
-        assert_eq!(args[11], "segment");
-        assert_eq!(args[12], "-segment_time");
-        assert_eq!(args[13], "10");
-        assert_eq!(args[14], "-segment_format");
-        assert_eq!(args[15], "mpegts");
-        assert_eq!(args[16], "-reset_timestamps");
-        assert_eq!(args[17], "1");
+        assert_eq!(args[6], "-extension_picky");
+        assert_eq!(args[7], "0");
+        assert_eq!(args[8], "-i");
+        assert_eq!(args[9], "http://example.com/live.m3u8");
+        assert_eq!(args[10], "-c");
+        assert_eq!(args[11], "copy");
+        assert_eq!(args[12], "-f");
+        assert_eq!(args[13], "segment");
+        assert_eq!(args[14], "-segment_time");
+        assert_eq!(args[15], "10");
+        assert_eq!(args[16], "-segment_format");
+        assert_eq!(args[17], "mpegts");
+        assert_eq!(args[18], "-reset_timestamps");
+        assert_eq!(args[19], "1");
     }
 }

@@ -172,3 +172,33 @@ async fn test_get_live_detail_success() {
     assert_eq!(stream_info.title, "Test Live");
     assert_eq!(stream_info.hls_url, "https://test.com/hls.m3u8");
 }
+
+#[test]
+fn test_parse_real_world_live_playback_without_track_path() {
+    let mock_json = r#"{
+        "media": [
+            {
+                "mediaId": "HLS",
+                "path": "https://live.chzzk.naver.com/hls/master.m3u8",
+                "encodingTrack": [
+                    {
+                        "encodingTrackId": "1080p",
+                        "videoBitRate": 8000000
+                    },
+                    {
+                        "encodingTrackId": "720p",
+                        "videoBitRate": 3000000
+                    },
+                    {
+                        "encodingTrackId": "audioOnly",
+                        "path": "https://live.chzzk.naver.com/hls/audioOnly.m3u8"
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let hls_url = extract_best_hls_url(&Some(mock_json.to_string())).expect("should parse successfully");
+    assert_eq!(hls_url, "https://live.chzzk.naver.com/hls/master.m3u8");
+}
+
