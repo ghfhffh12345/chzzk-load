@@ -26,4 +26,8 @@ futures-util = "0.3"
 name = "chzzk_load"
 path = "src/lib.rs"
 
+[[bin]]
+name = "chzzk-load"
+path = "src/main.rs"
+
 
