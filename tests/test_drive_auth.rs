@@ -2,7 +2,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Response, Server};
 
-use chzzk_load::drive::auth::{generate_pkce_codes, DriveAuth, StoredToken};
+use chzzk_load::drive::auth::{generate_pkce_codes, parse_oauth_redirect_query, DriveAuth, StoredToken};
 
 #[test]
 fn test_pkce_generation() {
@@ -28,6 +28,40 @@ fn test_stored_token_serde() {
     assert_eq!(deserialized.access_token, "mock_access");
     assert_eq!(deserialized.refresh_token.as_deref(), Some("mock_refresh"));
     assert_eq!(deserialized.expires_at_epoch_sec, 1700000000);
+}
+
+#[test]
+fn test_parse_oauth_redirect_query_code() {
+    let url = "http://localhost:8085/oauth2callback?code=mock_auth_code_12345&scope=drive";
+    let res = parse_oauth_redirect_query(url);
+    assert_eq!(res, Some(Ok("mock_auth_code_12345".to_string())));
+}
+
+#[test]
+fn test_parse_oauth_redirect_query_error() {
+    let url = "http://localhost:8085/oauth2callback?error=access_denied&error_description=User+denied+access";
+    let res = parse_oauth_redirect_query(url);
+    assert_eq!(
+        res,
+        Some(Err(("access_denied".to_string(), "User denied access".to_string())))
+    );
+}
+
+#[test]
+fn test_parse_oauth_redirect_query_error_no_description() {
+    let url = "http://localhost:8085/oauth2callback?error=invalid_request";
+    let res = parse_oauth_redirect_query(url);
+    assert_eq!(
+        res,
+        Some(Err(("invalid_request".to_string(), String::new())))
+    );
+}
+
+#[test]
+fn test_parse_oauth_redirect_query_unrelated() {
+    let url = "http://localhost:8085/favicon.ico";
+    let res = parse_oauth_redirect_query(url);
+    assert_eq!(res, None);
 }
 
 #[tokio::test]

@@ -73,6 +73,22 @@ pub fn generate_pkce_codes() -> (String, String) {
     (verifier, challenge)
 }
 
+pub fn parse_oauth_redirect_query(url_str: &str) -> Option<Result<String, (String, String)>> {
+    let parsed = Url::parse(url_str).ok()?;
+    if let Some((_, err)) = parsed.query_pairs().find(|(k, _)| k == "error") {
+        let desc = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "error_description")
+            .map(|(_, v)| v.to_string())
+            .unwrap_or_default();
+        return Some(Err((err.to_string(), desc)));
+    }
+    if let Some((_, code)) = parsed.query_pairs().find(|(k, _)| k == "code") {
+        return Some(Ok(code.to_string()));
+    }
+    None
+}
+
 pub struct DriveAuth {
     token_path: PathBuf,
     client_id: String,
@@ -117,6 +133,7 @@ impl DriveAuth {
         );
 
         println!("Starting browser authorization for Google Drive...");
+        println!("If your browser did not open automatically, visit:\n{}", auth_url);
         let _ = open::that(&auth_url);
 
         let server = Server::http(format!("127.0.0.1:{}", port))
@@ -125,14 +142,26 @@ impl DriveAuth {
         let code = tokio::task::spawn_blocking(move || -> Result<String> {
             for request in server.incoming_requests() {
                 let url = format!("http://localhost{}", request.url());
-                if let Ok(parsed) = Url::parse(&url)
-                    && let Some((_, code)) = parsed.query_pairs().find(|(k, _)| k == "code")
-                {
-                    let response = Response::from_string("Authentication successful! You can close this tab and return to chzzk-load.");
-                    let _ = request.respond(response);
-                    return Ok(code.to_string());
+                match parse_oauth_redirect_query(&url) {
+                    Some(Ok(code)) => {
+                        let response = Response::from_string(
+                            "Authentication successful! You can close this tab and return to chzzk-load.",
+                        );
+                        let _ = request.respond(response);
+                        return Ok(code);
+                    }
+                    Some(Err((err, desc))) => {
+                        let response = Response::from_string(format!(
+                            "Authentication failed: {} ({}). You can close this tab.",
+                            err, desc
+                        ));
+                        let _ = request.respond(response);
+                        return Err(anyhow!("Google OAuth error: {} ({})", err, desc));
+                    }
+                    None => {
+                        let _ = request.respond(Response::from_string("Waiting for Google authorization..."));
+                    }
                 }
-                let _ = request.respond(Response::from_string("Waiting for Google authorization..."));
             }
             Err(anyhow!("OAuth server terminated without receiving authorization code"))
         }).await??;
