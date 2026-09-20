@@ -310,7 +310,23 @@ impl EngineOrchestrator {
             let mut cmd = build_ffmpeg_command(&info.hls_url, &output_pattern, chunk_dur, cookie);
 
             let mut child = match cmd.spawn() {
-                Ok(child) => {
+                Ok(mut child) => {
+                    if let Some(stderr) = child.stderr.take() {
+                        let event_tx_stderr = event_tx.clone();
+                        tokio::spawn(async move {
+                            use tokio::io::{AsyncBufReadExt, BufReader};
+                            let mut lines = BufReader::new(stderr).lines();
+                            while let Ok(Some(line)) = lines.next_line().await {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    let _ = event_tx_stderr
+                                        .send(AppEvent::Log(format!("[FFMPEG] {}", trimmed)))
+                                        .await;
+                                }
+                            }
+                        });
+                    }
+
                     let _ = event_tx
                         .send(AppEvent::Log(format!(
                             "[REC] Spawned FFmpeg segmenter ({}s TS chunks) -> {}",

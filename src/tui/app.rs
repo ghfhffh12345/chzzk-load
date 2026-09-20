@@ -21,6 +21,7 @@ pub struct App {
     pub uploaded_count: usize,
     pub reclaimed_mb: f64,
     pub logs: Vec<String>,
+    pub log_scroll: usize,
     pub should_quit: bool,
     pub refresh_requested: bool,
 }
@@ -43,6 +44,7 @@ impl App {
             uploaded_count: 0,
             reclaimed_mb: 0.0,
             logs: Vec::new(),
+            log_scroll: 0,
             should_quit: false,
             refresh_requested: false,
         }
@@ -122,6 +124,18 @@ impl App {
                 KeyCode::Char('r') => self.refresh_requested = true,
                 KeyCode::Up | KeyCode::Char('k') => self.prev_channel(),
                 KeyCode::Down | KeyCode::Char('j') => self.next_channel(),
+                KeyCode::PageUp => {
+                    self.log_scroll = self.log_scroll.saturating_add(5);
+                }
+                KeyCode::PageDown => {
+                    self.log_scroll = self.log_scroll.saturating_sub(5);
+                }
+                KeyCode::Home => {
+                    self.log_scroll = usize::MAX / 2;
+                }
+                KeyCode::End => {
+                    self.log_scroll = 0;
+                }
                 _ => {}
             },
             _ => {}

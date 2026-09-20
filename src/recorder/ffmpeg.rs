@@ -21,6 +21,8 @@ pub fn build_ffmpeg_command(
 ) -> Command {
     let mut cmd = Command::new("ffmpeg");
     cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("warning")

@@ -228,3 +228,82 @@ fn test_draw_ui_rendering_smoke() {
     assert!(content.contains("Cloud Upload"));
     assert!(content.contains("Live Activity Logs"));
 }
+
+#[test]
+fn test_logs_strictly_bounded_and_clipping() {
+    // Test on multiple terminal dimensions (small 80x20, standard 80x24, large 120x40)
+    for (width, height) in [(80, 20), (80, 24), (120, 40)] {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let mut app = App::new();
+        // Add single-line logs, multi-line logs, and very long lines exceeding width
+        for i in 0..100 {
+            if i % 10 == 0 {
+                app.logs.push(format!("[ERROR] Line {} with\nnewline 1\nnewline 2\nnewline 3", i));
+            } else if i % 5 == 0 {
+                app.logs.push(format!("[WARN] Very long log line {} {}", i, "x".repeat(200)));
+            } else {
+                app.logs.push(format!("[INFO] Regular log {}", i));
+            }
+        }
+
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Verify the entire buffer area matches width and height
+        assert_eq!(buffer.area.width, width);
+        assert_eq!(buffer.area.height, height);
+
+        // Verify that the footer is rendered at the very last line
+        let last_line: String = (0..width)
+            .map(|x| buffer.cell((x, height - 1)).unwrap().symbol())
+            .collect();
+        assert!(last_line.contains("[q] Quit"), "Footer missing on {}x{}", width, height);
+
+        // Verify that the logs panel title is present
+        let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(content.contains("Live Activity Logs"), "Logs title missing on {}x{}", width, height);
+
+        // Verify that latest log (e.g. 99) is visible in tail mode
+        assert!(content.contains("Regular log 99"), "Latest log not visible on {}x{}", width, height);
+    }
+}
+
+#[test]
+fn test_logs_autoscroll_and_pageup_down() {
+    let mut app = App::new();
+    for i in 0..50 {
+        app.logs.push(format!("[INFO] Entry {}", i));
+    }
+    assert_eq!(app.log_scroll, 0);
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Default: tail mode (scroll = 0), latest log "Entry 49" is rendered
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+    assert!(content.contains("Entry 49"));
+    assert!(!content.contains("[Scrolled:"));
+
+    // PageUp scrolls into history
+    let pgup = crossterm::event::KeyEvent::new(crossterm::event::KeyCode::PageUp, crossterm::event::KeyModifiers::NONE);
+    app.handle_event(AppEvent::Key(pgup));
+    assert_eq!(app.log_scroll, 5);
+
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content_scrolled: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+    assert!(content_scrolled.contains("[Scrolled: -5]"));
+
+    // PageDown scrolls back down
+    let pgdn = crossterm::event::KeyEvent::new(crossterm::event::KeyCode::PageDown, crossterm::event::KeyModifiers::NONE);
+    app.handle_event(AppEvent::Key(pgdn));
+    assert_eq!(app.log_scroll, 0);
+
+    // End resets scroll to 0
+    app.log_scroll = 20;
+    let end_key = crossterm::event::KeyEvent::new(crossterm::event::KeyCode::End, crossterm::event::KeyModifiers::NONE);
+    app.handle_event(AppEvent::Key(end_key));
+    assert_eq!(app.log_scroll, 0);
+}
