@@ -490,3 +490,241 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_process_sealed_chunk_no_drive_saves_locally() {
+    let temp_dir = std::env::temp_dir().join(format!("test_chunk_no_drive_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk_path = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk_path, b"dummy video bytes").unwrap();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+    let mut session_folder_id: Option<String> = None;
+
+    EngineOrchestrator::process_sealed_chunk(
+        &chunk_path,
+        &mut session_folder_id,
+        None,
+        "ChzzkRecordings",
+        "Streamer - Title",
+        &upload_tx,
+        &event_tx,
+    )
+    .await;
+
+    assert!(session_folder_id.is_none());
+    assert!(upload_rx.try_recv().is_err());
+
+    let mut got_chunk_sealed = false;
+    let mut got_saved_locally_log = false;
+
+    while let Ok(ev) = event_rx.try_recv() {
+        match ev {
+            AppEvent::ChunkSealed { chunk_name, size_bytes } => {
+                assert_eq!(chunk_name, "chunk_0000.ts");
+                assert_eq!(size_bytes, 17);
+                got_chunk_sealed = true;
+            }
+            AppEvent::Log(msg)
+                if msg == "[REC] chunk_0000.ts sealed (saved locally)." =>
+            {
+                got_saved_locally_log = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_chunk_sealed);
+    assert!(got_saved_locally_log);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_process_sealed_chunk_retry_drive_success() {
+    let temp_dir = std::env::temp_dir().join(format!("test_chunk_retry_ok_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    // Spawn server responding to root folder query and subfolder query
+    std::thread::spawn(move || {
+        // 1. Root folder query
+        if let Ok(req) = server.recv() {
+            let body = serde_json::json!({
+                "files": [{"id": "root_123", "name": "ChzzkRecordings"}]
+            });
+            let response = Response::from_string(body.to_string())
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let _ = req.respond(response);
+        }
+
+        // 2. Subfolder query
+        if let Ok(req) = server.recv() {
+            let body = serde_json::json!({
+                "files": [{"id": "sub_456", "name": "Subfolder"}]
+            });
+            let response = Response::from_string(body.to_string())
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let _ = req.respond(response);
+        }
+    });
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let drive = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    let chunk_path = temp_dir.join("chunk_0001.ts");
+    fs::write(&chunk_path, b"test chunk content").unwrap();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+    let mut session_folder_id: Option<String> = None;
+
+    EngineOrchestrator::process_sealed_chunk(
+        &chunk_path,
+        &mut session_folder_id,
+        Some(&drive),
+        "ChzzkRecordings",
+        "Subfolder",
+        &upload_tx,
+        &event_tx,
+    )
+    .await;
+
+    assert_eq!(session_folder_id, Some("sub_456".to_string()));
+
+    // Verify task in upload_tx
+    let task = upload_rx.recv().await.expect("Expected UploadTask");
+    assert_eq!(task.session_folder_id, "sub_456");
+    assert_eq!(task.chunk_name, "chunk_0001.ts");
+
+    let mut got_pushed_log = false;
+    let mut got_drive_ready_log = false;
+
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(msg) = ev {
+            if msg == "[REC] chunk_0001.ts sealed. Pushed to Drive upload queue." {
+                got_pushed_log = true;
+            }
+            if msg.contains("[DRIVE] Session folder ready:") {
+                got_drive_ready_log = true;
+            }
+        }
+    }
+
+    assert!(got_drive_ready_log);
+    assert!(got_pushed_log);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_process_sealed_chunk_retry_drive_failure() {
+    let temp_dir = std::env::temp_dir().join(format!("test_chunk_retry_fail_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(req) = server.recv() {
+            let response = Response::from_string("internal error").with_status_code(StatusCode(500));
+            let _ = req.respond(response);
+        }
+    });
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let drive = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    let chunk_path = temp_dir.join("chunk_0002.ts");
+    fs::write(&chunk_path, b"test video data").unwrap();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+    let mut session_folder_id: Option<String> = None;
+
+    EngineOrchestrator::process_sealed_chunk(
+        &chunk_path,
+        &mut session_folder_id,
+        Some(&drive),
+        "ChzzkRecordings",
+        "Subfolder",
+        &upload_tx,
+        &event_tx,
+    )
+    .await;
+
+    assert!(session_folder_id.is_none());
+    assert!(upload_rx.try_recv().is_err());
+
+    let mut got_saved_locally_log = false;
+    let mut got_warn_log = false;
+
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(msg) = ev {
+            if msg == "[REC] chunk_0002.ts sealed (saved locally)." {
+                got_saved_locally_log = true;
+            }
+            if msg.contains("[WARN] Failed to access Drive root folder:") {
+                got_warn_log = true;
+            }
+        }
+    }
+
+    assert!(got_warn_log);
+    assert!(got_saved_locally_log);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_process_sealed_chunk_existing_folder_id_skips_retry() {
+    let temp_dir = std::env::temp_dir().join(format!("test_chunk_existing_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk_path = temp_dir.join("chunk_0003.ts");
+    fs::write(&chunk_path, b"another chunk data").unwrap();
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+    let mut session_folder_id = Some("already_ready_folder_999".to_string());
+
+    EngineOrchestrator::process_sealed_chunk(
+        &chunk_path,
+        &mut session_folder_id,
+        None,
+        "ChzzkRecordings",
+        "Subfolder",
+        &upload_tx,
+        &event_tx,
+    )
+    .await;
+
+    assert_eq!(session_folder_id, Some("already_ready_folder_999".to_string()));
+
+    let task = upload_rx.recv().await.expect("Expected UploadTask");
+    assert_eq!(task.session_folder_id, "already_ready_folder_999");
+    assert_eq!(task.chunk_name, "chunk_0003.ts");
+
+    let mut got_pushed_log = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(msg) = ev
+            && msg == "[REC] chunk_0003.ts sealed. Pushed to Drive upload queue."
+        {
+            got_pushed_log = true;
+        }
+    }
+    assert!(got_pushed_log);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
