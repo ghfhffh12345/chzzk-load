@@ -100,6 +100,51 @@ async fn test_get_or_create_folder_existing() {
 }
 
 #[tokio::test]
+async fn test_get_or_create_folder_with_quotes() {
+    let temp_dir = std::env::temp_dir().join(format!("test_drive_client_quotes_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            assert_eq!(request.method().as_str(), "GET");
+            let req_url = format!("http://dummy{}", request.url());
+            let parsed_url = url::Url::parse(&req_url).unwrap();
+            let q_param = parsed_url.query_pairs().find(|(k, _)| k == "q").map(|(_, v)| v.into_owned());
+            assert!(q_param.is_some(), "Missing q query parameter");
+            let q = q_param.unwrap();
+            assert!(
+                q.contains("name = 'Streamer\\'s Stream'"),
+                "Query q should contain escaped single quote: {}",
+                q
+            );
+
+            let mock_response = serde_json::json!({
+                "files": [
+                    { "id": "quote_folder_id_456", "name": "Streamer's Stream" }
+                ]
+            });
+            let response = Response::from_string(mock_response.to_string())
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let _ = request.respond(response);
+        }
+    });
+
+    let folder_id = client.get_or_create_folder("Streamer's Stream", Some("parent_root")).await.unwrap();
+    assert_eq!(folder_id, "quote_folder_id_456");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_get_or_create_folder_creates_new() {
     let temp_dir = std::env::temp_dir().join(format!("test_drive_client_create_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();

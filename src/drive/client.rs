@@ -58,7 +58,8 @@ impl DriveClient {
         let token = self.auth.get_valid_access_token().await?;
 
         // Query if exists
-        let mut query = format!("mimeType = 'application/vnd.google-apps.folder' and name = '{}' and trashed = false", folder_name);
+        let escaped_name = folder_name.replace('\\', "\\\\").replace('\'', "\\'");
+        let mut query = format!("mimeType = 'application/vnd.google-apps.folder' and name = '{}' and trashed = false", escaped_name);
         if let Some(pid) = parent_id.filter(|p| !p.is_empty()) {
             query.push_str(&format!(" and '{}' in parents", pid));
         }
