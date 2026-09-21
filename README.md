@@ -145,28 +145,28 @@ When `chzzk-load` is running, you can navigate and control the dashboard with th
 
 ```mermaid
 flowchart TD
-    subgraph Polling & Detection
-        P[Chzzk API Poller] -->|GET /service/v2/channels/{id}/live-detail| O[Engine Orchestrator]
-        O -->|status == OPEN & not in cooldown| S[Spawn Recording Session]
+    subgraph Polling["Polling & Detection"]
+        P["Chzzk API Poller"] -->|"GET /service/v2/channels/{id}/live-detail"| O["Engine Orchestrator"]
+        O -->|"status == OPEN & not in cooldown"| S["Spawn Recording Session"]
     end
 
-    subgraph Lossless Recording
-        S -->|spawn child process| F["FFmpeg (-c copy -extension_picky 0)"]
-        F -->|write stream chunks| D[(Local Disk: chunk_0000.ts, ...)]
-        W[Segment Watcher] -->|poll folder| D
-        W -->|chunk N+1 exists & size > 0| N1[Seal Chunk N]
+    subgraph Recording["Lossless Recording"]
+        S -->|"spawn child process"| F["FFmpeg (-c copy -extension_picky 0)"]
+        F -->|"write stream chunks"| D[("Local Disk: chunk_0000.ts, ...")]
+        W["Segment Watcher"] -->|"poll folder"| D
+        W -->|"chunk N+1 exists & size > 0"| N1["Seal Chunk N"]
     end
 
-    subgraph Upload & Cleanup Pipeline
-        N1 -->|send UploadTask| Q[Upload Channel]
-        Q -->|resumable upload POST/PUT| G[Google Drive API v3]
-        G -->|HTTP 200/201 OK| DEL[tokio::fs::remove_file]
-        DEL -->|reclaim space| D
+    subgraph Upload["Upload & Cleanup Pipeline"]
+        N1 -->|"send UploadTask"| Q["Upload Channel"]
+        Q -->|"resumable upload POST/PUT"| G["Google Drive API v3"]
+        G -->|"HTTP 200/201 OK"| DEL["tokio::fs::remove_file"]
+        DEL -->|"reclaim space"| D
     end
 
-    subgraph User Interface
-        O -->|AppEvent| TUI[Ratatui TUI Dashboard]
-        Q -->|UploadProgress / Completed| TUI
+    subgraph UI["User Interface"]
+        O -->|"AppEvent"| TUI["Ratatui TUI Dashboard"]
+        Q -->|"UploadProgress / Completed"| TUI
     end
 ```
 
