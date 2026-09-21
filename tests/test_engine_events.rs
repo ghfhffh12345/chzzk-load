@@ -1086,3 +1086,147 @@ async fn test_engine_orchestrator_manual_refresh() {
     cancel_token.cancel();
     let _ = run_handle.await;
 }
+
+#[tokio::test]
+async fn test_engine_orchestrator_concurrent_uploads() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_concurrent_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    let (task2_started_tx, mut task2_started_rx) = mpsc::channel::<()>(1);
+    let (allow_task1_finish_tx, mut allow_task1_finish_rx) = mpsc::channel::<()>(1);
+
+    std::thread::spawn(move || {
+        let mut put_reqs = Vec::new();
+        // 4 requests expected: 2 POST inits + 2 PUT uploads
+        for _ in 0..4 {
+            if let Ok(mut req) = server.recv() {
+                if req.method().as_str() == "POST" {
+                    let mut body = String::new();
+                    req.as_reader().read_to_string(&mut body).unwrap();
+                    let chunk_id = if body.contains("chunk_chan1.ts") {
+                        "1"
+                    } else {
+                        "2"
+                    };
+                    if chunk_id == "2" {
+                        let _ = task2_started_tx.try_send(());
+                    }
+                    let session_url =
+                        format!("http://127.0.0.1:{}/resumable_session_{}", port, chunk_id);
+                    let response = Response::empty(200).with_header(
+                        Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
+                    );
+                    let _ = req.respond(response);
+                } else if req.method().as_str() == "PUT" {
+                    if req.url().contains("resumable_session_1") {
+                        // Hold PUT for chunk 1 until chunk 2 has started!
+                        put_reqs.push(req);
+                    } else {
+                        // Chunk 2 PUT
+                        let mock_body = serde_json::json!({
+                            "id": "file_2",
+                            "name": "chunk_chan2.ts"
+                        });
+                        let response = Response::from_string(mock_body.to_string()).with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        );
+                        let _ = req.respond(response);
+                    }
+                }
+            }
+        }
+
+        // Wait for signal that task 2 was verified running concurrently before releasing task 1
+        let _ = allow_task1_finish_rx.blocking_recv();
+        for req in put_reqs {
+            let mock_body = serde_json::json!({
+                "id": "file_1",
+                "name": "chunk_chan1.ts"
+            });
+            let response = Response::from_string(mock_body.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = req.respond(response);
+        }
+    });
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let _consumer_handle = EngineOrchestrator::spawn_upload_consumer_with_concurrency(
+        Some(client),
+        event_tx,
+        upload_rx,
+        2,
+    );
+
+    let chunk_path1 = temp_dir.join("chunk_chan1.ts");
+    let chunk_path2 = temp_dir.join("chunk_chan2.ts");
+    fs::write(&chunk_path1, b"chan1_video_data").unwrap();
+    fs::write(&chunk_path2, b"chan2_video_data").unwrap();
+
+    upload_tx
+        .send(UploadTask {
+            session_folder_id: "folder_1".to_string(),
+            chunk_path: chunk_path1.clone(),
+            chunk_name: "chunk_chan1.ts".to_string(),
+        })
+        .await
+        .unwrap();
+
+    upload_tx
+        .send(UploadTask {
+            session_folder_id: "folder_2".to_string(),
+            chunk_path: chunk_path2.clone(),
+            chunk_name: "chunk_chan2.ts".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Verify task 2 starts POST request while task 1 is still in flight (holding PUT 1)!
+    let task2_started =
+        tokio::time::timeout(std::time::Duration::from_secs(3), task2_started_rx.recv()).await;
+    assert!(
+        task2_started.is_ok() && task2_started.unwrap().is_some(),
+        "Task 2 did not start concurrently while Task 1 was in flight!"
+    );
+
+    // Allow task 1 to finish
+    let _ = allow_task1_finish_tx.send(()).await;
+
+    // Await both upload completions
+    let mut completed_chunks = Vec::new();
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv()).await
+    {
+        if let AppEvent::UploadCompleted { chunk_name, .. } = ev {
+            completed_chunks.push(chunk_name);
+            if completed_chunks.len() == 2 {
+                break;
+            }
+        }
+    }
+
+    assert_eq!(completed_chunks.len(), 2);
+    assert!(
+        !chunk_path1.exists(),
+        "chunk 1 must be deleted after upload"
+    );
+    assert!(
+        !chunk_path2.exists(),
+        "chunk 2 must be deleted after upload"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

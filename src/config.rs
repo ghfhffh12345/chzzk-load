@@ -53,6 +53,8 @@ pub struct GoogleDriveConfig {
     pub token_path: String,
     #[serde(default = "default_root_folder")]
     pub root_folder_name: String,
+    #[serde(default = "default_upload_concurrency")]
+    pub upload_concurrency: usize,
 }
 
 fn default_credentials_path() -> String {
@@ -64,6 +66,9 @@ fn default_token_path() -> String {
 fn default_root_folder() -> String {
     "Chzzk_Recordings".to_string()
 }
+fn default_upload_concurrency() -> usize {
+    3
+}
 
 impl Default for GoogleDriveConfig {
     fn default() -> Self {
@@ -71,6 +76,7 @@ impl Default for GoogleDriveConfig {
             credentials_path: default_credentials_path(),
             token_path: default_token_path(),
             root_folder_name: default_root_folder(),
+            upload_concurrency: default_upload_concurrency(),
         }
     }
 }

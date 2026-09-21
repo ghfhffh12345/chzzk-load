@@ -41,9 +41,17 @@ pub struct DriveClient {
 
 impl DriveClient {
     pub fn new(auth: Arc<DriveAuth>) -> Self {
+        let client = reqwest::Client::builder()
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(20)
+            .pool_idle_timeout(Some(std::time::Duration::from_secs(90)))
+            .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             auth,
-            client: reqwest::Client::new(),
+            client,
             base_url: "https://www.googleapis.com".to_string(),
             upload_base_url: "https://www.googleapis.com".to_string(),
         }
@@ -165,9 +173,9 @@ impl DriveClient {
             .ok_or_else(|| anyhow!("Missing Location header in Google Drive resumable init"))?
             .to_string();
 
-        // 2. Stream chunk with progress
+        // 2. Stream chunk with progress using 256KB buffer
         let file = File::open(file_path).await?;
-        let stream = FramedRead::new(file, BytesCodec::new());
+        let stream = FramedRead::with_capacity(file, BytesCodec::new(), 256 * 1024);
         let mut uploaded = 0u64;
 
         let progress_stream = stream.map(move |chunk_result| {

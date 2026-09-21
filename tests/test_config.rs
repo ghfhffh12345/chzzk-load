@@ -6,11 +6,13 @@ fn test_default_settings_and_serialization() {
     assert_eq!(settings.general.chunk_duration_seconds, 600);
     assert_eq!(settings.general.poll_interval_seconds, 20);
     assert_eq!(settings.google_drive.root_folder_name, "Chzzk_Recordings");
+    assert_eq!(settings.google_drive.upload_concurrency, 3);
     assert_eq!(settings.channels.len(), 1);
 
     let json_str = serde_json::to_string_pretty(&settings).expect("Serialize to json");
     let deserialized: Settings = serde_json::from_str(&json_str).expect("Deserialize from json");
     assert_eq!(deserialized.general.chunk_duration_seconds, 600);
+    assert_eq!(deserialized.google_drive.upload_concurrency, 3);
 }
 
 #[test]

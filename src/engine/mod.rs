@@ -97,56 +97,86 @@ impl EngineOrchestrator {
     pub fn spawn_upload_consumer(
         drive_opt: Option<DriveClient>,
         event_tx: Sender<AppEvent>,
-        mut upload_rx: tokio::sync::mpsc::Receiver<UploadTask>,
+        upload_rx: tokio::sync::mpsc::Receiver<UploadTask>,
     ) -> tokio::task::JoinHandle<()> {
+        Self::spawn_upload_consumer_with_concurrency(drive_opt, event_tx, upload_rx, 3)
+    }
+
+    pub fn spawn_upload_consumer_with_concurrency(
+        drive_opt: Option<DriveClient>,
+        event_tx: Sender<AppEvent>,
+        mut upload_rx: tokio::sync::mpsc::Receiver<UploadTask>,
+        concurrency: usize,
+    ) -> tokio::task::JoinHandle<()> {
+        let concurrency = concurrency.max(1);
         tokio::spawn(async move {
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
+            let mut join_set = tokio::task::JoinSet::new();
+
             while let Some(task) = upload_rx.recv().await {
-                if let Some(ref drive) = drive_opt {
-                    let tx = event_tx.clone();
-                    let name = task.chunk_name.clone();
-                    let n = name.clone();
-                    let chunk_start_time = std::time::Instant::now();
+                // Periodically reap completed tasks to keep memory bounded
+                while join_set.try_join_next().is_some() {}
 
-                    let upload_res =
-                        UploadWorker::upload_and_delete(drive, task, move |uploaded, total| {
-                            let mb_s = (uploaded as f64 / 1_048_576.0)
-                                / chunk_start_time.elapsed().as_secs_f64().max(0.1);
-                            let _ = tx.try_send(AppEvent::UploadProgress {
-                                chunk_name: n.clone(),
-                                uploaded_bytes: uploaded,
-                                total_bytes: total,
-                                speed_mb_s: mb_s,
-                            });
-                        })
-                        .await;
+                let permit = match Arc::clone(&semaphore).acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
 
-                    match upload_res {
-                        Ok(reclaimed) => {
-                            let _ = event_tx
-                                .send(AppEvent::UploadCompleted {
-                                    chunk_name: name.clone(),
-                                    reclaimed_bytes: reclaimed,
-                                })
-                                .await;
-                            let _ = event_tx
-                                .send(AppEvent::Log(format!(
-                                    "[CLEAN] Uploaded & deleted {} (reclaimed {:.1} MB)",
-                                    name,
-                                    reclaimed as f64 / 1_048_576.0
-                                )))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = event_tx
-                                .send(AppEvent::Log(format!(
-                                    "[ERROR] Upload failed for {}: {}",
-                                    name, e
-                                )))
-                                .await;
+                let drive = drive_opt.clone();
+                let event_tx = event_tx.clone();
+
+                join_set.spawn(async move {
+                    let _permit = permit;
+                    if let Some(ref drive) = drive {
+                        let tx = event_tx.clone();
+                        let name = task.chunk_name.clone();
+                        let n = name.clone();
+                        let chunk_start_time = std::time::Instant::now();
+
+                        let upload_res =
+                            UploadWorker::upload_and_delete(drive, task, move |uploaded, total| {
+                                let mb_s = (uploaded as f64 / 1_048_576.0)
+                                    / chunk_start_time.elapsed().as_secs_f64().max(0.1);
+                                let _ = tx.try_send(AppEvent::UploadProgress {
+                                    chunk_name: n.clone(),
+                                    uploaded_bytes: uploaded,
+                                    total_bytes: total,
+                                    speed_mb_s: mb_s,
+                                });
+                            })
+                            .await;
+
+                        match upload_res {
+                            Ok(reclaimed) => {
+                                let _ = event_tx
+                                    .send(AppEvent::UploadCompleted {
+                                        chunk_name: name.clone(),
+                                        reclaimed_bytes: reclaimed,
+                                    })
+                                    .await;
+                                let _ = event_tx
+                                    .send(AppEvent::Log(format!(
+                                        "[CLEAN] Uploaded & deleted {} (reclaimed {:.1} MB)",
+                                        name,
+                                        reclaimed as f64 / 1_048_576.0
+                                    )))
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(format!(
+                                        "[ERROR] Upload failed for {}: {}",
+                                        name, e
+                                    )))
+                                    .await;
+                            }
                         }
                     }
-                }
+                });
             }
+
+            // Drain remaining uploads on shutdown
+            while join_set.join_next().await.is_some() {}
         })
     }
 
@@ -613,9 +643,14 @@ impl EngineOrchestrator {
     }
 
     pub async fn run(self: Arc<Self>) {
+        let concurrency = self.settings.google_drive.upload_concurrency;
         let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<UploadTask>(50);
-        let upload_handle =
-            Self::spawn_upload_consumer(self.drive.clone(), self.event_tx.clone(), upload_rx);
+        let upload_handle = Self::spawn_upload_consumer_with_concurrency(
+            self.drive.clone(),
+            self.event_tx.clone(),
+            upload_rx,
+            concurrency,
+        );
 
         let poll_interval = Duration::from_secs(self.settings.general.poll_interval_seconds);
         loop {
