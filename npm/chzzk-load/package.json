@@ -1,0 +1,37 @@
+{
+  "name": "chzzk-load",
+  "version": "0.1.0",
+  "description": "High-performance TUI for recording Naver Chzzk streams and streaming to Google Drive",
+  "bin": {
+    "chzzk-load": "./bin/chzzk-load.js"
+  },
+  "keywords": [
+    "chzzk",
+    "naver",
+    "recorder",
+    "livestream",
+    "tui",
+    "google-drive",
+    "cli"
+  ],
+  "author": "ghfhffh12345",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ghfhffh12345/chzzk-load.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ghfhffh12345/chzzk-load/issues"
+  },
+  "homepage": "https://github.com/ghfhffh12345/chzzk-load#readme",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "optionalDependencies": {
+    "chzzk-load-win32-x64": "0.1.0",
+    "chzzk-load-linux-x64": "0.1.0",
+    "chzzk-load-linux-arm64": "0.1.0",
+    "chzzk-load-darwin-x64": "0.1.0",
+    "chzzk-load-darwin-arm64": "0.1.0"
+  }
+}
