@@ -21,8 +21,21 @@ Welcome to `chzzk-load`. This document serves as the primary technical specifica
 
 ```
 chzzk-load/
+├── .github/
+│   └── workflows/
+│       ├── ci.yml            # CI validation (fmt, clippy, multi-OS tests, npm tests)
+│       └── release.yml       # Release pipeline (multi-platform builds, GitHub Release, npm publish)
 ├── Cargo.toml                # Dependencies and binary target definitions
 ├── settings.json             # Dedicated configuration file (portable)
+├── npm/
+│   └── chzzk-load/           # Root npm CLI wrapper package
+│       ├── bin/
+│       │   └── chzzk-load.js # Platform resolution & execution launcher script
+│       ├── package.json      # Wrapper package definition with optionalDependencies
+│       └── README.md
+├── scripts/
+│   ├── prepare-npm.js        # Platform package generator & binary bundler
+│   └── test-npm-packages.js  # Automated mock packaging & execution test suite
 ├── src/
 │   ├── main.rs               # CLI entrypoint, signals, panic hooks, TUI event loop
 │   ├── lib.rs                # Module root and library exports
@@ -104,7 +117,59 @@ chzzk-load/
 
 ---
 
-## 4. Development & Testing Workflow
+## 4. CI/CD & Multi-Platform Distribution Architecture
+
+### 4.1. CI/CD Workflow Architecture (`.github/workflows/`)
+The repository uses GitHub Actions for continuous integration and automated multi-platform release publishing:
+
+1. **Continuous Integration (`.github/workflows/ci.yml`)**:
+   - Triggers automatically on pushes and pull requests targeting the `main` branch.
+   - **`lint` job**: Runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on `ubuntu-latest`.
+   - **`test` job**: Matrix build running `cargo test --all-targets` across `ubuntu-latest` and `windows-latest`.
+   - **`npm-test` job**: Sets up Node.js 20 on `ubuntu-latest` and executes `node scripts/test-npm-packages.js` to verify npm package generation, platform resolution, and launcher mechanics.
+
+2. **Automated Multi-Platform Release Pipeline (`.github/workflows/release.yml`)**:
+   - Triggers on tag pushes matching `v*` (e.g., `v0.1.0`) or manual trigger via `workflow_dispatch`.
+   - **`get-version`**: Resolves semver version from git tag or falls back to `Cargo.toml`.
+   - **`build-linux`**: Runs on `ubuntu-latest`. Uses Zig and `cargo-zigbuild` to compile static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
+   - **`build-macos`**: Runs on `macos-14` (Apple Silicon runner). Compiles native binaries for `x86_64-apple-darwin` and `aarch64-apple-darwin`.
+   - **`build-windows`**: Runs on `windows-latest`. Compiles native 64-bit binary for `x86_64-pc-windows-msvc`.
+   - **`github-release`**: Consolidates SHA256 checksums into `SHA256SUMS.txt`, collects archives (`.zip` for Windows, `.tar.gz` for Linux and macOS), and publishes a GitHub Release using `softprops/action-gh-release@v2`.
+   - **`publish-npm`**: Downloads raw binaries from all platform builds, executes `node scripts/prepare-npm.js` to generate platform packages and configure `optionalDependencies`, and publishes all platform packages and the root wrapper package to the npm registry with provenance.
+
+### 4.2. Linux Cross-Compilation with `cargo-zigbuild`
+Instead of heavy Docker containers or slow QEMU system emulation for building ARM64 Linux binaries, the CI pipeline uses `cargo-zigbuild`:
+- **Lightweight Zig Toolchain**: `mlugg/setup-zig` installs Zig 0.13.0, which acts as a zero-dependency C/C++ cross-compiler and linker.
+- **Static Musl Binaries**: Binaries are compiled against `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, producing fully self-contained static executables with zero glibc runtime dependencies. This guarantees maximum portability across Linux distributions (Alpine, Ubuntu, Debian, CentOS, etc.) and ARM architectures (e.g., Raspberry Pi, AWS Graviton).
+- **Fast Build Times**: Eliminates Docker container startup latency and QEMU CPU emulation overhead.
+
+### 4.3. npm Multi-Package Distribution Structure
+`chzzk-load` is distributed on npm using the modern multi-package pattern (similar to `esbuild` and `@swc/core`):
+- **Root Wrapper Package (`npm/chzzk-load`)**:
+  - Exposes the CLI executable via `bin: { "chzzk-load": "bin/chzzk-load.js" }`.
+  - Declares 5 platform-specific binary packages as `optionalDependencies`:
+    - `chzzk-load-win32-x64` (`x86_64-pc-windows-msvc`)
+    - `chzzk-load-linux-x64` (`x86_64-unknown-linux-musl`)
+    - `chzzk-load-linux-arm64` (`aarch64-unknown-linux-musl`)
+    - `chzzk-load-darwin-x64` (`x86_64-apple-darwin`)
+    - `chzzk-load-darwin-arm64` (`aarch64-apple-darwin`)
+  - When a user runs `npx chzzk-load` or `npm install -g chzzk-load`, the npm package manager automatically downloads only the platform package matching their OS and CPU architecture.
+- **Binary Launcher (`npm/chzzk-load/bin/chzzk-load.js`)**:
+  - Inspects `process.platform` and `process.arch` to determine the target package name.
+  - Resolves the binary path from `node_modules`, checking environment variable override `CHZZK_LOAD_BIN`, root `bin/` fallback, and system `PATH`.
+  - Ensures execute permissions (`chmod 0o755`) on POSIX environments.
+  - Spawns the native binary with inherited `stdio`, passing through CLI arguments, forwarding exit codes, and relaying termination signals (`SIGINT`, `SIGTERM`, `SIGHUP`).
+- **Preparation Script (`scripts/prepare-npm.js`)**:
+  - Dynamically constructs platform packages under `npm/platforms/` with appropriate `os`, `cpu`, and `libc` fields in their `package.json`.
+  - Synchronizes versions across root and platform packages from CLI argument or `Cargo.toml`.
+  - Copies native binary files into their respective platform packages.
+- **Release Secret Requirement**:
+  - Requires the `NPM_TOKEN` secret configured in the GitHub repository for automated publishing to the npm registry (`registry.npmjs.org`).
+  - If `NPM_TOKEN` is not set, the release workflow automatically falls back to `npm pack --dry-run` to verify packaging without failing the workflow.
+
+---
+
+## 5. Development & Testing Workflow
 
 Always adhere to **Test-Driven Development (TDD)** when modifying functionality or fixing bugs:
 1. Write a focused reproduction test in the `tests/` directory.
@@ -130,6 +195,9 @@ cargo clippy --all-targets -- -D warnings
 # Format code
 cargo fmt --check
 
+# Run npm package packaging and launcher test suite
+node scripts/test-npm-packages.js
+
 # Compile optimized standalone binary
 cargo build --release
 
@@ -139,7 +207,7 @@ target/release/chzzk-load.exe --help
 
 ---
 
-## 5. Architectural Invariants for Agents
+## 6. Architectural Invariants for Agents
 
 When implementing changes, AI agents must strictly preserve the following rules:
 

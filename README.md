@@ -1,5 +1,10 @@
 # chzzk-load
 
+[![npm version](https://img.shields.io/npm/v/chzzk-load.svg?logo=npm)](https://www.npmjs.com/package/chzzk-load)
+[![GitHub Release](https://img.shields.io/github/v/release/ghfhffh12345/chzzk-load?logo=github)](https://github.com/ghfhffh12345/chzzk-load/releases)
+[![CI](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml/badge.svg)](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 A high-performance, standalone Rust application for real-time Naver Chzzk live stream recording and Google Drive syncing, featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
 
 `chzzk-load` monitors live broadcasts, losslessly segments streams into MPEG-TS chunks using FFmpeg stream-copy (`-c copy`), concurrently uploads completed chunks to Google Drive via resumable chunked uploads, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
@@ -20,8 +25,9 @@ A high-performance, standalone Rust application for real-time Naver Chzzk live s
 
 ## Prerequisites
 
-- **Rust**: Version 1.85+ (Rust 2024 edition).
-- **FFmpeg**: Must be installed and accessible on your system's `PATH`.
+- **FFmpeg**: Must be installed and accessible on your system's `PATH` (required for all installation methods).
+- **Node.js**: (Optional) Version 18+ if using the `npx` or `npm` CLI runner.
+- **Rust**: (Optional) Version 1.85+ (Rust 2024 edition) only if building from source.
 
 To verify FFmpeg is accessible:
 ```bash
@@ -30,9 +36,44 @@ ffmpeg -version
 
 ---
 
-## Quick Start
+## Installation & Quick Start
 
-### 1. Build from Source
+### 1. via npm (Instant execution / Global CLI)
+
+The easiest way to run `chzzk-load` without manually managing binaries or installing Rust. The npm wrapper package automatically resolves and executes the matching pre-compiled native binary for your OS and CPU architecture.
+
+```bash
+# Run directly with npx
+npx chzzk-load
+
+# Or install globally
+npm install -g chzzk-load
+chzzk-load
+```
+
+### 2. via Pre-compiled Standalone Binaries (GitHub Releases)
+
+Download pre-compiled standalone executables directly from [GitHub Releases](https://github.com/ghfhffh12345/chzzk-load/releases). No Cargo or Node.js runtime is required.
+
+| Platform | Architecture | Archive | Description |
+| :--- | :--- | :--- | :--- |
+| **Windows** | x86_64 | `chzzk-load-windows-x64.zip` | Windows 64-bit standalone executable (`chzzk-load.exe`) |
+| **Linux** | x86_64 | `chzzk-load-linux-x64.tar.gz` | Linux x86_64 static musl binary (portable, zero glibc dependencies) |
+| **Linux** | ARM64 (aarch64) | `chzzk-load-linux-arm64.tar.gz` | Linux ARM64 static musl binary (Raspberry Pi, AWS Graviton, etc.) |
+| **macOS** | Intel (x86_64) | `chzzk-load-darwin-x64.tar.gz` | macOS 64-bit Intel binary |
+| **macOS** | Apple Silicon (ARM64) | `chzzk-load-darwin-arm64.tar.gz` | macOS Apple Silicon binary (M1/M2/M3/M4) |
+
+Extract the archive and run the executable directly:
+```bash
+# On Linux / macOS
+tar -xzvf chzzk-load-linux-x64.tar.gz
+./chzzk-load
+
+# On Windows
+# Extract chzzk-load-windows-x64.zip and run chzzk-load.exe
+```
+
+### 3. via Cargo (Build from Source)
 
 Clone the repository and build the release binary:
 
@@ -44,14 +85,14 @@ cargo build --release
 
 The compiled standalone executable will be located at `target/release/chzzk-load` (or `target/release/chzzk-load.exe` on Windows).
 
-### 2. Run
+### 4. Running & Configuration
 
 ```bash
 # Run with default settings (automatically creates settings.json if missing)
-./target/release/chzzk-load
+chzzk-load
 
 # Or specify a custom configuration file path
-./target/release/chzzk-load --config /path/to/my-settings.json
+chzzk-load --config /path/to/my-settings.json
 ```
 
 On first startup, if `settings.json` is not present, `chzzk-load` automatically generates a default template in the executable's directory.
