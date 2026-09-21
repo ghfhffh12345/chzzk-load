@@ -18,7 +18,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ghfhffh12345/chzzk-load.git"
+    "url": "git+https://github.com/ghfhffh12345/chzzk-load.git"
   },
   "bugs": {
     "url": "https://github.com/ghfhffh12345/chzzk-load/issues"

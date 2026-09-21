@@ -295,7 +295,14 @@ jobs:
           node scripts/prepare-npm.js --version ${{ needs.get-version.outputs.version }} --bin-dir ./artifacts
 
       - name: Publish npm packages via OIDC (Trusted Publisher)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN secret detected. Configuring auth token in ~/.npmrc..."
+            echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          fi
+
           echo "Publishing platform packages to npm via GitHub Actions OIDC..."
           for dir in npm/platforms/*; do
             if [ -d "$dir" ]; then
