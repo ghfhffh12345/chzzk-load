@@ -269,8 +269,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [get-version, build-linux, build-macos, build-windows]
     permissions:
-      contents: read
       id-token: write
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -287,6 +287,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Update npm to latest
+        run: npm install -g npm@latest
+
       - name: Prepare npm packages
         run: |
           node scripts/prepare-npm.js --version ${{ needs.get-version.outputs.version }} --bin-dir ./artifacts
@@ -297,10 +300,10 @@ jobs:
           for dir in npm/platforms/*; do
             if [ -d "$dir" ]; then
               echo "Publishing $dir..."
-              (cd "$dir" && npm publish --access public --provenance)
+              (cd "$dir" && npm publish --provenance --access public)
             fi
           done
 
           echo "Publishing root package chzzk-load via GitHub Actions OIDC..."
-          (cd npm/chzzk-load && npm publish --access public --provenance)
+          (cd npm/chzzk-load && npm publish --provenance --access public)
 
