@@ -163,9 +163,10 @@ Instead of heavy Docker containers or slow QEMU system emulation for building AR
   - Dynamically constructs platform packages under `npm/platforms/` with appropriate `os`, `cpu`, and `libc` fields in their `package.json`.
   - Synchronizes versions across root and platform packages from CLI argument or `Cargo.toml`.
   - Copies native binary files into their respective platform packages.
-- **Release Secret Requirement**:
-  - Requires the `NPM_TOKEN` secret configured in the GitHub repository for automated publishing to the npm registry (`registry.npmjs.org`).
-  - If `NPM_TOKEN` is not set, the release workflow automatically falls back to `npm pack --dry-run` to verify packaging without failing the workflow.
+- **npm OIDC Trusted Publisher Authentication**:
+  - Uses GitHub Actions OpenID Connect (OIDC) Trusted Publisher authentication. Long-lived `NPM_TOKEN` secrets are completely eliminated.
+  - To configure: In package settings on [npmjs.com](https://www.npmjs.com) under **Trusted Publishers**, register GitHub Actions with Repository: `ghfhffh12345/chzzk-load` and Workflow: `release.yml`.
+  - The workflow automatically requests short-lived cryptographic tokens from the npm registry and publishes packages with verifiable supply-chain `--provenance`.
 
 ---
 
