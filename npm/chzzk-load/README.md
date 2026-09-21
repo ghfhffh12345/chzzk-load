@@ -38,7 +38,7 @@ chzzk-load
 
 | Platform | Architecture | Package |
 | :--- | :--- | :--- |
-| **Windows** | x86_64 | `chzzk-load-win32-x64` |
+| **Windows** | x86_64 | `chzzk-load-windows-x64` |
 | **Linux** | x86_64 | `chzzk-load-linux-x64` |
 | **Linux** | ARM64 | `chzzk-load-linux-arm64` |
 | **macOS** | x86_64 (Intel) | `chzzk-load-darwin-x64` |

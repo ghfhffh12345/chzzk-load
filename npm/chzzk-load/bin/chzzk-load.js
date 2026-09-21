@@ -6,7 +6,8 @@ const path = require('path');
 
 const PLATFORMS = {
   'win32-x64': {
-    pkgName: 'chzzk-load-win32-x64',
+    pkgName: 'chzzk-load-windows-x64',
+    altPkgName: 'chzzk-load-win32-x64',
     binName: 'chzzk-load.exe',
   },
   'linux-x64': {
@@ -47,28 +48,32 @@ function findBinary() {
     return null;
   }
 
-  const { pkgName, binName } = spec;
+  const { binName } = spec;
+  const pkgNames = [spec.pkgName];
+  if (spec.altPkgName) pkgNames.push(spec.altPkgName);
 
-  // 2. Try require.resolve
-  try {
-    const resolvedPath = require.resolve(`${pkgName}/bin/${binName}`);
-    if (fs.existsSync(resolvedPath)) {
-      return resolvedPath;
+  for (const name of pkgNames) {
+    // 2. Try require.resolve
+    try {
+      const resolvedPath = require.resolve(`${name}/bin/${binName}`);
+      if (fs.existsSync(resolvedPath)) {
+        return resolvedPath;
+      }
+    } catch (_) {
+      // Package not found via require.resolve
     }
-  } catch (_) {
-    // Package not found via require.resolve
-  }
 
-  // 3. Search in relative node_modules locations
-  const candidates = [
-    path.join(__dirname, '..', '..', pkgName, 'bin', binName),
-    path.join(__dirname, '..', '..', 'node_modules', pkgName, 'bin', binName),
-    path.join(__dirname, '..', 'node_modules', pkgName, 'bin', binName),
-  ];
+    // 3. Search in relative node_modules locations
+    const candidates = [
+      path.join(__dirname, '..', '..', name, 'bin', binName),
+      path.join(__dirname, '..', '..', 'node_modules', name, 'bin', binName),
+      path.join(__dirname, '..', 'node_modules', name, 'bin', binName),
+    ];
 
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return candidate;
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
     }
   }
 

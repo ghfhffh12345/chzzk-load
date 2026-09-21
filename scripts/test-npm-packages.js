@@ -25,7 +25,7 @@ const LAUNCHER_SCRIPT = path.join(REPO_ROOT, 'npm', 'chzzk-load', 'bin', 'chzzk-
 const CARGO_TOML = path.join(REPO_ROOT, 'Cargo.toml');
 
 const EXPECTED_PLATFORMS = [
-  { name: 'chzzk-load-win32-x64', os: 'win32', cpu: 'x64', bin: 'chzzk-load.exe' },
+  { name: 'chzzk-load-windows-x64', os: 'win32', cpu: 'x64', bin: 'chzzk-load.exe' },
   { name: 'chzzk-load-linux-x64', os: 'linux', cpu: 'x64', bin: 'chzzk-load' },
   { name: 'chzzk-load-linux-arm64', os: 'linux', cpu: 'arm64', bin: 'chzzk-load' },
   { name: 'chzzk-load-darwin-x64', os: 'darwin', cpu: 'x64', bin: 'chzzk-load' },
@@ -213,7 +213,7 @@ runTest('prepare-npm.js version fallback to Cargo.toml', () => {
   assert.strictEqual(stagedRootPkg.version, expectedCargoVersion, 'Did not match Cargo.toml version');
 
   const stagedWinPkg = JSON.parse(
-    fs.readFileSync(path.join(tmpCargoStageDir, 'platforms', 'chzzk-load-win32-x64', 'package.json'), 'utf8')
+    fs.readFileSync(path.join(tmpCargoStageDir, 'platforms', 'chzzk-load-windows-x64', 'package.json'), 'utf8')
   );
   assert.strictEqual(stagedWinPkg.version, expectedCargoVersion, 'Platform version did not match Cargo.toml');
 });
@@ -226,7 +226,7 @@ runTest('prepare-npm.js copies binaries from --bin-dir', () => {
   // Create mock binaries in bin-dir
   EXPECTED_PLATFORMS.forEach((p) => {
     // artifact names: chzzk-load.exe or chzzk-load-<os>-<arch>
-    const artifactName = p.name === 'chzzk-load-win32-x64' ? 'chzzk-load.exe' : p.name;
+    const artifactName = p.name === 'chzzk-load-windows-x64' ? 'chzzk-load.exe' : p.name;
     const binPath = path.join(tmpBinDir, artifactName);
     fs.writeFileSync(binPath, `BINARY_DATA_FOR_${p.name}`);
   });
@@ -324,12 +324,12 @@ runTest('prepare-npm.js filters platforms with --platforms', () => {
   const result = spawnSync('node', [
     PREPARE_SCRIPT,
     '--out-dir', tmpFilterDir,
-    '--platforms', 'win32-x64,linux-x64',
+    '--platforms', 'windows-x64,linux-x64',
     '--dry-run',
   ], { encoding: 'utf8' });
 
   assert.strictEqual(result.status, 0, `prepare-npm failed: ${result.stderr}`);
-  assert.ok(fs.existsSync(path.join(tmpFilterDir, 'platforms', 'chzzk-load-win32-x64')), 'win32-x64 should exist');
+  assert.ok(fs.existsSync(path.join(tmpFilterDir, 'platforms', 'chzzk-load-windows-x64')), 'windows-x64 should exist');
   assert.ok(fs.existsSync(path.join(tmpFilterDir, 'platforms', 'chzzk-load-linux-x64')), 'linux-x64 should exist');
   assert.ok(!fs.existsSync(path.join(tmpFilterDir, 'platforms', 'chzzk-load-darwin-x64')), 'darwin-x64 should not exist');
 });

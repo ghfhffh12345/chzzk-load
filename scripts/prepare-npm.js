@@ -23,7 +23,7 @@ const DEFAULT_NPM_DIR = path.join(REPO_ROOT, 'npm');
 const CARGO_TOML_PATH = path.join(REPO_ROOT, 'Cargo.toml');
 
 const PLATFORMS = [
-  { name: 'chzzk-load-win32-x64', os: 'win32', cpu: 'x64', bin: 'chzzk-load.exe', artifactName: 'chzzk-load.exe' },
+  { name: 'chzzk-load-windows-x64', os: 'win32', cpu: 'x64', bin: 'chzzk-load.exe', artifactName: 'chzzk-load.exe' },
   { name: 'chzzk-load-linux-x64', os: 'linux', cpu: 'x64', bin: 'chzzk-load', artifactName: 'chzzk-load-linux-x64' },
   { name: 'chzzk-load-linux-arm64', os: 'linux', cpu: 'arm64', bin: 'chzzk-load', artifactName: 'chzzk-load-linux-arm64' },
   { name: 'chzzk-load-darwin-x64', os: 'darwin', cpu: 'x64', bin: 'chzzk-load', artifactName: 'chzzk-load-darwin-x64' },
@@ -150,7 +150,10 @@ function prepareNpm(options = {}) {
     ? PLATFORMS.filter(
         (p) =>
           options.platforms.includes(p.name) ||
-          options.platforms.includes(p.name.replace('chzzk-load-', ''))
+          options.platforms.includes(p.name.replace('chzzk-load-', '')) ||
+          (p.name === 'chzzk-load-windows-x64' &&
+            (options.platforms.includes('chzzk-load-win32-x64') ||
+              options.platforms.includes('win32-x64')))
       )
     : PLATFORMS;
 

@@ -148,7 +148,7 @@ Instead of heavy Docker containers or slow QEMU system emulation for building AR
 - **Root Wrapper Package (`npm/chzzk-load`)**:
   - Exposes the CLI executable via `bin: { "chzzk-load": "bin/chzzk-load.js" }`.
   - Declares 5 platform-specific binary packages as `optionalDependencies`:
-    - `chzzk-load-win32-x64` (`x86_64-pc-windows-msvc`)
+    - `chzzk-load-windows-x64` (`x86_64-pc-windows-msvc`)
     - `chzzk-load-linux-x64` (`x86_64-unknown-linux-musl`)
     - `chzzk-load-linux-arm64` (`aarch64-unknown-linux-musl`)
     - `chzzk-load-darwin-x64` (`x86_64-apple-darwin`)

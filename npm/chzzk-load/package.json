@@ -28,7 +28,7 @@
     "node": ">=16.0.0"
   },
   "optionalDependencies": {
-    "chzzk-load-win32-x64": "0.1.0",
+    "chzzk-load-windows-x64": "0.1.0",
     "chzzk-load-linux-x64": "0.1.0",
     "chzzk-load-linux-arm64": "0.1.0",
     "chzzk-load-darwin-x64": "0.1.0",
