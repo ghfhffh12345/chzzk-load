@@ -114,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
             id: ch.id.clone(),
             name: ch.name.clone(),
             is_live: false,
+            is_active: false,
             title: "Checking...".to_string(),
         });
     }

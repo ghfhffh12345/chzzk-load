@@ -3,9 +3,11 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct UploadTask {
+    pub channel_id: String,
     pub session_folder_id: String,
     pub chunk_path: PathBuf,
     pub chunk_name: String,
+    pub streamer_name: String,
 }
 
 pub struct UploadWorker;

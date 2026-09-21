@@ -16,6 +16,7 @@ fn test_app_state_mutation_on_events() {
     assert_eq!(app.logs[0], "Hello");
 
     app.handle_event(AppEvent::UploadCompleted {
+        channel_id: "c1".to_string(),
         chunk_name: "chunk_0000.ts".to_string(),
         reclaimed_bytes: 524_288_000,
     });
@@ -66,7 +67,9 @@ fn test_app_upload_progress_and_completion() {
     let mut app = App::new();
 
     app.handle_event(AppEvent::UploadProgress {
+        channel_id: "c1".to_string(),
         chunk_name: "chunk_0001.ts".to_string(),
+        streamer_name: "Streamer 1".to_string(),
         uploaded_bytes: 50_000_000,
         total_bytes: 100_000_000,
         speed_mb_s: 12.5,
@@ -78,7 +81,9 @@ fn test_app_upload_progress_and_completion() {
 
     // Test gauge clamping to 100 max
     app.handle_event(AppEvent::UploadProgress {
+        channel_id: "c2".to_string(),
         chunk_name: "chunk_0002.ts".to_string(),
+        streamer_name: "Streamer 2".to_string(),
         uploaded_bytes: 150_000_000,
         total_bytes: 100_000_000,
         speed_mb_s: 20.0,
@@ -87,6 +92,7 @@ fn test_app_upload_progress_and_completion() {
 
     // Complete chunk
     app.handle_event(AppEvent::UploadCompleted {
+        channel_id: "c1".to_string(),
         chunk_name: "chunk_0001.ts".to_string(),
         reclaimed_bytes: 100_000_000,
     });
@@ -133,18 +139,21 @@ fn test_app_keyboard_navigation_and_quit() {
         id: "c1".to_string(),
         name: "Channel 1".to_string(),
         is_live: false,
+        is_active: false,
         title: "Title 1".to_string(),
     });
     app.channels.push(chzzk_load::tui::app::ChannelItem {
         id: "c2".to_string(),
         name: "Channel 2".to_string(),
         is_live: true,
+        is_active: false,
         title: "Title 2".to_string(),
     });
     app.channels.push(chzzk_load::tui::app::ChannelItem {
         id: "c3".to_string(),
         name: "Channel 3".to_string(),
         is_live: false,
+        is_active: false,
         title: "Title 3".to_string(),
     });
 
@@ -203,6 +212,7 @@ fn test_draw_ui_rendering_smoke() {
         id: "c1".to_string(),
         name: "Test Streamer".to_string(),
         is_live: true,
+        is_active: false,
         title: "Playing Minecraft".to_string(),
     });
     app.active_upload_name = Some("chunk_0001.ts".to_string());
@@ -345,4 +355,132 @@ fn test_logs_autoscroll_and_pageup_down() {
     );
     app.handle_event(AppEvent::Key(end_key));
     assert_eq!(app.log_scroll, 0);
+}
+
+#[test]
+fn test_channel_active_status_and_recording_ended() {
+    let mut app = App::new();
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "ch_123".to_string(),
+        name: "Streamer A".to_string(),
+        is_live: true,
+        is_active: false,
+        title: "Test Stream".to_string(),
+    });
+
+    assert!(!app.channels[0].is_active);
+
+    // Recording started sets is_active to true
+    app.handle_event(AppEvent::RecordingStarted {
+        channel_id: "ch_123".to_string(),
+        session_title: "Test Stream".to_string(),
+    });
+    assert!(app.channels[0].is_active);
+
+    // Recording ended resets is_active to false
+    app.handle_event(AppEvent::RecordingEnded {
+        channel_id: "ch_123".to_string(),
+    });
+    assert!(!app.channels[0].is_active);
+
+    // Starting again, then going offline resets is_active to false
+    app.handle_event(AppEvent::RecordingStarted {
+        channel_id: "ch_123".to_string(),
+        session_title: "Test Stream 2".to_string(),
+    });
+    assert!(app.channels[0].is_active);
+
+    app.handle_event(AppEvent::ChannelUpdate {
+        channel_id: "ch_123".to_string(),
+        channel_name: "Streamer A".to_string(),
+        is_live: false,
+        title: "Offline".to_string(),
+    });
+    assert!(!app.channels[0].is_active);
+}
+
+#[test]
+fn test_channel_synchronized_scrolling() {
+    let mut app = App::new();
+    for i in 0..12 {
+        app.channels.push(chzzk_load::tui::app::ChannelItem {
+            id: format!("ch_{}", i),
+            name: format!("Streamer {}", i),
+            is_live: true,
+            is_active: false,
+            title: format!("Title {}", i),
+        });
+    }
+
+    assert_eq!(app.selected_channel_idx, 0);
+    assert_eq!(app.channel_scroll, 0);
+
+    let down_key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+    // Scroll down 7 times: index reaches 7 (8th item), viewport height is 7
+    for _ in 0..7 {
+        app.handle_event(AppEvent::Key(down_key));
+    }
+    assert_eq!(app.selected_channel_idx, 7);
+    assert_eq!(app.channel_scroll, 1);
+
+    // Scroll down once more to index 8
+    app.handle_event(AppEvent::Key(down_key));
+    assert_eq!(app.selected_channel_idx, 8);
+    assert_eq!(app.channel_scroll, 2);
+
+    // Scroll back up to index 1
+    let up_key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+    for _ in 0..7 {
+        app.handle_event(AppEvent::Key(up_key));
+    }
+    assert_eq!(app.selected_channel_idx, 1);
+    assert_eq!(app.channel_scroll, 1);
+}
+
+#[test]
+fn test_draw_ui_row_alignment_and_active_status() {
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "c1".to_string(),
+        name: "StreamerActive".to_string(),
+        is_live: true,
+        is_active: true,
+        title: "Active Game".to_string(),
+    });
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "c2".to_string(),
+        name: "StreamerOffline".to_string(),
+        is_live: false,
+        is_active: false,
+        title: "Offline Title".to_string(),
+    });
+
+    app.handle_event(AppEvent::UploadProgress {
+        channel_id: "c1".to_string(),
+        chunk_name: "chunk_0001.ts".to_string(),
+        streamer_name: "StreamerActive".to_string(),
+        uploaded_bytes: 10_485_760,
+        total_bytes: 20_971_520,
+        speed_mb_s: 7.5,
+    });
+
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
+
+    // Verify ACTIVE tag appears in Monitored Channels
+    assert!(content.contains("[ ACTIVE ]"));
+    assert!(content.contains("StreamerActive"));
+
+    // Verify chunk and progress appear in Cloud Upload aligned with c1
+    assert!(content.contains("chunk_0001.ts"));
+    assert!(content.contains("50%"));
+    assert!(content.contains("7.5 MB/s"));
+
+    // Verify Stream Recorder panel was removed
+    assert!(!content.contains("Stream Recorder"));
 }

@@ -91,12 +91,15 @@ async fn test_all_app_event_variants_mpsc() {
             size_bytes: 1048576,
         },
         AppEvent::UploadProgress {
+            channel_id: "chan_123".to_string(),
             chunk_name: "chunk_0000.ts".to_string(),
+            streamer_name: "Streamer 1".to_string(),
             uploaded_bytes: 524288,
             total_bytes: 1048576,
             speed_mb_s: 10.5,
         },
         AppEvent::UploadCompleted {
+            channel_id: "chan_123".to_string(),
             chunk_name: "chunk_0000.ts".to_string(),
             reclaimed_bytes: 1048576,
         },
@@ -604,9 +607,11 @@ async fn test_engine_orchestrator_upload_consumer() {
     // Submit upload task
     upload_tx
         .send(UploadTask {
+            channel_id: "chan_test".to_string(),
             session_folder_id: "folder_abc".to_string(),
             chunk_path: chunk_path.clone(),
             chunk_name: "chunk_0000.ts".to_string(),
+            streamer_name: "Streamer 1".to_string(),
         })
         .await
         .unwrap();
@@ -630,6 +635,7 @@ async fn test_engine_orchestrator_upload_consumer() {
             AppEvent::UploadCompleted {
                 chunk_name,
                 reclaimed_bytes,
+                ..
             } => {
                 assert_eq!(chunk_name, "chunk_0000.ts");
                 assert_eq!(reclaimed_bytes, 1024 * 1024);
@@ -689,9 +695,11 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
     // Submit upload task
     upload_tx
         .send(UploadTask {
+            channel_id: "chan_fail".to_string(),
             session_folder_id: "folder_xyz".to_string(),
             chunk_path: chunk_path.clone(),
             chunk_name: "chunk_fail.ts".to_string(),
+            streamer_name: "StreamerFail".to_string(),
         })
         .await
         .unwrap();
@@ -733,6 +741,8 @@ async fn test_process_sealed_chunk_no_drive_saves_locally() {
         None,
         "ChzzkRecordings",
         "Streamer - Title",
+        "chan_local",
+        "Streamer",
         &upload_tx,
         &event_tx,
     )
@@ -820,6 +830,8 @@ async fn test_process_sealed_chunk_retry_drive_success() {
         Some(&drive),
         "ChzzkRecordings",
         "Subfolder",
+        "chan_sub",
+        "StreamerSub",
         &upload_tx,
         &event_tx,
     )
@@ -888,6 +900,8 @@ async fn test_process_sealed_chunk_retry_drive_failure() {
         Some(&drive),
         "ChzzkRecordings",
         "Subfolder",
+        "chan_fail_test",
+        "StreamerFail",
         &upload_tx,
         &event_tx,
     )
@@ -935,6 +949,8 @@ async fn test_process_sealed_chunk_existing_folder_id_skips_retry() {
         None,
         "ChzzkRecordings",
         "Subfolder",
+        "chan_exist",
+        "StreamerExist",
         &upload_tx,
         &event_tx,
     )
@@ -1178,18 +1194,22 @@ async fn test_engine_orchestrator_concurrent_uploads() {
 
     upload_tx
         .send(UploadTask {
+            channel_id: "chan_1".to_string(),
             session_folder_id: "folder_1".to_string(),
             chunk_path: chunk_path1.clone(),
             chunk_name: "chunk_chan1.ts".to_string(),
+            streamer_name: "Streamer 1".to_string(),
         })
         .await
         .unwrap();
 
     upload_tx
         .send(UploadTask {
+            channel_id: "chan_2".to_string(),
             session_folder_id: "folder_2".to_string(),
             chunk_path: chunk_path2.clone(),
             chunk_name: "chunk_chan2.ts".to_string(),
+            streamer_name: "Streamer 2".to_string(),
         })
         .await
         .unwrap();

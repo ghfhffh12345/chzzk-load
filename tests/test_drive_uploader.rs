@@ -380,9 +380,11 @@ async fn test_upload_worker_upload_and_delete_success() {
     });
 
     let task = UploadTask {
+        channel_id: "chan_test".to_string(),
         session_folder_id: "session_dir_123".to_string(),
         chunk_path: chunk_file.clone(),
         chunk_name: "chunk_0002.ts".to_string(),
+        streamer_name: "Streamer 1".to_string(),
     };
 
     assert!(chunk_file.exists());
@@ -428,9 +430,11 @@ async fn test_upload_worker_preserves_file_on_upload_failure() {
     });
 
     let task = UploadTask {
+        channel_id: "chan_test".to_string(),
         session_folder_id: "session_dir_123".to_string(),
         chunk_path: chunk_file.clone(),
         chunk_name: "chunk_failed.ts".to_string(),
+        streamer_name: "Streamer 1".to_string(),
     };
 
     assert!(chunk_file.exists());

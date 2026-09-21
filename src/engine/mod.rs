@@ -129,8 +129,12 @@ impl EngineOrchestrator {
                     let _permit = permit;
                     if let Some(ref drive) = drive {
                         let tx = event_tx.clone();
+                        let cid = task.channel_id.clone();
+                        let streamer = task.streamer_name.clone();
                         let name = task.chunk_name.clone();
                         let n = name.clone();
+                        let c = cid.clone();
+                        let s = streamer.clone();
                         let chunk_start_time = std::time::Instant::now();
 
                         let upload_res =
@@ -138,7 +142,9 @@ impl EngineOrchestrator {
                                 let mb_s = (uploaded as f64 / 1_048_576.0)
                                     / chunk_start_time.elapsed().as_secs_f64().max(0.1);
                                 let _ = tx.try_send(AppEvent::UploadProgress {
+                                    channel_id: c.clone(),
                                     chunk_name: n.clone(),
+                                    streamer_name: s.clone(),
                                     uploaded_bytes: uploaded,
                                     total_bytes: total,
                                     speed_mb_s: mb_s,
@@ -150,6 +156,7 @@ impl EngineOrchestrator {
                             Ok(reclaimed) => {
                                 let _ = event_tx
                                     .send(AppEvent::UploadCompleted {
+                                        channel_id: cid.clone(),
                                         chunk_name: name.clone(),
                                         reclaimed_bytes: reclaimed,
                                     })
@@ -163,6 +170,12 @@ impl EngineOrchestrator {
                                     .await;
                             }
                             Err(e) => {
+                                let _ = event_tx
+                                    .send(AppEvent::UploadFailed {
+                                        channel_id: cid.clone(),
+                                        chunk_name: name.clone(),
+                                    })
+                                    .await;
                                 let _ = event_tx
                                     .send(AppEvent::Log(format!(
                                         "[ERROR] Upload failed for {}: {}",
@@ -224,12 +237,15 @@ impl EngineOrchestrator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn process_sealed_chunk(
         chunk_path: &Path,
         session_folder_id: &mut Option<String>,
         drive_opt: Option<&DriveClient>,
         root_name: &str,
         drive_subfolder_name: &str,
+        channel_id: &str,
+        streamer_name: &str,
         upload_tx: &Sender<UploadTask>,
         event_tx: &Sender<AppEvent>,
     ) {
@@ -256,9 +272,11 @@ impl EngineOrchestrator {
             if let Some(folder_id) = session_folder_id.as_ref() {
                 let send_res = upload_tx
                     .send(UploadTask {
+                        channel_id: channel_id.to_string(),
                         session_folder_id: folder_id.clone(),
                         chunk_path: chunk_path.to_path_buf(),
                         chunk_name: chunk_name.to_string(),
+                        streamer_name: streamer_name.to_string(),
                     })
                     .await;
 
@@ -436,6 +454,8 @@ impl EngineOrchestrator {
                                 drive_opt.as_ref(),
                                 &root_name,
                                 &drive_subfolder_name,
+                                &channel_id,
+                                &info.streamer_name,
                                 &upload_tx,
                                 &event_tx,
                             )
@@ -475,6 +495,8 @@ impl EngineOrchestrator {
                                 drive_opt.as_ref(),
                                 &root_name,
                                 &drive_subfolder_name,
+                                &channel_id,
+                                &info.streamer_name,
                                 &upload_tx,
                                 &event_tx,
                             )
@@ -502,6 +524,11 @@ impl EngineOrchestrator {
                     },
                 );
             }
+            let _ = event_tx
+                .send(AppEvent::RecordingEnded {
+                    channel_id: channel_id.clone(),
+                })
+                .await;
             let _ = event_tx
                 .send(AppEvent::Log(format!(
                     "[REC] Recording session ended for channel {} (liveId: {:?})",

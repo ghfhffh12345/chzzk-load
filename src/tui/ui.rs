@@ -37,32 +37,68 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     f.render_widget(header, chunks[0]);
 
     // Body: Split horizontally
+    // Body: Split horizontally (40% Monitored Channels, 60% Cloud Upload)
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(chunks[1]);
 
-    // Channels List
-    let items: Vec<ListItem> = app
-        .channels
-        .iter()
-        .enumerate()
-        .map(|(idx, c)| {
-            let status = if c.is_live { "[ LIVE ]" } else { "[ OFFLINE ]" };
-            let color = if c.is_live {
-                Color::Green
-            } else {
-                Color::DarkGray
-            };
-            let mut style = Style::default().fg(color);
-            if idx == app.selected_channel_idx && !app.channels.is_empty() {
-                style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-            }
-            ListItem::new(format!("{} {} - {}", status, c.name, c.title)).style(style)
-        })
-        .collect();
+    let inner_height = (body_chunks[0].height.saturating_sub(2)) as usize;
+    let inner_width_left = (body_chunks[0].width.saturating_sub(2)) as usize;
+    let inner_width_right = (body_chunks[1].width.saturating_sub(2)) as usize;
 
-    let channels_list = List::new(items).block(
+    // Synchronized scroll offset & slice of visible channels
+    let total_channels = app.channels.len();
+    let max_scroll = total_channels.saturating_sub(inner_height);
+    let scroll = app.channel_scroll.min(max_scroll);
+    let visible_channels = if total_channels > 0 {
+        let end = (scroll + inner_height).min(total_channels);
+        &app.channels[scroll..end]
+    } else {
+        &[]
+    };
+
+    // 1. Left Panel: Monitored Channels
+    let channel_items: Vec<ListItem> = if visible_channels.is_empty() {
+        vec![ListItem::new("No monitored channels").style(Style::default().fg(Color::DarkGray))]
+    } else {
+        visible_channels
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let channel_idx = scroll + i;
+                let is_selected = channel_idx == app.selected_channel_idx;
+
+                let (status, color) = if c.is_active {
+                    ("[ ACTIVE ]", Color::Cyan)
+                } else if c.is_live {
+                    ("[ LIVE ]", Color::Green)
+                } else {
+                    ("[ OFFLINE ]", Color::DarkGray)
+                };
+
+                let text = format!("{} {} - {}", status, c.name, c.title);
+                let line_str = if text.chars().count() > inner_width_left && inner_width_left > 1 {
+                    let mut s: String = text
+                        .chars()
+                        .take(inner_width_left.saturating_sub(1))
+                        .collect();
+                    s.push('…');
+                    s
+                } else {
+                    text
+                };
+
+                let mut style = Style::default().fg(color);
+                if is_selected {
+                    style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+                }
+                ListItem::new(line_str).style(style)
+            })
+            .collect()
+    };
+
+    let channels_list = List::new(channel_items).block(
         Block::default()
             .borders(Borders::ALL)
             .title(" Monitored Channels ")
@@ -70,43 +106,100 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     );
     f.render_widget(channels_list, body_chunks[0]);
 
-    // Pipeline Panel: 4 rows for upload, 5 rows for recorder (sum = 9 rows of chunks[1])
-    let active_panel = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(5)])
-        .split(body_chunks[1]);
-
-    let upload_title = app
-        .active_upload_name
-        .as_deref()
-        .unwrap_or("Idle (Waiting for completed chunk)");
-    let upload_gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Cloud Upload: {} ", upload_title)),
+    // 2. Right Panel: Cloud Upload (1:1 aligned with Monitored Channels)
+    let total_speed: f64 = app.active_uploads.values().map(|u| u.speed_mb_s).sum();
+    let active_count = app.active_uploads.len();
+    let upload_title = if active_count > 0 {
+        format!(
+            " Cloud Upload (Total: {:.1} MB/s │ {} Active) ",
+            total_speed, active_count
         )
-        .gauge_style(Style::default().fg(Color::LightGreen))
-        .percent(app.upload_progress_pct)
-        .label(format!(
-            "{}% @ {:.1} MB/s",
-            app.upload_progress_pct, app.upload_speed
-        ));
-    f.render_widget(upload_gauge, active_panel[0]);
+    } else {
+        " Cloud Upload (Idle) ".to_string()
+    };
 
-    let stream_title = app
-        .active_stream
-        .as_deref()
-        .unwrap_or("Idle (Waiting for stream)");
-    let stream_info = Paragraph::new(format!(" Active Session: {}", stream_title))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Stream Recorder ")
-                .border_type(BorderType::Rounded),
-        )
-        .style(Style::default().fg(Color::Yellow));
-    f.render_widget(stream_info, active_panel[1]);
+    let upload_items: Vec<ListItem> = if visible_channels.is_empty() {
+        vec![
+            ListItem::new("Idle (Waiting for monitored channels)")
+                .style(Style::default().fg(Color::DarkGray)),
+        ]
+    } else {
+        visible_channels
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let channel_idx = scroll + i;
+                let is_selected = channel_idx == app.selected_channel_idx;
+
+                let (raw_text, color) = if let Some(u) = app.active_uploads.get(&c.id) {
+                    let pct = if u.total_bytes > 0 {
+                        ((u.uploaded_bytes as f64 / u.total_bytes as f64) * 100.0)
+                            .round()
+                            .min(100.0) as u16
+                    } else {
+                        0
+                    };
+                    let up_mb = u.uploaded_bytes as f64 / 1_048_576.0;
+                    let tot_mb = u.total_bytes as f64 / 1_048_576.0;
+
+                    let bar_width = 12;
+                    let filled = ((pct as usize * bar_width) / 100).min(bar_width);
+                    let bar_str =
+                        format!("[{}{}]", "█".repeat(filled), "░".repeat(bar_width - filled));
+
+                    let text = if inner_width_right >= 55 {
+                        format!(
+                            "{}: {} {}% ({:.1}/{:.1} MB) @ {:.1} MB/s",
+                            u.chunk_name, bar_str, pct, up_mb, tot_mb, u.speed_mb_s
+                        )
+                    } else if inner_width_right >= 38 {
+                        format!(
+                            "{}: {} {}% @ {:.1} MB/s",
+                            u.chunk_name, bar_str, pct, u.speed_mb_s
+                        )
+                    } else {
+                        format!("{}: {}% @ {:.1} MB/s", u.chunk_name, pct, u.speed_mb_s)
+                    };
+                    (text, Color::LightGreen)
+                } else if c.is_active {
+                    (
+                        "[Recording] Waiting for sealed chunk...".to_string(),
+                        Color::Cyan,
+                    )
+                } else if c.is_live {
+                    ("[Idle] Waiting for stream...".to_string(), Color::Green)
+                } else {
+                    ("-".to_string(), Color::DarkGray)
+                };
+
+                let line_str =
+                    if raw_text.chars().count() > inner_width_right && inner_width_right > 1 {
+                        let mut s: String = raw_text
+                            .chars()
+                            .take(inner_width_right.saturating_sub(1))
+                            .collect();
+                        s.push('…');
+                        s
+                    } else {
+                        raw_text
+                    };
+
+                let mut style = Style::default().fg(color);
+                if is_selected {
+                    style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+                }
+                ListItem::new(line_str).style(style)
+            })
+            .collect()
+    };
+
+    let upload_list = List::new(upload_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(upload_title)
+            .border_type(BorderType::Rounded),
+    );
+    f.render_widget(upload_list, body_chunks[1]);
 
     // Logs Panel: strictly bounded, horizontally clipped, and auto-scrolled to tail
     let log_area = chunks[2];
