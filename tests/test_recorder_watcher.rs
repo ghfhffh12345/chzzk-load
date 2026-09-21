@@ -1,9 +1,9 @@
+use chzzk_load::recorder::ffmpeg::{build_ffmpeg_command, sanitize_filename};
+use chzzk_load::recorder::watcher::{SegmentWatcher, detect_sealed_chunks};
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use chzzk_load::recorder::ffmpeg::{build_ffmpeg_command, sanitize_filename};
-use chzzk_load::recorder::watcher::{detect_sealed_chunks, SegmentWatcher};
 
 #[test]
 fn test_n_plus_one_detection_logic() {
@@ -47,7 +47,8 @@ fn test_n_plus_one_detection_logic() {
 
 #[test]
 fn test_case_insensitive_extension() {
-    let temp_dir = std::env::temp_dir().join(format!("test_watcher_case_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_watcher_case_{}", rand::random::<u32>()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let mut enqueued = HashSet::new();
@@ -69,7 +70,8 @@ fn test_case_insensitive_extension() {
 
 #[test]
 fn test_segment_watcher_struct() {
-    let temp_dir = std::env::temp_dir().join(format!("test_watcher_struct_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_watcher_struct_{}", rand::random::<u32>()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let mut watcher = SegmentWatcher::new(&temp_dir);
@@ -99,7 +101,10 @@ fn test_segment_watcher_struct() {
 fn test_sanitize_filename() {
     let raw = "Streamer's: Live? <Game> \"Cool\" | 100% *good* / bad \\ test";
     let sanitized = sanitize_filename(raw);
-    assert_eq!(sanitized, "Streamer's_ Live_ _Game_ _Cool_ _ 100% _good_ _ bad _ test");
+    assert_eq!(
+        sanitized,
+        "Streamer's_ Live_ _Game_ _Cool_ _ 100% _good_ _ bad _ test"
+    );
 }
 
 #[test]
@@ -112,7 +117,10 @@ fn test_build_ffmpeg_command() {
         Some("NID_AUT=abc; NID_SES=xyz"),
     );
     let std_cmd = cmd.as_std();
-    let args: Vec<String> = std_cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+    let args: Vec<String> = std_cmd
+        .get_args()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
 
     assert!(args.contains(&"-i".to_string()));
     assert!(args.contains(&"https://example.com/live.m3u8".to_string()));
@@ -121,6 +129,9 @@ fn test_build_ffmpeg_command() {
     assert!(args.contains(&"-segment_format".to_string()));
     assert!(args.contains(&"mpegts".to_string()));
 
-    let headers_idx = args.iter().position(|a| a == "-headers").expect("missing -headers");
+    let headers_idx = args
+        .iter()
+        .position(|a| a == "-headers")
+        .expect("missing -headers");
     assert!(args[headers_idx + 1].contains("Cookie: NID_AUT=abc; NID_SES=xyz"));
 }

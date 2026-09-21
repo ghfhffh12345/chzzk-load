@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Response, Server, StatusCode};
 
 use chzzk_load::drive::auth::{DriveAuth, StoredToken};
-use chzzk_load::drive::client::{build_resumable_init_body, DriveClient};
+use chzzk_load::drive::client::{DriveClient, build_resumable_init_body};
 use chzzk_load::uploader::{UploadTask, UploadWorker};
 
 async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
@@ -34,7 +34,11 @@ async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
         refresh_token: Some("mock_refresh_xyz".to_string()),
         expires_at_epoch_sec: future_expiry,
     };
-    fs::write(&token_path, serde_json::to_string_pretty(&token_data).unwrap()).unwrap();
+    fs::write(
+        &token_path,
+        serde_json::to_string_pretty(&token_data).unwrap(),
+    )
+    .unwrap();
 
     let auth = DriveAuth::load_or_authorize(&cred_path, &token_path)
         .await
@@ -61,7 +65,8 @@ fn test_resumable_metadata_payload_no_parent() {
 
 #[tokio::test]
 async fn test_get_or_create_folder_existing() {
-    let temp_dir = std::env::temp_dir().join(format!("test_drive_client_exist_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_client_exist_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -78,22 +83,34 @@ async fn test_get_or_create_folder_existing() {
             assert_eq!(request.method().as_str(), "GET");
             assert!(request.url().contains("/drive/v3/files"));
 
-            let auth_hdr = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("authorization"));
+            let auth_hdr = request.headers().iter().find(|h| {
+                h.field
+                    .as_str()
+                    .as_str()
+                    .eq_ignore_ascii_case("authorization")
+            });
             assert!(auth_hdr.is_some());
-            assert_eq!(auth_hdr.unwrap().value.as_str(), "Bearer mock_test_token_xyz");
+            assert_eq!(
+                auth_hdr.unwrap().value.as_str(),
+                "Bearer mock_test_token_xyz"
+            );
 
             let mock_response = serde_json::json!({
                 "files": [
                     { "id": "existing_folder_id_111", "name": "chzzk_records" }
                 ]
             });
-            let response = Response::from_string(mock_response.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_response.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
 
-    let folder_id = client.get_or_create_folder("chzzk_records", Some("parent_root")).await.unwrap();
+    let folder_id = client
+        .get_or_create_folder("chzzk_records", Some("parent_root"))
+        .await
+        .unwrap();
     assert_eq!(folder_id, "existing_folder_id_111");
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -101,7 +118,10 @@ async fn test_get_or_create_folder_existing() {
 
 #[tokio::test]
 async fn test_get_or_create_folder_with_quotes() {
-    let temp_dir = std::env::temp_dir().join(format!("test_drive_client_quotes_{}", rand::random::<u32>()));
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_drive_client_quotes_{}",
+        rand::random::<u32>()
+    ));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -118,7 +138,10 @@ async fn test_get_or_create_folder_with_quotes() {
             assert_eq!(request.method().as_str(), "GET");
             let req_url = format!("http://dummy{}", request.url());
             let parsed_url = url::Url::parse(&req_url).unwrap();
-            let q_param = parsed_url.query_pairs().find(|(k, _)| k == "q").map(|(_, v)| v.into_owned());
+            let q_param = parsed_url
+                .query_pairs()
+                .find(|(k, _)| k == "q")
+                .map(|(_, v)| v.into_owned());
             assert!(q_param.is_some(), "Missing q query parameter");
             let q = q_param.unwrap();
             assert!(
@@ -132,13 +155,17 @@ async fn test_get_or_create_folder_with_quotes() {
                     { "id": "quote_folder_id_456", "name": "Streamer's Stream" }
                 ]
             });
-            let response = Response::from_string(mock_response.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_response.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
 
-    let folder_id = client.get_or_create_folder("Streamer's Stream", Some("parent_root")).await.unwrap();
+    let folder_id = client
+        .get_or_create_folder("Streamer's Stream", Some("parent_root"))
+        .await
+        .unwrap();
     assert_eq!(folder_id, "quote_folder_id_456");
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -146,7 +173,10 @@ async fn test_get_or_create_folder_with_quotes() {
 
 #[tokio::test]
 async fn test_get_or_create_folder_creates_new() {
-    let temp_dir = std::env::temp_dir().join(format!("test_drive_client_create_{}", rand::random::<u32>()));
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_drive_client_create_{}",
+        rand::random::<u32>()
+    ));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -163,8 +193,9 @@ async fn test_get_or_create_folder_creates_new() {
         if let Ok(request) = server.recv() {
             assert_eq!(request.method().as_str(), "GET");
             let mock_response = serde_json::json!({ "files": [] });
-            let response = Response::from_string(mock_response.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_response.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
 
@@ -182,13 +213,17 @@ async fn test_get_or_create_folder_creates_new() {
                 "id": "new_created_folder_222",
                 "name": "new_stream_folder"
             });
-            let response = Response::from_string(mock_response.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_response.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
 
-    let folder_id = client.get_or_create_folder("new_stream_folder", Some("parent_root_99")).await.unwrap();
+    let folder_id = client
+        .get_or_create_folder("new_stream_folder", Some("parent_root_99"))
+        .await
+        .unwrap();
     assert_eq!(folder_id, "new_created_folder_222");
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -196,7 +231,8 @@ async fn test_get_or_create_folder_creates_new() {
 
 #[tokio::test]
 async fn test_upload_file_resumable_success() {
-    let temp_dir = std::env::temp_dir().join(format!("test_drive_upload_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_upload_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let chunk_file = temp_dir.join("chunk_0000.ts");
@@ -219,10 +255,20 @@ async fn test_upload_file_resumable_success() {
             assert_eq!(request.method().as_str(), "POST");
             assert!(request.url().contains("uploadType=resumable"));
 
-            let x_type = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("x-upload-content-type"));
+            let x_type = request.headers().iter().find(|h| {
+                h.field
+                    .as_str()
+                    .as_str()
+                    .eq_ignore_ascii_case("x-upload-content-type")
+            });
             assert_eq!(x_type.unwrap().value.as_str(), "video/mp2t");
 
-            let x_len = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("x-upload-content-length"));
+            let x_len = request.headers().iter().find(|h| {
+                h.field
+                    .as_str()
+                    .as_str()
+                    .eq_ignore_ascii_case("x-upload-content-length")
+            });
             assert_eq!(x_len.unwrap().value.as_str(), file_len.to_string());
 
             let mut body = String::new();
@@ -242,19 +288,28 @@ async fn test_upload_file_resumable_success() {
             assert_eq!(request.method().as_str(), "PUT");
             assert_eq!(request.url(), "/resumable_upload_target_session");
 
-            let c_type = request.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("content-type"));
+            let c_type = request.headers().iter().find(|h| {
+                h.field
+                    .as_str()
+                    .as_str()
+                    .eq_ignore_ascii_case("content-type")
+            });
             assert_eq!(c_type.unwrap().value.as_str(), "video/mp2t");
 
             let mut received_bytes = Vec::new();
-            request.as_reader().read_to_end(&mut received_bytes).unwrap();
+            request
+                .as_reader()
+                .read_to_end(&mut received_bytes)
+                .unwrap();
             assert_eq!(received_bytes, test_data);
 
             let mock_response = serde_json::json!({
                 "id": "uploaded_file_id_999",
                 "name": "chunk_0000.ts"
             });
-            let response = Response::from_string(mock_response.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_response.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
@@ -264,14 +319,13 @@ async fn test_upload_file_resumable_success() {
     let p_up = Arc::clone(&progress_uploaded);
     let p_tot = Arc::clone(&progress_total);
 
-    let file_id = client.upload_file_resumable(
-        &chunk_file,
-        "folder_target_55",
-        move |up, tot| {
+    let file_id = client
+        .upload_file_resumable(&chunk_file, "folder_target_55", move |up, tot| {
             p_up.store(up, Ordering::SeqCst);
             p_tot.store(tot, Ordering::SeqCst);
-        },
-    ).await.unwrap();
+        })
+        .await
+        .unwrap();
 
     assert_eq!(file_id, "uploaded_file_id_999");
     assert_eq!(progress_uploaded.load(Ordering::SeqCst), file_len);
@@ -284,7 +338,8 @@ async fn test_upload_file_resumable_success() {
 
 #[tokio::test]
 async fn test_upload_worker_upload_and_delete_success() {
-    let temp_dir = std::env::temp_dir().join(format!("test_uploader_delete_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_uploader_delete_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let chunk_file = temp_dir.join("chunk_0002.ts");
@@ -317,8 +372,9 @@ async fn test_upload_worker_upload_and_delete_success() {
                 "id": "file_deleted_from_local_333",
                 "name": "chunk_0002.ts"
             });
-            let response = Response::from_string(mock_response.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_response.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
@@ -330,17 +386,23 @@ async fn test_upload_worker_upload_and_delete_success() {
     };
 
     assert!(chunk_file.exists());
-    let deleted_size = UploadWorker::upload_and_delete(&client, task, |_, _| {}).await.unwrap();
+    let deleted_size = UploadWorker::upload_and_delete(&client, task, |_, _| {})
+        .await
+        .unwrap();
     assert_eq!(deleted_size, file_len);
     // Crucial requirement: chunk file must be deleted upon confirmed upload!
-    assert!(!chunk_file.exists(), "Chunk file must be deleted after confirmed upload");
+    assert!(
+        !chunk_file.exists(),
+        "Chunk file must be deleted after confirmed upload"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[tokio::test]
 async fn test_upload_worker_preserves_file_on_upload_failure() {
-    let temp_dir = std::env::temp_dir().join(format!("test_uploader_fail_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_uploader_fail_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let chunk_file = temp_dir.join("chunk_failed.ts");
@@ -359,8 +421,8 @@ async fn test_upload_worker_preserves_file_on_upload_failure() {
     std::thread::spawn(move || {
         // Return 500 error on init
         if let Ok(request) = server.recv() {
-            let response = Response::from_string("Internal Server Error")
-                .with_status_code(StatusCode(500));
+            let response =
+                Response::from_string("Internal Server Error").with_status_code(StatusCode(500));
             let _ = request.respond(response);
         }
     });
@@ -373,9 +435,15 @@ async fn test_upload_worker_preserves_file_on_upload_failure() {
 
     assert!(chunk_file.exists());
     let result = UploadWorker::upload_and_delete(&client, task, |_, _| {}).await;
-    assert!(result.is_err(), "upload_and_delete must fail when Drive returns 500");
+    assert!(
+        result.is_err(),
+        "upload_and_delete must fail when Drive returns 500"
+    );
     // Crucial requirement: Chunk file must NOT be deleted if upload fails!
-    assert!(chunk_file.exists(), "Chunk file must NOT be deleted if upload failed");
+    assert!(
+        chunk_file.exists(),
+        "Chunk file must NOT be deleted if upload failed"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

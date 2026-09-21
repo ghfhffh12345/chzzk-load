@@ -28,19 +28,26 @@ pub fn build_ffmpeg_command(
         .arg("warning")
         .arg("-y");
 
-    let mut headers = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n".to_string();
+    let mut headers =
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n".to_string();
     if let Some(cookie) = cookie_header {
         headers.push_str(&format!("Cookie: {}\r\n", cookie));
     }
     cmd.arg("-headers").arg(headers);
     cmd.arg("-extension_picky").arg("0");
 
-    cmd.arg("-i").arg(m3u8_url)
-        .arg("-c").arg("copy")
-        .arg("-f").arg("segment")
-        .arg("-segment_time").arg(chunk_duration_seconds.to_string())
-        .arg("-segment_format").arg("mpegts")
-        .arg("-reset_timestamps").arg("1")
+    cmd.arg("-i")
+        .arg(m3u8_url)
+        .arg("-c")
+        .arg("copy")
+        .arg("-f")
+        .arg("segment")
+        .arg("-segment_time")
+        .arg(chunk_duration_seconds.to_string())
+        .arg("-segment_format")
+        .arg("mpegts")
+        .arg("-reset_timestamps")
+        .arg("1")
         .arg(output_pattern);
 
     cmd
@@ -76,7 +83,10 @@ mod tests {
         let path = Path::new("recordings/test/%04d.ts");
         let cmd = build_ffmpeg_command("http://example.com/live.m3u8", path, 10, None);
         let std_cmd = cmd.as_std();
-        let args: Vec<String> = std_cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
 
         assert_eq!(args[0], "-hide_banner");
         assert_eq!(args[1], "-loglevel");

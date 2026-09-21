@@ -1,9 +1,9 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tiny_http::{Header, Response, Server, StatusCode};
 use tokio::sync::mpsc;
 
@@ -40,7 +40,11 @@ async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
         refresh_token: Some("mock_refresh_xyz".to_string()),
         expires_at_epoch_sec: future_expiry,
     };
-    fs::write(&token_path, serde_json::to_string_pretty(&token_data).unwrap()).unwrap();
+    fs::write(
+        &token_path,
+        serde_json::to_string_pretty(&token_data).unwrap(),
+    )
+    .unwrap();
 
     let auth = DriveAuth::load_or_authorize(&cred_path, &token_path)
         .await
@@ -52,7 +56,9 @@ async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
 #[tokio::test]
 async fn test_app_event_mpsc_channel() {
     let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
-    tx.send(AppEvent::Log("Test log".to_string())).await.unwrap();
+    tx.send(AppEvent::Log("Test log".to_string()))
+        .await
+        .unwrap();
 
     let received = rx.recv().await.unwrap();
     match received {
@@ -139,8 +145,9 @@ async fn test_engine_orchestrator_poll_channel_offline() {
                     "livePlaybackJson": null
                 }
             }"#;
-            let response = Response::from_string(mock_body)
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
@@ -153,8 +160,8 @@ async fn test_engine_orchestrator_poll_channel_offline() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(10);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -164,7 +171,12 @@ async fn test_engine_orchestrator_poll_channel_offline() {
 
     let event = event_rx.recv().await.unwrap();
     match event {
-        AppEvent::ChannelUpdate { channel_id, channel_name, is_live, title } => {
+        AppEvent::ChannelUpdate {
+            channel_id,
+            channel_name,
+            is_live,
+            title,
+        } => {
             assert_eq!(channel_id, "chan_offline");
             assert_eq!(channel_name, "OfflineStreamer");
             assert!(!is_live);
@@ -181,8 +193,8 @@ async fn test_engine_orchestrator_poll_channel_error() {
 
     std::thread::spawn(move || {
         if let Ok(request) = server.recv() {
-            let response = Response::from_string("internal error")
-                .with_status_code(StatusCode(500));
+            let response =
+                Response::from_string("internal error").with_status_code(StatusCode(500));
             let _ = request.respond(response);
         }
     });
@@ -195,8 +207,8 @@ async fn test_engine_orchestrator_poll_channel_error() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(10);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -234,8 +246,9 @@ async fn test_engine_orchestrator_poll_channel_live() {
                     "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
                 }
             }"#;
-            let response = Response::from_string(mock_body)
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
 
@@ -254,8 +267,9 @@ async fn test_engine_orchestrator_poll_channel_live() {
                     "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
                 }
             }"#;
-            let response = Response::from_string(mock_body)
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
@@ -275,8 +289,8 @@ async fn test_engine_orchestrator_poll_channel_live() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -289,7 +303,12 @@ async fn test_engine_orchestrator_poll_channel_live() {
     // ChannelUpdate event received
     let event = event_rx.recv().await.unwrap();
     match event {
-        AppEvent::ChannelUpdate { channel_id, channel_name, is_live, title } => {
+        AppEvent::ChannelUpdate {
+            channel_id,
+            channel_name,
+            is_live,
+            title,
+        } => {
             assert_eq!(channel_id, "chan_live");
             assert_eq!(channel_name, "LiveStreamer");
             assert!(is_live);
@@ -301,7 +320,10 @@ async fn test_engine_orchestrator_poll_channel_live() {
     // RecordingStarted event received from the spawned session
     let event_rec = event_rx.recv().await.unwrap();
     match event_rec {
-        AppEvent::RecordingStarted { channel_id, session_title } => {
+        AppEvent::RecordingStarted {
+            channel_id,
+            session_title,
+        } => {
             assert_eq!(channel_id, "chan_live");
             assert_eq!(session_title, "Playing Games");
         }
@@ -318,15 +340,25 @@ async fn test_engine_orchestrator_poll_channel_live() {
     // Poll 2: already recording, should emit ChannelUpdate but NOT spawn duplicate
     orchestrator.poll_channels_once(&upload_tx).await;
     let mut got_second_channel_update = false;
-    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv()).await {
-        if let AppEvent::ChannelUpdate { channel_id, is_live, .. } = ev {
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv()).await
+    {
+        if let AppEvent::ChannelUpdate {
+            channel_id,
+            is_live,
+            ..
+        } = ev
+        {
             assert_eq!(channel_id, "chan_live");
             assert!(is_live);
             got_second_channel_update = true;
             break;
         }
     }
-    assert!(got_second_channel_update, "Expected second ChannelUpdate event");
+    assert!(
+        got_second_channel_update,
+        "Expected second ChannelUpdate event"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -344,7 +376,8 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
             let count = req_count_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mock_body = match count {
                 // Poll 1: Channel is live with liveId 21212268
-                0 => r#"{
+                0 => {
+                    r#"{
                     "code": 200,
                     "message": null,
                     "content": {
@@ -354,9 +387,11 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
                         "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
                         "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
                     }
-                }"#,
+                }"#
+                }
                 // Poll 2: Stream ended, but CDN/cache still reports OPEN with same liveId 21212268!
-                1 => r#"{
+                1 => {
+                    r#"{
                     "code": 200,
                     "message": null,
                     "content": {
@@ -366,9 +401,11 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
                         "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
                         "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
                     }
-                }"#,
+                }"#
+                }
                 // Poll 3: CDN cache finally clears to CLOSE
-                2 => r#"{
+                2 => {
+                    r#"{
                     "code": 200,
                     "message": null,
                     "content": {
@@ -378,9 +415,11 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
                         "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
                         "livePlaybackJson": null
                     }
-                }"#,
+                }"#
+                }
                 // Poll 4: Genuinely new stream starts with new liveId 21212269
-                _ => r#"{
+                _ => {
+                    r#"{
                     "code": 200,
                     "message": null,
                     "content": {
@@ -390,10 +429,12 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
                         "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
                         "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
                     }
-                }"#,
+                }"#
+                }
             };
-            let response = Response::from_string(mock_body)
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
@@ -414,8 +455,8 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -427,7 +468,9 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
 
     // Collect ChannelUpdate and RecordingStarted for session 1
     let mut recording_started_count = 0;
-    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await {
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await
+    {
         if let AppEvent::RecordingStarted { channel_id, .. } = ev {
             assert_eq!(channel_id, "chan_race");
             recording_started_count += 1;
@@ -441,45 +484,64 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
         let active = orchestrator.active_recordings();
         active.lock().await.remove("chan_race");
         // Also register finished session directly if helper or method exists
-        orchestrator.register_finished_session("chan_race", Some(21212268)).await;
+        orchestrator
+            .register_finished_session("chan_race", Some(21212268))
+            .await;
     }
 
     // --- Poll 2: API still returns OPEN with liveId 21212268 (stale CDN cache) ---
     orchestrator.poll_channels_once(&upload_tx).await;
 
     // Verify NO second recording session was started!
-    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await {
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await
+    {
         if let AppEvent::RecordingStarted { .. } = ev {
-            panic!("BUG: A duplicate recording session was spawned for the same liveId / during cooldown!");
+            panic!(
+                "BUG: A duplicate recording session was spawned for the same liveId / during cooldown!"
+            );
         }
     }
     {
         let active = orchestrator.active_recordings();
-        assert!(!active.lock().await.contains("chan_race"), "Channel must not be in active_recordings");
+        assert!(
+            !active.lock().await.contains("chan_race"),
+            "Channel must not be in active_recordings"
+        );
     }
 
     // --- Poll 3: API transitions to CLOSE (channel offline) ---
     orchestrator.poll_channels_once(&upload_tx).await;
     let mut offline_detected = false;
-    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await {
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await
+    {
         if let AppEvent::ChannelUpdate { is_live, .. } = ev
             && !is_live
         {
             offline_detected = true;
         }
     }
-    assert!(offline_detected, "Channel should be marked offline upon CLOSE");
+    assert!(
+        offline_detected,
+        "Channel should be marked offline upon CLOSE"
+    );
 
     // --- Poll 4: Genuinely new stream starts with new liveId 21212269 ---
     orchestrator.poll_channels_once(&upload_tx).await;
     let mut session_2_started = false;
-    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await {
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await
+    {
         if let AppEvent::RecordingStarted { session_title, .. } = ev {
             assert_eq!(session_title, "Stream B (New)");
             session_2_started = true;
         }
     }
-    assert!(session_2_started, "Session 2 should start for new liveId 21212269");
+    assert!(
+        session_2_started,
+        "Session 2 should start for new liveId 21212269"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -505,8 +567,9 @@ async fn test_engine_orchestrator_upload_consumer() {
         // 1. Init resumable upload request
         if let Ok(req) = server.recv() {
             assert_eq!(req.method().as_str(), "POST");
-            let response = Response::from_string("")
-                .with_header(Header::from_bytes(&b"Location"[..], session_url_clone.as_bytes()).unwrap());
+            let response = Response::from_string("").with_header(
+                Header::from_bytes(&b"Location"[..], session_url_clone.as_bytes()).unwrap(),
+            );
             let _ = req.respond(response);
         }
 
@@ -517,8 +580,9 @@ async fn test_engine_orchestrator_upload_consumer() {
                 "id": "file_uploaded_test_123",
                 "name": "chunk_0000.ts"
             });
-            let response = Response::from_string(response_body.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(response_body.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = req.respond(response);
         }
     });
@@ -526,11 +590,8 @@ async fn test_engine_orchestrator_upload_consumer() {
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let _consumer_handle = EngineOrchestrator::spawn_upload_consumer(
-        Some(client),
-        event_tx,
-        upload_rx,
-    );
+    let _consumer_handle =
+        EngineOrchestrator::spawn_upload_consumer(Some(client), event_tx, upload_rx);
 
     // Create a local chunk file
     let chunk_path = temp_dir.join("chunk_0000.ts");
@@ -541,11 +602,14 @@ async fn test_engine_orchestrator_upload_consumer() {
     assert!(chunk_path.exists());
 
     // Submit upload task
-    upload_tx.send(UploadTask {
-        session_folder_id: "folder_abc".to_string(),
-        chunk_path: chunk_path.clone(),
-        chunk_name: "chunk_0000.ts".to_string(),
-    }).await.unwrap();
+    upload_tx
+        .send(UploadTask {
+            session_folder_id: "folder_abc".to_string(),
+            chunk_path: chunk_path.clone(),
+            chunk_name: "chunk_0000.ts".to_string(),
+        })
+        .await
+        .unwrap();
 
     // Consume events until UploadCompleted
     let mut got_completed = false;
@@ -553,19 +617,25 @@ async fn test_engine_orchestrator_upload_consumer() {
 
     while let Some(ev) = event_rx.recv().await {
         match ev {
-            AppEvent::UploadProgress { chunk_name, uploaded_bytes, total_bytes, .. } => {
+            AppEvent::UploadProgress {
+                chunk_name,
+                uploaded_bytes,
+                total_bytes,
+                ..
+            } => {
                 assert_eq!(chunk_name, "chunk_0000.ts");
                 assert_eq!(total_bytes, 1024 * 1024);
                 assert!(uploaded_bytes > 0);
             }
-            AppEvent::UploadCompleted { chunk_name, reclaimed_bytes } => {
+            AppEvent::UploadCompleted {
+                chunk_name,
+                reclaimed_bytes,
+            } => {
                 assert_eq!(chunk_name, "chunk_0000.ts");
                 assert_eq!(reclaimed_bytes, 1024 * 1024);
                 got_completed = true;
             }
-            AppEvent::Log(msg)
-                if msg.contains("[CLEAN] Uploaded & deleted chunk_0000.ts") =>
-            {
+            AppEvent::Log(msg) if msg.contains("[CLEAN] Uploaded & deleted chunk_0000.ts") => {
                 got_clean_log = true;
                 break;
             }
@@ -605,11 +675,8 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let _consumer_handle = EngineOrchestrator::spawn_upload_consumer(
-        Some(client),
-        event_tx,
-        upload_rx,
-    );
+    let _consumer_handle =
+        EngineOrchestrator::spawn_upload_consumer(Some(client), event_tx, upload_rx);
 
     // Create a local chunk file
     let chunk_path = temp_dir.join("chunk_fail.ts");
@@ -620,11 +687,14 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
     assert!(chunk_path.exists());
 
     // Submit upload task
-    upload_tx.send(UploadTask {
-        session_folder_id: "folder_xyz".to_string(),
-        chunk_path: chunk_path.clone(),
-        chunk_name: "chunk_fail.ts".to_string(),
-    }).await.unwrap();
+    upload_tx
+        .send(UploadTask {
+            session_folder_id: "folder_xyz".to_string(),
+            chunk_path: chunk_path.clone(),
+            chunk_name: "chunk_fail.ts".to_string(),
+        })
+        .await
+        .unwrap();
 
     // Expect an error log event
     let mut got_error_log = false;
@@ -646,7 +716,8 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
 
 #[tokio::test]
 async fn test_process_sealed_chunk_no_drive_saves_locally() {
-    let temp_dir = std::env::temp_dir().join(format!("test_chunk_no_drive_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_chunk_no_drive_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let chunk_path = temp_dir.join("chunk_0000.ts");
@@ -675,14 +746,15 @@ async fn test_process_sealed_chunk_no_drive_saves_locally() {
 
     while let Ok(ev) = event_rx.try_recv() {
         match ev {
-            AppEvent::ChunkSealed { chunk_name, size_bytes } => {
+            AppEvent::ChunkSealed {
+                chunk_name,
+                size_bytes,
+            } => {
                 assert_eq!(chunk_name, "chunk_0000.ts");
                 assert_eq!(size_bytes, 17);
                 got_chunk_sealed = true;
             }
-            AppEvent::Log(msg)
-                if msg == "[REC] chunk_0000.ts sealed (saved locally)." =>
-            {
+            AppEvent::Log(msg) if msg == "[REC] chunk_0000.ts sealed (saved locally)." => {
                 got_saved_locally_log = true;
             }
             _ => {}
@@ -697,7 +769,8 @@ async fn test_process_sealed_chunk_no_drive_saves_locally() {
 
 #[tokio::test]
 async fn test_process_sealed_chunk_retry_drive_success() {
-    let temp_dir = std::env::temp_dir().join(format!("test_chunk_retry_ok_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_chunk_retry_ok_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -710,8 +783,9 @@ async fn test_process_sealed_chunk_retry_drive_success() {
             let body = serde_json::json!({
                 "files": [{"id": "root_123", "name": "ChzzkRecordings"}]
             });
-            let response = Response::from_string(body.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(body.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = req.respond(response);
         }
 
@@ -720,8 +794,9 @@ async fn test_process_sealed_chunk_retry_drive_success() {
             let body = serde_json::json!({
                 "files": [{"id": "sub_456", "name": "Subfolder"}]
             });
-            let response = Response::from_string(body.to_string())
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(body.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = req.respond(response);
         }
     });
@@ -779,7 +854,8 @@ async fn test_process_sealed_chunk_retry_drive_success() {
 
 #[tokio::test]
 async fn test_process_sealed_chunk_retry_drive_failure() {
-    let temp_dir = std::env::temp_dir().join(format!("test_chunk_retry_fail_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_chunk_retry_fail_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -787,7 +863,8 @@ async fn test_process_sealed_chunk_retry_drive_failure() {
 
     std::thread::spawn(move || {
         if let Ok(req) = server.recv() {
-            let response = Response::from_string("internal error").with_status_code(StatusCode(500));
+            let response =
+                Response::from_string("internal error").with_status_code(StatusCode(500));
             let _ = req.respond(response);
         }
     });
@@ -841,7 +918,8 @@ async fn test_process_sealed_chunk_retry_drive_failure() {
 
 #[tokio::test]
 async fn test_process_sealed_chunk_existing_folder_id_skips_retry() {
-    let temp_dir = std::env::temp_dir().join(format!("test_chunk_existing_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_chunk_existing_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let chunk_path = temp_dir.join("chunk_0003.ts");
@@ -862,7 +940,10 @@ async fn test_process_sealed_chunk_existing_folder_id_skips_retry() {
     )
     .await;
 
-    assert_eq!(session_folder_id, Some("already_ready_folder_999".to_string()));
+    assert_eq!(
+        session_folder_id,
+        Some("already_ready_folder_999".to_string())
+    );
 
     let task = upload_rx.recv().await.expect("Expected UploadTask");
     assert_eq!(task.session_folder_id, "already_ready_folder_999");
@@ -952,8 +1033,9 @@ async fn test_engine_orchestrator_manual_refresh() {
                     "livePlaybackJson": null
                 }
             }"#;
-            let response = Response::from_string(mock_body)
-                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
@@ -969,8 +1051,8 @@ async fn test_engine_orchestrator_manual_refresh() {
         }],
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -1004,5 +1086,3 @@ async fn test_engine_orchestrator_manual_refresh() {
     cancel_token.cancel();
     let _ = run_handle.await;
 }
-
-

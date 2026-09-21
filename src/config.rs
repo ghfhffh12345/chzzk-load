@@ -1,7 +1,7 @@
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
-use anyhow::Context;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GeneralConfig {
@@ -17,11 +17,21 @@ pub struct GeneralConfig {
     pub min_free_disk_gb: f64,
 }
 
-fn default_chunk_duration() -> u64 { 600 }
-fn default_poll_interval() -> u64 { 20 }
-fn default_stream_cooldown() -> u64 { 60 }
-fn default_recordings_dir() -> String { "recordings".to_string() }
-fn default_min_free_disk_gb() -> f64 { 2.0 }
+fn default_chunk_duration() -> u64 {
+    600
+}
+fn default_poll_interval() -> u64 {
+    20
+}
+fn default_stream_cooldown() -> u64 {
+    60
+}
+fn default_recordings_dir() -> String {
+    "recordings".to_string()
+}
+fn default_min_free_disk_gb() -> f64 {
+    2.0
+}
 
 impl Default for GeneralConfig {
     fn default() -> Self {
@@ -45,9 +55,15 @@ pub struct GoogleDriveConfig {
     pub root_folder_name: String,
 }
 
-fn default_credentials_path() -> String { "credentials.json".to_string() }
-fn default_token_path() -> String { "token.json".to_string() }
-fn default_root_folder() -> String { "Chzzk_Recordings".to_string() }
+fn default_credentials_path() -> String {
+    "credentials.json".to_string()
+}
+fn default_token_path() -> String {
+    "token.json".to_string()
+}
+fn default_root_folder() -> String {
+    "Chzzk_Recordings".to_string()
+}
 
 impl Default for GoogleDriveConfig {
     fn default() -> Self {
@@ -114,12 +130,14 @@ impl Settings {
         } else {
             let settings = Settings::default();
             if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create parent directory for {}", parent.display()))?;
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create parent directory for {}", parent.display())
+                })?;
             }
             let content = serde_json::to_string_pretty(&settings)?;
-            fs::write(path, content)
-                .with_context(|| format!("Failed to write default settings to {}", path.display()))?;
+            fs::write(path, content).with_context(|| {
+                format!("Failed to write default settings to {}", path.display())
+            })?;
             Ok(settings)
         }
     }

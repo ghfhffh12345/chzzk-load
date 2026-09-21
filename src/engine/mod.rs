@@ -1,10 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
-use chrono::Local;
-use tokio::sync::mpsc::Sender;
-use tokio_util::sync::CancellationToken;
 use crate::app_path::resolve_path;
 use crate::chzzk::client::ChzzkClient;
 use crate::chzzk::models::LiveStreamInfo;
@@ -14,6 +7,13 @@ use crate::recorder::ffmpeg::{build_ffmpeg_command, sanitize_filename};
 use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::AppEvent;
 use crate::uploader::{UploadTask, UploadWorker};
+use chrono::Local;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc::Sender;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
 pub struct FinishedSession {
@@ -107,10 +107,8 @@ impl EngineOrchestrator {
                     let n = name.clone();
                     let chunk_start_time = std::time::Instant::now();
 
-                    let upload_res = UploadWorker::upload_and_delete(
-                        drive,
-                        task,
-                        move |uploaded, total| {
+                    let upload_res =
+                        UploadWorker::upload_and_delete(drive, task, move |uploaded, total| {
                             let mb_s = (uploaded as f64 / 1_048_576.0)
                                 / chunk_start_time.elapsed().as_secs_f64().max(0.1);
                             let _ = tx.try_send(AppEvent::UploadProgress {
@@ -119,9 +117,8 @@ impl EngineOrchestrator {
                                 total_bytes: total,
                                 speed_mb_s: mb_s,
                             });
-                        },
-                    )
-                    .await;
+                        })
+                        .await;
 
                     match upload_res {
                         Ok(reclaimed) => {
@@ -161,7 +158,10 @@ impl EngineOrchestrator {
     ) -> Option<String> {
         match drive.get_or_create_folder(root_name, None).await {
             Ok(root_id) => {
-                match drive.get_or_create_folder(subfolder_name, Some(&root_id)).await {
+                match drive
+                    .get_or_create_folder(subfolder_name, Some(&root_id))
+                    .await
+                {
                     Ok(sub_id) => {
                         let _ = event_tx
                             .send(AppEvent::Log(format!(
@@ -218,13 +218,9 @@ impl EngineOrchestrator {
             if session_folder_id.is_none()
                 && let Some(drive) = drive_opt
             {
-                *session_folder_id = Self::ensure_session_folder(
-                    drive,
-                    root_name,
-                    drive_subfolder_name,
-                    event_tx,
-                )
-                .await;
+                *session_folder_id =
+                    Self::ensure_session_folder(drive, root_name, drive_subfolder_name, event_tx)
+                        .await;
             }
 
             if let Some(folder_id) = session_folder_id.as_ref() {
@@ -290,8 +286,7 @@ impl EngineOrchestrator {
 
             let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
             let folder_name = format!("{}_{}", channel_id, timestamp);
-            let recordings_base =
-                resolve_path(Path::new(&settings.general.recordings_dir));
+            let recordings_base = resolve_path(Path::new(&settings.general.recordings_dir));
             let session_dir = recordings_base.join(&folder_name);
 
             if let Err(e) = tokio::fs::create_dir_all(&session_dir).await {
@@ -525,7 +520,9 @@ impl EngineOrchestrator {
                                 }
                                 _ => {
                                     // One or both live_ids are None -> Fall back to cooldown period
-                                    let cooldown = Duration::from_secs(self.settings.general.stream_cooldown_seconds);
+                                    let cooldown = Duration::from_secs(
+                                        self.settings.general.stream_cooldown_seconds,
+                                    );
                                     if prev.finished_at.elapsed() < cooldown {
                                         true
                                     } else {
@@ -582,11 +579,7 @@ impl EngineOrchestrator {
                             let mut active = self.active_recordings.lock().await;
                             active.insert(channel.id.clone());
                         }
-                        self.spawn_recording_session(
-                            channel.id.clone(),
-                            info,
-                            upload_tx.clone(),
-                        );
+                        self.spawn_recording_session(channel.id.clone(), info, upload_tx.clone());
                     }
                 }
                 Ok(None) => {
@@ -624,8 +617,7 @@ impl EngineOrchestrator {
         let upload_handle =
             Self::spawn_upload_consumer(self.drive.clone(), self.event_tx.clone(), upload_rx);
 
-        let poll_interval =
-            Duration::from_secs(self.settings.general.poll_interval_seconds);
+        let poll_interval = Duration::from_secs(self.settings.general.poll_interval_seconds);
         loop {
             if self.cancel_token.is_cancelled() {
                 break;

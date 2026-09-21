@@ -1,12 +1,12 @@
-use std::path::Path;
-use std::sync::Arc;
-use anyhow::{anyhow, Result};
+use crate::drive::auth::DriveAuth;
+use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use serde::Deserialize;
+use std::path::Path;
+use std::sync::Arc;
 use tokio::fs::File;
 use tokio_util::codec::{BytesCodec, FramedRead};
-use crate::drive::auth::DriveAuth;
 
 pub fn build_resumable_init_body(filename: &str, parent_id: Option<&str>) -> String {
     let parents = match parent_id {
@@ -16,7 +16,8 @@ pub fn build_resumable_init_body(filename: &str, parent_id: Option<&str>) -> Str
     serde_json::json!({
         "name": filename,
         "parents": parents
-    }).to_string()
+    })
+    .to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,29 +49,44 @@ impl DriveClient {
         }
     }
 
-    pub fn with_base_urls(mut self, base_url: impl Into<String>, upload_base_url: impl Into<String>) -> Self {
+    pub fn with_base_urls(
+        mut self,
+        base_url: impl Into<String>,
+        upload_base_url: impl Into<String>,
+    ) -> Self {
         self.base_url = base_url.into();
         self.upload_base_url = upload_base_url.into();
         self
     }
 
-    pub async fn get_or_create_folder(&self, folder_name: &str, parent_id: Option<&str>) -> Result<String> {
+    pub async fn get_or_create_folder(
+        &self,
+        folder_name: &str,
+        parent_id: Option<&str>,
+    ) -> Result<String> {
         let token = self.auth.get_valid_access_token().await?;
 
         // Query if exists
         let escaped_name = folder_name.replace('\\', "\\\\").replace('\'', "\\'");
-        let mut query = format!("mimeType = 'application/vnd.google-apps.folder' and name = '{}' and trashed = false", escaped_name);
+        let mut query = format!(
+            "mimeType = 'application/vnd.google-apps.folder' and name = '{}' and trashed = false",
+            escaped_name
+        );
         if let Some(pid) = parent_id.filter(|p| !p.is_empty()) {
             query.push_str(&format!(" and '{}' in parents", pid));
         }
 
         let url = format!("{}/drive/v3/files", self.base_url);
-        let resp: DriveFileList = self.client.get(&url)
+        let resp: DriveFileList = self
+            .client
+            .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", token))
             .query(&[("q", query.as_str()), ("fields", "files(id, name)")])
-            .send().await?
+            .send()
+            .await?
             .error_for_status()?
-            .json().await?;
+            .json()
+            .await?;
 
         if let Some(first) = resp.files.first() {
             return Ok(first.id.clone());
@@ -85,13 +101,17 @@ impl DriveClient {
             meta["parents"] = serde_json::json!([pid]);
         }
 
-        let created: DriveFileItem = self.client.post(&url)
+        let created: DriveFileItem = self
+            .client
+            .post(&url)
             .header(AUTHORIZATION, format!("Bearer {}", token))
             .header(CONTENT_TYPE, "application/json; charset=UTF-8")
             .body(meta.to_string())
-            .send().await?
+            .send()
+            .await?
             .error_for_status()?
-            .json().await?;
+            .json()
+            .await?;
 
         Ok(created.id)
     }
@@ -105,7 +125,8 @@ impl DriveClient {
     where
         F: Fn(u64, u64) + Send + 'static,
     {
-        let filename = file_path.file_name()
+        let filename = file_path
+            .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| anyhow!("Invalid file path"))?;
 
@@ -121,17 +142,24 @@ impl DriveClient {
             Some(parent_folder_id)
         };
         let init_body = build_resumable_init_body(filename, parent_opt);
-        let init_url = format!("{}/upload/drive/v3/files?uploadType=resumable", self.upload_base_url);
-        let init_resp = self.client.post(&init_url)
+        let init_url = format!(
+            "{}/upload/drive/v3/files?uploadType=resumable",
+            self.upload_base_url
+        );
+        let init_resp = self
+            .client
+            .post(&init_url)
             .header(AUTHORIZATION, format!("Bearer {}", token))
             .header("X-Upload-Content-Type", "video/mp2t")
             .header("X-Upload-Content-Length", file_size.to_string())
             .header(CONTENT_TYPE, "application/json; charset=UTF-8")
             .body(init_body)
-            .send().await?
+            .send()
+            .await?
             .error_for_status()?;
 
-        let location = init_resp.headers()
+        let location = init_resp
+            .headers()
             .get("location")
             .and_then(|h| h.to_str().ok())
             .ok_or_else(|| anyhow!("Missing Location header in Google Drive resumable init"))?
@@ -150,11 +178,14 @@ impl DriveClient {
             chunk_result
         });
 
-        let upload_resp = self.client.put(&location)
+        let upload_resp = self
+            .client
+            .put(&location)
             .header(CONTENT_LENGTH, file_size.to_string())
             .header(CONTENT_TYPE, "video/mp2t")
             .body(reqwest::Body::wrap_stream(progress_stream))
-            .send().await?
+            .send()
+            .await?
             .error_for_status()?;
 
         let created: DriveFileItem = upload_resp.json().await?;

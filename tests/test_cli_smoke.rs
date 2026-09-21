@@ -49,7 +49,10 @@ fn test_cli_version_flag() {
         .output()
         .expect("Failed to execute chzzk-load with --version");
 
-    assert!(output.status.success(), "Expected exit code 0 for --version");
+    assert!(
+        output.status.success(),
+        "Expected exit code 0 for --version"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("chzzk-load 0.1.0"),

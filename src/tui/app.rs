@@ -97,8 +97,10 @@ impl App {
             } => {
                 self.active_upload_name = Some(chunk_name);
                 if total_bytes > 0 {
-                    self.upload_progress_pct =
-                        ((uploaded_bytes as f64 / total_bytes as f64) * 100.0).round().min(100.0) as u16;
+                    self.upload_progress_pct = ((uploaded_bytes as f64 / total_bytes as f64)
+                        * 100.0)
+                        .round()
+                        .min(100.0) as u16;
                 }
                 self.upload_speed = speed_mb_s;
             }

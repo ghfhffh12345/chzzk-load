@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use crate::drive::client::DriveClient;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct UploadTask {
@@ -17,7 +17,9 @@ impl UploadWorker {
         on_progress: impl Fn(u64, u64) + Send + 'static,
     ) -> anyhow::Result<u64> {
         let size = tokio::fs::metadata(&task.chunk_path).await?.len();
-        client.upload_file_resumable(&task.chunk_path, &task.session_folder_id, on_progress).await?;
+        client
+            .upload_file_resumable(&task.chunk_path, &task.session_folder_id, on_progress)
+            .await?;
         // Deletion only runs upon successful upload confirmation
         tokio::fs::remove_file(&task.chunk_path).await?;
         Ok(size)

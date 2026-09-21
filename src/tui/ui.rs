@@ -12,10 +12,10 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Length(9),  // Body (Channels + Active Progress)
-            Constraint::Fill(1),    // Logs (flexible fill of remaining vertical space)
-            Constraint::Length(1),  // Keybind footer
+            Constraint::Length(3), // Header
+            Constraint::Length(9), // Body (Channels + Active Progress)
+            Constraint::Fill(1),   // Logs (flexible fill of remaining vertical space)
+            Constraint::Length(1), // Keybind footer
         ])
         .split(area);
 
@@ -48,11 +48,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(idx, c)| {
-            let status = if c.is_live {
-                "[ LIVE ]"
-            } else {
-                "[ OFFLINE ]"
-            };
+            let status = if c.is_live { "[ LIVE ]" } else { "[ OFFLINE ]" };
             let color = if c.is_live {
                 Color::Green
             } else {
@@ -77,10 +73,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     // Pipeline Panel: 4 rows for upload, 5 rows for recorder (sum = 9 rows of chunks[1])
     let active_panel = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Length(5),
-        ])
+        .constraints([Constraint::Length(4), Constraint::Length(5)])
         .split(body_chunks[1]);
 
     let upload_title = app
@@ -143,7 +136,10 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
             .map(|raw_line| {
                 // Truncate line horizontally if it exceeds inner_width to prevent wrap overflow
                 let line_str = if raw_line.chars().count() > inner_width {
-                    let mut s: String = raw_line.chars().take(inner_width.saturating_sub(1)).collect();
+                    let mut s: String = raw_line
+                        .chars()
+                        .take(inner_width.saturating_sub(1))
+                        .collect();
                     s.push('…');
                     s
                 } else {
@@ -181,8 +177,8 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
         );
         f.render_widget(logs_widget, log_area);
     } else if log_area.height > 0 {
-        let fallback = Paragraph::new(" Logs: (expand window) ")
-            .style(Style::default().fg(Color::DarkGray));
+        let fallback =
+            Paragraph::new(" Logs: (expand window) ").style(Style::default().fg(Color::DarkGray));
         f.render_widget(fallback, log_area);
     }
 

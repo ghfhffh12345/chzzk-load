@@ -1,12 +1,12 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use anyhow::{anyhow, Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tiny_http::{Response, Server};
 use url::Url;
 
@@ -98,17 +98,19 @@ pub struct DriveAuth {
 }
 
 impl DriveAuth {
-    pub async fn load_or_authorize(
-        credentials_path: &Path,
-        token_path: &Path,
-    ) -> Result<Self> {
-        let cred_content = fs::read_to_string(credentials_path)
-            .with_context(|| format!("Google credentials file not found at {}", credentials_path.display()))?;
+    pub async fn load_or_authorize(credentials_path: &Path, token_path: &Path) -> Result<Self> {
+        let cred_content = fs::read_to_string(credentials_path).with_context(|| {
+            format!(
+                "Google credentials file not found at {}",
+                credentials_path.display()
+            )
+        })?;
         let cred_file: ClientSecretFile = serde_json::from_str(&cred_content)
             .context("Invalid Google OAuth credentials.json format")?;
 
-        let details = cred_file.installed.or(cred_file.web)
-            .ok_or_else(|| anyhow!("credentials.json must contain 'installed' or 'web' client settings"))?;
+        let details = cred_file.installed.or(cred_file.web).ok_or_else(|| {
+            anyhow!("credentials.json must contain 'installed' or 'web' client settings")
+        })?;
 
         if let Ok(token_str) = fs::read_to_string(token_path)
             && let Ok(token) = serde_json::from_str::<StoredToken>(&token_str)
@@ -129,11 +131,17 @@ impl DriveAuth {
 
         let auth_url = format!(
             "{}?response_type=code&client_id={}&redirect_uri={}&scope=https://www.googleapis.com/auth/drive.file&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
-            details.auth_uri, details.client_id, urlencoding_encode(&redirect_uri), challenge
+            details.auth_uri,
+            details.client_id,
+            urlencoding_encode(&redirect_uri),
+            challenge
         );
 
         println!("Starting browser authorization for Google Drive...");
-        println!("If your browser did not open automatically, visit:\n{}", auth_url);
+        println!(
+            "If your browser did not open automatically, visit:\n{}",
+            auth_url
+        );
         let _ = open::that(&auth_url);
 
         let server = Server::http(format!("127.0.0.1:{}", port))
@@ -180,9 +188,11 @@ impl DriveAuth {
                 ("grant_type", "authorization_code"),
                 ("code_verifier", verifier.as_str()),
             ])
-            .send().await?
+            .send()
+            .await?
             .error_for_status()?
-            .json().await?;
+            .json()
+            .await?;
 
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let stored_token = StoredToken {
@@ -225,9 +235,11 @@ impl DriveAuth {
                     ("refresh_token", refresh.as_str()),
                     ("grant_type", "refresh_token"),
                 ])
-                .send().await?
+                .send()
+                .await?
                 .error_for_status()?
-                .json().await?;
+                .json()
+                .await?;
 
             guard.access_token = resp.access_token;
             guard.expires_at_epoch_sec = now + resp.expires_in;

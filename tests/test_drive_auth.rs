@@ -2,7 +2,9 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Response, Server};
 
-use chzzk_load::drive::auth::{generate_pkce_codes, parse_oauth_redirect_query, DriveAuth, StoredToken};
+use chzzk_load::drive::auth::{
+    DriveAuth, StoredToken, generate_pkce_codes, parse_oauth_redirect_query,
+};
 
 #[test]
 fn test_pkce_generation() {
@@ -43,7 +45,10 @@ fn test_parse_oauth_redirect_query_error() {
     let res = parse_oauth_redirect_query(url);
     assert_eq!(
         res,
-        Some(Err(("access_denied".to_string(), "User denied access".to_string())))
+        Some(Err((
+            "access_denied".to_string(),
+            "User denied access".to_string()
+        )))
     );
 }
 
@@ -93,7 +98,11 @@ async fn test_load_cached_token_valid() {
         refresh_token: Some("refresh_token_abc".to_string()),
         expires_at_epoch_sec: future_expiry,
     };
-    fs::write(&token_path, serde_json::to_string_pretty(&token_data).unwrap()).unwrap();
+    fs::write(
+        &token_path,
+        serde_json::to_string_pretty(&token_data).unwrap(),
+    )
+    .unwrap();
 
     let auth = DriveAuth::load_or_authorize(&cred_path, &token_path)
         .await
@@ -111,7 +120,8 @@ async fn test_load_cached_token_valid() {
 
 #[tokio::test]
 async fn test_refresh_expired_token() {
-    let temp_dir = std::env::temp_dir().join(format!("test_drive_refresh_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_refresh_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -140,7 +150,11 @@ async fn test_refresh_expired_token() {
         refresh_token: Some("my_refresh_token".to_string()),
         expires_at_epoch_sec: 1000,
     };
-    fs::write(&token_path, serde_json::to_string_pretty(&token_data).unwrap()).unwrap();
+    fs::write(
+        &token_path,
+        serde_json::to_string_pretty(&token_data).unwrap(),
+    )
+    .unwrap();
 
     // Spawn mock HTTP server to handle token refresh request
     tokio::task::spawn_blocking(move || {
@@ -153,7 +167,10 @@ async fn test_refresh_expired_token() {
             });
             let response = Response::from_string(resp.to_string())
                 .with_status_code(200)
-                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                );
             let _ = request.respond(response);
         }
     });
@@ -173,8 +190,14 @@ async fn test_refresh_expired_token() {
     let disk_token_str = fs::read_to_string(&token_path).unwrap();
     let disk_token: StoredToken = serde_json::from_str(&disk_token_str).unwrap();
     assert_eq!(disk_token.access_token, "new_refreshed_token_456");
-    assert_eq!(disk_token.refresh_token.as_deref(), Some("updated_refresh_token_789"));
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    assert_eq!(
+        disk_token.refresh_token.as_deref(),
+        Some("updated_refresh_token_789")
+    );
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     assert!(disk_token.expires_at_epoch_sec > now + 3000);
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -182,7 +205,8 @@ async fn test_refresh_expired_token() {
 
 #[tokio::test]
 async fn test_credentials_missing_error() {
-    let temp_dir = std::env::temp_dir().join(format!("test_drive_missing_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_missing_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let cred_path = temp_dir.join("non_existent_credentials.json");
@@ -198,7 +222,8 @@ async fn test_credentials_missing_error() {
 
 #[tokio::test]
 async fn test_credentials_invalid_json_error() {
-    let temp_dir = std::env::temp_dir().join(format!("test_drive_invalid_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_invalid_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let cred_path = temp_dir.join("invalid_credentials.json");

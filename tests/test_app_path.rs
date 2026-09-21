@@ -1,5 +1,5 @@
+use chzzk_load::app_path::{get_exe_dir, resolve_path};
 use std::path::{Path, PathBuf};
-use chzzk_load::app_path::{resolve_path, get_exe_dir};
 
 #[test]
 fn test_resolve_relative_path() {

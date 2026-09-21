@@ -19,7 +19,10 @@ pub fn detect_sealed_chunks(
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file()
-                && path.extension().and_then(|s| s.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("ts"))
+                && path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("ts"))
                 && let Some(name) = path.file_name().and_then(|n| n.to_str())
             {
                 let meta = fs::metadata(&path).or_else(|_| entry.metadata());
@@ -77,7 +80,11 @@ impl SegmentWatcher {
     }
 
     pub fn detect_sealed(&mut self, is_stream_finished: bool) -> Vec<PathBuf> {
-        detect_sealed_chunks(&self.session_dir, &mut self.already_enqueued, is_stream_finished)
+        detect_sealed_chunks(
+            &self.session_dir,
+            &mut self.already_enqueued,
+            is_stream_finished,
+        )
     }
 
     pub fn session_dir(&self) -> &Path {

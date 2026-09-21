@@ -1,11 +1,10 @@
-use anyhow::{anyhow, bail, Context, Result};
-use reqwest::header::{HeaderMap, HeaderValue, COOKIE, USER_AGENT};
+use anyhow::{Context, Result, anyhow, bail};
+use reqwest::header::{COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::chzzk::models::{ChzzkResponse, LiveDetailContent, LiveStreamInfo, PlaybackJson};
 use crate::config::ChzzkConfig;
 
-const DEFAULT_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
 pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String> {
     let json_str = playback_json_str
@@ -59,14 +58,20 @@ pub struct ChzzkClient {
 impl ChzzkClient {
     pub fn new(config: &ChzzkConfig) -> Self {
         let cookie_str = if !config.nid_aut.is_empty() && !config.nid_ses.is_empty() {
-            Some(format!("NID_AUT={}; NID_SES={}", config.nid_aut, config.nid_ses))
+            Some(format!(
+                "NID_AUT={}; NID_SES={}",
+                config.nid_aut, config.nid_ses
+            ))
         } else {
             None
         };
 
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
-        if let Some(val) = cookie_str.as_deref().and_then(|c| HeaderValue::from_str(c).ok()) {
+        if let Some(val) = cookie_str
+            .as_deref()
+            .and_then(|c| HeaderValue::from_str(c).ok())
+        {
             headers.insert(COOKIE, val);
         }
 
@@ -95,8 +100,7 @@ impl ChzzkClient {
     pub async fn get_live_detail(&self, channel_id: &str) -> Result<Option<LiveStreamInfo>> {
         let url = format!(
             "{}/service/v2/channels/{}/live-detail",
-            self.base_url,
-            channel_id
+            self.base_url, channel_id
         );
         let resp = self.client.get(&url).send().await?.error_for_status()?;
         let body: ChzzkResponse<LiveDetailContent> = resp.json().await?;

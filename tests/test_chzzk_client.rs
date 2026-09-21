@@ -1,5 +1,5 @@
-use chzzk_load::chzzk::models::{ChzzkResponse, LiveDetailContent};
 use chzzk_load::chzzk::client::extract_best_hls_url;
+use chzzk_load::chzzk::models::{ChzzkResponse, LiveDetailContent};
 
 #[test]
 fn test_parse_live_detail_and_extract_hls() {
@@ -120,8 +120,10 @@ async fn test_get_live_detail_api_error_envelope() {
     std::thread::spawn(move || {
         if let Ok(request) = server.recv() {
             let mock_body = r#"{"code": 404, "message": "Channel not found", "content": null}"#;
-            let response = tiny_http::Response::from_string(mock_body)
-                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
@@ -133,8 +135,16 @@ async fn test_get_live_detail_api_error_envelope() {
     let result = client.get_live_detail("test_chan").await;
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("404"), "error message should contain code 404: {}", err_msg);
-    assert!(err_msg.contains("Channel not found"), "error message should contain API message: {}", err_msg);
+    assert!(
+        err_msg.contains("404"),
+        "error message should contain code 404: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("Channel not found"),
+        "error message should contain API message: {}",
+        err_msg
+    );
 }
 
 #[tokio::test]
@@ -157,8 +167,10 @@ async fn test_get_live_detail_success() {
                     "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}"
                 }
             }"#;
-            let response = tiny_http::Response::from_string(mock_body)
-                .with_header(tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
             let _ = request.respond(response);
         }
     });
@@ -167,7 +179,11 @@ async fn test_get_live_detail_success() {
     let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
         .with_base_url(format!("http://127.0.0.1:{}", port));
 
-    let stream_info = client.get_live_detail("chan123").await.unwrap().expect("stream info");
+    let stream_info = client
+        .get_live_detail("chan123")
+        .await
+        .unwrap()
+        .expect("stream info");
     assert_eq!(stream_info.streamer_name, "Streamer123");
     assert_eq!(stream_info.title, "Test Live");
     assert_eq!(stream_info.hls_url, "https://test.com/hls.m3u8");
@@ -198,7 +214,8 @@ fn test_parse_real_world_live_playback_without_track_path() {
         ]
     }"#;
 
-    let hls_url = extract_best_hls_url(&Some(mock_json.to_string())).expect("should parse successfully");
+    let hls_url =
+        extract_best_hls_url(&Some(mock_json.to_string())).expect("should parse successfully");
     assert_eq!(hls_url, "https://live.chzzk.naver.com/hls/master.m3u8");
 }
 
@@ -240,4 +257,3 @@ fn test_parse_live_detail_with_numeric_and_string_live_id() {
     let resp_null: ChzzkResponse<LiveDetailContent> = serde_json::from_str(json_null).unwrap();
     assert_eq!(resp_null.content.unwrap().live_id, None);
 }
-
