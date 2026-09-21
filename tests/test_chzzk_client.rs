@@ -202,3 +202,42 @@ fn test_parse_real_world_live_playback_without_track_path() {
     assert_eq!(hls_url, "https://live.chzzk.naver.com/hls/master.m3u8");
 }
 
+#[test]
+fn test_parse_live_detail_with_numeric_and_string_live_id() {
+    let json_num = r#"{
+        "code": 200,
+        "content": {
+            "liveId": 21212268,
+            "status": "OPEN",
+            "channel": { "channelId": "c1", "channelName": "N" },
+            "livePlaybackJson": null
+        }
+    }"#;
+    let resp_num: ChzzkResponse<LiveDetailContent> = serde_json::from_str(json_num).unwrap();
+    assert_eq!(resp_num.content.unwrap().live_id, Some(21212268));
+
+    let json_str = r#"{
+        "code": 200,
+        "content": {
+            "liveId": "21212268",
+            "status": "OPEN",
+            "channel": { "channelId": "c1", "channelName": "N" },
+            "livePlaybackJson": null
+        }
+    }"#;
+    let resp_str: ChzzkResponse<LiveDetailContent> = serde_json::from_str(json_str).unwrap();
+    assert_eq!(resp_str.content.unwrap().live_id, Some(21212268));
+
+    let json_null = r#"{
+        "code": 200,
+        "content": {
+            "liveId": null,
+            "status": "OPEN",
+            "channel": { "channelId": "c1", "channelName": "N" },
+            "livePlaybackJson": null
+        }
+    }"#;
+    let resp_null: ChzzkResponse<LiveDetailContent> = serde_json::from_str(json_null).unwrap();
+    assert_eq!(resp_null.content.unwrap().live_id, None);
+}
+

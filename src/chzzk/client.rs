@@ -112,6 +112,7 @@ impl ChzzkClient {
             let hls_url = extract_best_hls_url(&content.live_playback_json)?;
             return Ok(Some(LiveStreamInfo {
                 channel_id: channel_id.to_string(),
+                live_id: content.live_id,
                 streamer_name: content.channel.channel_name,
                 title: content
                     .live_title

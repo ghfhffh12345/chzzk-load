@@ -23,9 +23,33 @@ pub struct ChannelInfo {
     pub channel_name: String,
 }
 
+pub fn deserialize_optional_u64_or_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(u64),
+        Str(String),
+    }
+
+    match Option::<NumOrStr>::deserialize(deserializer)? {
+        Some(NumOrStr::Num(n)) => Ok(Some(n)),
+        Some(NumOrStr::Str(s)) => s
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        None => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LiveDetailContent {
+    #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]
+    pub live_id: Option<u64>,
     pub status: String,
     pub live_title: Option<String>,
     pub channel: ChannelInfo,
@@ -58,6 +82,7 @@ pub struct EncodingTrack {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveStreamInfo {
     pub channel_id: String,
+    pub live_id: Option<u64>,
     pub streamer_name: String,
     pub title: String,
     pub hls_url: String,

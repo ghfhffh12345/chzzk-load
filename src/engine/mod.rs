@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,12 +15,19 @@ use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::AppEvent;
 use crate::uploader::{UploadTask, UploadWorker};
 
+#[derive(Debug, Clone)]
+pub struct FinishedSession {
+    pub live_id: Option<u64>,
+    pub finished_at: std::time::Instant,
+}
+
 pub struct EngineOrchestrator {
     settings: Settings,
     chzzk: ChzzkClient,
     drive: Option<DriveClient>,
     event_tx: Sender<AppEvent>,
     active_recordings: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    finished_sessions: Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>>,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
     session_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -49,6 +56,7 @@ impl EngineOrchestrator {
             drive,
             event_tx,
             active_recordings: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            finished_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -69,6 +77,21 @@ impl EngineOrchestrator {
 
     pub fn active_recordings(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
         self.active_recordings.clone()
+    }
+
+    pub fn finished_sessions(&self) -> Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>> {
+        self.finished_sessions.clone()
+    }
+
+    pub async fn register_finished_session(&self, channel_id: &str, live_id: Option<u64>) {
+        let mut finished = self.finished_sessions.lock().await;
+        finished.insert(
+            channel_id.to_string(),
+            FinishedSession {
+                live_id,
+                finished_at: std::time::Instant::now(),
+            },
+        );
     }
 
     pub fn spawn_upload_consumer(
@@ -254,6 +277,7 @@ impl EngineOrchestrator {
         let chzzk = self.chzzk.clone();
         let event_tx = self.event_tx.clone();
         let active_recordings = self.active_recordings.clone();
+        let finished_sessions = self.finished_sessions.clone();
         let cancel_token = self.cancel_token.clone();
 
         let handle = tokio::spawn(async move {
@@ -293,16 +317,8 @@ impl EngineOrchestrator {
                 safe_title
             );
 
+            // Drive folder is created lazily in process_sealed_chunk when the first valid chunk is sealed
             let mut session_folder_id: Option<String> = None;
-            if let Some(ref drive) = drive_opt {
-                session_folder_id = Self::ensure_session_folder(
-                    drive,
-                    &root_name,
-                    &drive_subfolder_name,
-                    &event_tx,
-                )
-                .await;
-            }
 
             let output_pattern = session_dir.join("chunk_%04d.ts");
             let chunk_dur = settings.general.chunk_duration_seconds;
@@ -451,12 +467,29 @@ impl EngineOrchestrator {
                 let mut active = active_recordings.lock().await;
                 active.remove(&channel_id);
             }
+            {
+                let mut finished = finished_sessions.lock().await;
+                finished.insert(
+                    channel_id.clone(),
+                    FinishedSession {
+                        live_id: info.live_id,
+                        finished_at: std::time::Instant::now(),
+                    },
+                );
+            }
             let _ = event_tx
                 .send(AppEvent::Log(format!(
-                    "[REC] Recording session ended for channel {}",
-                    channel_id
+                    "[REC] Recording session ended for channel {} (liveId: {:?})",
+                    channel_id, info.live_id
                 )))
                 .await;
+
+            // Clean up session directory if no chunks were saved
+            if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await
+                && rd.next_entry().await.ok().flatten().is_none()
+            {
+                let _ = tokio::fs::remove_dir(&session_dir).await;
+            }
         });
 
         if let Ok(mut guard) = self.session_handles.lock() {
@@ -472,22 +505,79 @@ impl EngineOrchestrator {
             }
             match self.chzzk.get_live_detail(&channel.id).await {
                 Ok(Some(info)) => {
-                    let _ = self
-                        .event_tx
-                        .send(AppEvent::ChannelUpdate {
-                            channel_id: channel.id.clone(),
-                            channel_name: info.streamer_name.clone(),
-                            is_live: true,
-                            title: info.title.clone(),
-                        })
-                        .await;
-
                     let is_recording = {
                         let active = self.active_recordings.lock().await;
                         active.contains(&channel.id)
                     };
 
-                    if !is_recording {
+                    let is_duplicate_or_cooldown = {
+                        let mut finished = self.finished_sessions.lock().await;
+                        if let Some(prev) = finished.get(&channel.id) {
+                            match (&info.live_id, &prev.live_id) {
+                                (Some(curr_id), Some(prev_id)) if curr_id == prev_id => {
+                                    // Same liveId as just-finished session -> definitely stale CDN cache
+                                    true
+                                }
+                                (Some(curr_id), Some(prev_id)) if curr_id != prev_id => {
+                                    // liveId changed -> Genuinely new stream started!
+                                    finished.remove(&channel.id);
+                                    false
+                                }
+                                _ => {
+                                    // One or both live_ids are None -> Fall back to cooldown period
+                                    let cooldown = Duration::from_secs(self.settings.general.stream_cooldown_seconds);
+                                    if prev.finished_at.elapsed() < cooldown {
+                                        true
+                                    } else {
+                                        finished.remove(&channel.id);
+                                        false
+                                    }
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    if is_recording {
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::ChannelUpdate {
+                                channel_id: channel.id.clone(),
+                                channel_name: info.streamer_name.clone(),
+                                is_live: true,
+                                title: info.title.clone(),
+                            })
+                            .await;
+                    } else if is_duplicate_or_cooldown {
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::Log(format!(
+                                "[POLL] Channel {} ({}) stream recently concluded (liveId: {:?}). Waiting for API cache to close...",
+                                channel.id, channel.name, info.live_id
+                            )))
+                            .await;
+
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::ChannelUpdate {
+                                channel_id: channel.id.clone(),
+                                channel_name: channel.name.clone(),
+                                is_live: false,
+                                title: "Stream Concluded (Cooldown)".to_string(),
+                            })
+                            .await;
+                    } else {
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::ChannelUpdate {
+                                channel_id: channel.id.clone(),
+                                channel_name: info.streamer_name.clone(),
+                                is_live: true,
+                                title: info.title.clone(),
+                            })
+                            .await;
+
                         {
                             let mut active = self.active_recordings.lock().await;
                             active.insert(channel.id.clone());
@@ -500,6 +590,12 @@ impl EngineOrchestrator {
                     }
                 }
                 Ok(None) => {
+                    // Channel reported CLOSE (offline)
+                    {
+                        let mut finished = self.finished_sessions.lock().await;
+                        finished.remove(&channel.id);
+                    }
+
                     let _ = self
                         .event_tx
                         .send(AppEvent::ChannelUpdate {

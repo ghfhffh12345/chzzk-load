@@ -332,6 +332,159 @@ async fn test_engine_orchestrator_poll_channel_live() {
 }
 
 #[tokio::test]
+async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let req_count_server = request_count.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let count = req_count_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mock_body = match count {
+                // Poll 1: Channel is live with liveId 21212268
+                0 => r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 21212268,
+                        "status": "OPEN",
+                        "liveTitle": "Stream A",
+                        "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
+                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
+                    }
+                }"#,
+                // Poll 2: Stream ended, but CDN/cache still reports OPEN with same liveId 21212268!
+                1 => r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 21212268,
+                        "status": "OPEN",
+                        "liveTitle": "Stream A",
+                        "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
+                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
+                    }
+                }"#,
+                // Poll 3: CDN cache finally clears to CLOSE
+                2 => r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 21212268,
+                        "status": "CLOSE",
+                        "liveTitle": null,
+                        "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
+                        "livePlaybackJson": null
+                    }
+                }"#,
+                // Poll 4: Genuinely new stream starts with new liveId 21212269
+                _ => r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 21212269,
+                        "status": "OPEN",
+                        "liveTitle": "Stream B (New)",
+                        "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
+                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
+                    }
+                }"#,
+            };
+            let response = Response::from_string(mock_body)
+                .with_header(Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap());
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("test_orch_race_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            stream_cooldown_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_race".to_string(),
+            name: "StreamerRace".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk = ChzzkClient::new(&settings.chzzk)
+        .with_base_url(format!("http://127.0.0.1:{}", port));
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+
+    // --- Poll 1: Stream goes live -> starts session 1 ---
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    // Collect ChannelUpdate and RecordingStarted for session 1
+    let mut recording_started_count = 0;
+    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await {
+        if let AppEvent::RecordingStarted { channel_id, .. } = ev {
+            assert_eq!(channel_id, "chan_race");
+            recording_started_count += 1;
+        }
+    }
+    assert_eq!(recording_started_count, 1, "Session 1 should have started");
+
+    // Simulate session 1 ending: active_recordings removes channel, finished_sessions records it
+    // In actual app, this happens when FFmpeg exits
+    {
+        let active = orchestrator.active_recordings();
+        active.lock().await.remove("chan_race");
+        // Also register finished session directly if helper or method exists
+        orchestrator.register_finished_session("chan_race", Some(21212268)).await;
+    }
+
+    // --- Poll 2: API still returns OPEN with liveId 21212268 (stale CDN cache) ---
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    // Verify NO second recording session was started!
+    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await {
+        if let AppEvent::RecordingStarted { .. } = ev {
+            panic!("BUG: A duplicate recording session was spawned for the same liveId / during cooldown!");
+        }
+    }
+    {
+        let active = orchestrator.active_recordings();
+        assert!(!active.lock().await.contains("chan_race"), "Channel must not be in active_recordings");
+    }
+
+    // --- Poll 3: API transitions to CLOSE (channel offline) ---
+    orchestrator.poll_channels_once(&upload_tx).await;
+    let mut offline_detected = false;
+    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await {
+        if let AppEvent::ChannelUpdate { is_live, .. } = ev
+            && !is_live
+        {
+            offline_detected = true;
+        }
+    }
+    assert!(offline_detected, "Channel should be marked offline upon CLOSE");
+
+    // --- Poll 4: Genuinely new stream starts with new liveId 21212269 ---
+    orchestrator.poll_channels_once(&upload_tx).await;
+    let mut session_2_started = false;
+    while let Ok(Some(ev)) = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await {
+        if let AppEvent::RecordingStarted { session_title, .. } = ev {
+            assert_eq!(session_title, "Stream B (New)");
+            session_2_started = true;
+        }
+    }
+    assert!(session_2_started, "Session 2 should start for new liveId 21212269");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_engine_orchestrator_upload_consumer() {
     let temp_dir = std::env::temp_dir().join(format!("test_orch_upload_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();

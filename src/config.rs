@@ -9,6 +9,8 @@ pub struct GeneralConfig {
     pub chunk_duration_seconds: u64,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_seconds: u64,
+    #[serde(default = "default_stream_cooldown")]
+    pub stream_cooldown_seconds: u64,
     #[serde(default = "default_recordings_dir")]
     pub recordings_dir: String,
     #[serde(default = "default_min_free_disk_gb")]
@@ -17,6 +19,7 @@ pub struct GeneralConfig {
 
 fn default_chunk_duration() -> u64 { 600 }
 fn default_poll_interval() -> u64 { 20 }
+fn default_stream_cooldown() -> u64 { 60 }
 fn default_recordings_dir() -> String { "recordings".to_string() }
 fn default_min_free_disk_gb() -> f64 { 2.0 }
 
@@ -25,6 +28,7 @@ impl Default for GeneralConfig {
         Self {
             chunk_duration_seconds: default_chunk_duration(),
             poll_interval_seconds: default_poll_interval(),
+            stream_cooldown_seconds: default_stream_cooldown(),
             recordings_dir: default_recordings_dir(),
             min_free_disk_gb: default_min_free_disk_gb(),
         }
