@@ -125,6 +125,7 @@ function main() {
 
   process.on('SIGINT', () => child.kill('SIGINT'));
   process.on('SIGTERM', () => child.kill('SIGTERM'));
+  process.on('SIGHUP', () => child.kill('SIGHUP'));
 
   child.on('error', (err) => {
     console.error('[chzzk-load] Failed to start native process:', err);
