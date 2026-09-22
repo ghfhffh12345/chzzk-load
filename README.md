@@ -95,13 +95,13 @@ chzzk-load
 chzzk-load --config /path/to/my-settings.json
 ```
 
-On first startup, if `settings.json` is not present, `chzzk-load` automatically generates a default template in the executable's directory.
+On first startup, if `settings.json` is not present, `chzzk-load` automatically generates a default template in the current working directory.
 
 ---
 
 ## Configuration (`settings.json`)
 
-The application is configured using a portable JSON file. Paths can be relative to the executable or absolute.
+The application is configured using a JSON configuration file (`settings.json`). Paths can be relative to the current working directory (with portable executable directory fallback) or absolute.
 
 ```json
 {

@@ -217,4 +217,4 @@ When implementing changes, AI agents must strictly preserve the following rules:
 3. **MPEG-TS Stream Copy**: Never introduce re-encoding flags (`-c:v libx264`, etc.) into `build_ffmpeg_command`. Recording must remain strictly lossless stream-copy (`-c copy`).
 4. **Resilient HTTP Mocking**: In unit tests, avoid binding fixed ports or connecting to external network endpoints. Use `tiny_http::Server::http("127.0.0.1:0")` to allocate dynamic local test ports.
 5. **Safe File Operations**: All tests performing filesystem mutations must operate strictly within `std::env::temp_dir()`.
-6. **Path Portability**: Always resolve relative file and directory paths using `app_path::resolve_path(...)` so the binary operates predictably regardless of the working directory.
+6. **Path Portability & Resolution**: Always resolve relative file and directory paths using `app_path::resolve_path(...)`. Resolution prioritizes the current working directory (`CWD`), falls back to the executable directory when present in portable non-npm deployments, and avoids writing/resolving configuration inside `node_modules` when installed globally via npm.
