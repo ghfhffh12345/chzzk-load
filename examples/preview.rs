@@ -16,7 +16,7 @@ use ratatui::backend::CrosstermBackend;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new();
 
-    let channel_hane = "ch_hane_001".to_string();
+    let channel_hane = "a9a343510e132ea3026ff3cf682820b5".to_string();
     let channel_kangqui = "1a1dd9ce56fb61a37ffb6f69f6d5b978".to_string();
     let channel_looksam = "8803cee946a9e610a76fbdee98d98c61".to_string();
     let channel_poong = "7ce8032370ac5121dcabce7bad375ced".to_string();
@@ -71,21 +71,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.active_uploads = uploads;
 
     app.logs = vec![
-        "[REC] 치지직 라이브 감지: '하네 | Hane' (status: OPEN, 1080p60)".to_string(),
-        "[REC] Initialized lossless FFmpeg stream-copy session (-c copy)".to_string(),
-        "[FFMPEG] Segment chunk_0141.ts completed (duration: 600s)".to_string(),
-        "[CLEAN] Upload confirmed for 'chunk_0140.ts' -> Deleted local file (+27.9 MB reclaimed)"
-            .to_string(),
-        "[REC] Sealed chunk 'chunk_0142.ts' (size: 28.4 MB)".to_string(),
-        "[REC] 치지직 라이브 감지: '강퀴' (status: OPEN, 1080p60)".to_string(),
-        "[CLEAN] Upload confirmed for 'chunk_0038.ts' -> Deleted local file (+26.5 MB reclaimed)"
-            .to_string(),
-        "[REC] Chzzk CDN polling active (channels: 4, interval: 20s)".to_string(),
-        "[FFMPEG] Generating stream-copied MPEG-TS segment 'chunk_0143.ts'".to_string(),
-        "[CLEAN] Resumable Google Drive upload session active for 'chunk_0142.ts'".to_string(),
-        "[CLEAN] Upload confirmed for 'chunk_0141.ts' -> Deleted local file (+28.1 MB reclaimed)"
-            .to_string(),
-        "[CLEAN] Total space reclaimed: 4,120.8 MB (strictly bounded disk footprint)".to_string(),
+        "[INFO] Google Drive authenticated successfully".to_string(),
+        "[REC] Spawned FFmpeg segmenter (600s TS chunks) -> /home/ghfhffh12345/chzzk/recordings/a9a343510e132ea3026ff3cf682820b5_20260922_172226".to_string(),
+        "[DRIVE] Session folder ready: 'Chzzk_Recordings/[2026-09-22_1722] 하네 _ Hane - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)'".to_string(),
+        "[FFMPEG] [mov,mp4,m4a,3gp,3g2,mj2 @ 0xaaaac40a46d0] Packet corrupt (stream = 0, dts = 1875900).".to_string(),
+        "[FFMPEG] [NULL @ 0xaaaac40f3a20] Invalid NAL unit size (10632 > 6612).".to_string(),
+        "[FFMPEG] [NULL @ 0xaaaac40f3a20] missing picture in access unit with size 6645".to_string(),
+        "[FFMPEG] [mov,mp4,m4a,3gp,3g2,mj2 @ 0xaaaac4238680] Packet corrupt (stream = 0, dts = 1875900).".to_string(),
+        "[FFMPEG] [NULL @ 0xaaaac4286670] Invalid NAL unit size (1136 > 459).".to_string(),
+        "[FFMPEG] [NULL @ 0xaaaac4286670] missing picture in access unit with size 492".to_string(),
+        "[REC] chunk_0140.ts sealed. Pushed to Drive upload queue.".to_string(),
+        "[FFMPEG] [in#0/hls @ 0xaaaac3f4abe0] Packet corrupt (stream = 2, dts = 1875900).".to_string(),
+        "[FFMPEG] [in#0/hls @ 0xaaaac3f4a930] corrupt input packet in stream 2".to_string(),
+        "[CLEAN] Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)".to_string(),
+        "[FFMPEG] [in#0/hls @ 0xaaaac3f4abe0] Packet corrupt (stream = 6, dts = 1875900).".to_string(),
+        "[FFMPEG] [in#0/hls @ 0xaaaac3f4a930] corrupt input packet in stream 6".to_string(),
+        "[FFMPEG] [mov,mp4,m4a,3gp,3g2,mj2 @ 0xaaaac416f240] Packet corrupt (stream = 0, dts = 1876500).".to_string(),
+        "[FFMPEG] [NULL @ 0xaaaac41bd550] Invalid NAL unit size (4856 > 1857).".to_string(),
+        "[FFMPEG] [NULL @ 0xaaaac41bd550] missing picture in access unit with size 1890".to_string(),
+        "[REC] chunk_0141.ts sealed. Pushed to Drive upload queue.".to_string(),
+        "[FFMPEG] [in#0/hls @ 0xaaaac3f4abe0] Packet corrupt (stream = 4, dts = 1876500).".to_string(),
+        "[FFMPEG] [in#0/hls @ 0xaaaac3f4a930] corrupt input packet in stream 4".to_string(),
+        "[CLEAN] Uploaded & deleted chunk_0141.ts (reclaimed 28.1 MB)".to_string(),
+        "[FFMPEG] [mov,mp4,m4a,3gp,3g2,mj2 @ 0xaaaac400a180] Found duplicated MOOV Atom. Skipped it".to_string(),
+        "[FFMPEG] [mov,mp4,m4a,3gp,3g2,mj2 @ 0xaaaac4301bb0] Found duplicated MOOV Atom. Skipped it".to_string(),
+        "[FFMPEG] Last message repeated 1 times".to_string(),
+        "[REC] chunk_0142.ts sealed. Pushed to Drive upload queue.".to_string(),
     ];
 
     enable_raw_mode()?;
