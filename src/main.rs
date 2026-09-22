@@ -129,10 +129,29 @@ async fn main() -> anyhow::Result<()> {
 
     // Main TUI render loop
     let tick_rate = Duration::from_millis(100);
+    let mut shutdown_start: Option<std::time::Instant> = None;
+
     loop {
-        if cancel_token.is_cancelled() || app.should_quit {
+        // Check if external shutdown signal (e.g. Ctrl+C) was received
+        if cancel_token.is_cancelled() && !app.is_shutting_down {
+            app.is_shutting_down = true;
+            shutdown_start = Some(std::time::Instant::now());
+        }
+
+        // Check exit conditions
+        if app.should_quit {
             cancel_token.cancel();
             break;
+        }
+        if app.is_shutting_down {
+            if orch_handle.is_finished() {
+                break;
+            }
+            if let Some(start) = shutdown_start
+                && start.elapsed() >= Duration::from_secs(10)
+            {
+                break;
+            }
         }
 
         terminal.draw(|f| draw_ui(f, &app))?;
@@ -141,10 +160,19 @@ async fn main() -> anyhow::Result<()> {
             && let Event::Key(key) = event::read()?
         {
             if key.code == KeyCode::Char('q') {
-                cancel_token.cancel();
-                break;
+                if app.is_shutting_down {
+                    // Second 'q' press triggers immediate exit
+                    app.should_quit = true;
+                    cancel_token.cancel();
+                    break;
+                } else {
+                    app.is_shutting_down = true;
+                    cancel_token.cancel();
+                    shutdown_start = Some(std::time::Instant::now());
+                }
+            } else {
+                app.handle_event(AppEvent::Key(key));
             }
-            app.handle_event(AppEvent::Key(key));
         }
 
         while let Ok(ev) = event_rx.try_recv() {
@@ -161,9 +189,20 @@ async fn main() -> anyhow::Result<()> {
             orchestrator.trigger_refresh();
         }
 
-        if cancel_token.is_cancelled() || app.should_quit {
+        // Re-check exit conditions after event processing
+        if app.should_quit {
             cancel_token.cancel();
             break;
+        }
+        if app.is_shutting_down {
+            if orch_handle.is_finished() {
+                break;
+            }
+            if let Some(start) = shutdown_start
+                && start.elapsed() >= Duration::from_secs(10)
+            {
+                break;
+            }
         }
     }
 
@@ -174,9 +213,10 @@ async fn main() -> anyhow::Result<()> {
     // Drain event_rx in background so event_tx never blocks during shutdown
     tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-    // Await graceful engine shutdown (FFmpeg processes exit cleanly & in-flight uploads complete)
-    // with a safety timeout so the process never hangs indefinitely in the background
-    let _ = tokio::time::timeout(Duration::from_secs(10), orch_handle).await;
+    // If orch_handle is still running (e.g. forced exit or safety timeout), await with short grace period
+    if !orch_handle.is_finished() {
+        let _ = tokio::time::timeout(Duration::from_secs(2), orch_handle).await;
+    }
 
     Ok(())
 }
