@@ -124,6 +124,26 @@ impl DriveClient {
         Ok(created.id)
     }
 
+    pub async fn rename_folder(&self, folder_id: &str, new_name: &str) -> Result<()> {
+        let token = self.auth.get_valid_access_token().await?;
+        let url = format!("{}/drive/v3/files/{}", self.base_url, folder_id);
+
+        let body = serde_json::json!({
+            "name": new_name
+        });
+
+        self.client
+            .patch(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", token))
+            .header(CONTENT_TYPE, "application/json; charset=UTF-8")
+            .body(body.to_string())
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(())
+    }
+
     pub async fn upload_file_resumable<F>(
         &self,
         file_path: &Path,

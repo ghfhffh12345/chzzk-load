@@ -230,6 +230,100 @@ async fn test_get_or_create_folder_creates_new() {
 }
 
 #[tokio::test]
+async fn test_rename_folder_success() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_rename_ok_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    std::thread::spawn(move || {
+        if let Ok(mut request) = server.recv() {
+            assert_eq!(request.method().as_str(), "PATCH");
+            assert!(request.url().contains("/drive/v3/files/target_folder_123"));
+
+            let auth_hdr = request.headers().iter().find(|h| {
+                h.field
+                    .as_str()
+                    .as_str()
+                    .eq_ignore_ascii_case("authorization")
+            });
+            assert!(auth_hdr.is_some());
+            assert_eq!(
+                auth_hdr.unwrap().value.as_str(),
+                "Bearer mock_test_token_xyz"
+            );
+
+            let mut body_str = String::new();
+            request.as_reader().read_to_string(&mut body_str).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&body_str).unwrap();
+            assert_eq!(
+                parsed["name"],
+                "[2026-09-22_1000] Streamer - New Stream Title"
+            );
+
+            let mock_response = serde_json::json!({
+                "id": "target_folder_123",
+                "name": "[2026-09-22_1000] Streamer - New Stream Title"
+            });
+            let response = Response::from_string(mock_response.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let res = client
+        .rename_folder(
+            "target_folder_123",
+            "[2026-09-22_1000] Streamer - New Stream Title",
+        )
+        .await;
+    assert!(res.is_ok());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_rename_folder_error() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_rename_err_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            assert_eq!(request.method().as_str(), "PATCH");
+            let response =
+                Response::from_string(r#"{"error":"Not Found"}"#).with_status_code(StatusCode(404));
+            let _ = request.respond(response);
+        }
+    });
+
+    let res = client
+        .rename_folder("non_existent_folder", "New Name")
+        .await;
+    assert!(res.is_err());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_upload_file_resumable_success() {
     let temp_dir =
         std::env::temp_dir().join(format!("test_drive_upload_{}", rand::random::<u32>()));

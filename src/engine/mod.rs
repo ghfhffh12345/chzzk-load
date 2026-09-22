@@ -21,12 +21,21 @@ pub struct FinishedSession {
     pub finished_at: std::time::Instant,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActiveSessionState {
+    pub start_timestamp: String,
+    pub streamer_name: String,
+    pub current_title: String,
+    pub session_folder_id: Option<String>,
+}
+
 pub struct EngineOrchestrator {
     settings: Settings,
     chzzk: ChzzkClient,
     drive: Option<DriveClient>,
     event_tx: Sender<AppEvent>,
     active_recordings: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    active_sessions: Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>>,
     finished_sessions: Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>>,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
@@ -56,6 +65,7 @@ impl EngineOrchestrator {
             drive,
             event_tx,
             active_recordings: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            active_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             finished_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
@@ -77,6 +87,10 @@ impl EngineOrchestrator {
 
     pub fn active_recordings(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
         self.active_recordings.clone()
+    }
+
+    pub fn active_sessions(&self) -> Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>> {
+        self.active_sessions.clone()
     }
 
     pub fn finished_sessions(&self) -> Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>> {
@@ -321,6 +335,7 @@ impl EngineOrchestrator {
         let chzzk = self.chzzk.clone();
         let event_tx = self.event_tx.clone();
         let active_recordings = self.active_recordings.clone();
+        let active_sessions = self.active_sessions.clone();
         let finished_sessions = self.finished_sessions.clone();
         let cancel_token = self.cancel_token.clone();
 
@@ -331,6 +346,19 @@ impl EngineOrchestrator {
                     session_title: info.title.clone(),
                 })
                 .await;
+
+            let start_timestamp = Local::now().format("%Y-%m-%d_%H%M").to_string();
+            {
+                let mut sessions = active_sessions.lock().await;
+                sessions
+                    .entry(channel_id.clone())
+                    .or_insert_with(|| ActiveSessionState {
+                        start_timestamp: start_timestamp.clone(),
+                        streamer_name: info.streamer_name.clone(),
+                        current_title: info.title.clone(),
+                        session_folder_id: None,
+                    });
+            }
 
             let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
             let folder_name = format!("{}_{}", channel_id, timestamp);
@@ -347,18 +375,12 @@ impl EngineOrchestrator {
                     .await;
                 let mut active = active_recordings.lock().await;
                 active.remove(&channel_id);
+                let mut sessions = active_sessions.lock().await;
+                sessions.remove(&channel_id);
                 return;
             }
 
             let root_name = settings.google_drive.root_folder_name.clone();
-            let safe_streamer = sanitize_filename(&info.streamer_name);
-            let safe_title = sanitize_filename(&info.title);
-            let drive_subfolder_name = format!(
-                "[{}] {} - {}",
-                Local::now().format("%Y-%m-%d_%H%M"),
-                safe_streamer,
-                safe_title
-            );
 
             // Drive folder is created lazily in process_sealed_chunk when the first valid chunk is sealed
             let mut session_folder_id: Option<String> = None;
@@ -446,6 +468,25 @@ impl EngineOrchestrator {
                             }
                         }
 
+                        let current_subfolder_name = {
+                            let sessions = active_sessions.lock().await;
+                            if let Some(s) = sessions.get(&channel_id) {
+                                format!(
+                                    "[{}] {} - {}",
+                                    s.start_timestamp,
+                                    sanitize_filename(&s.streamer_name),
+                                    sanitize_filename(&s.current_title)
+                                )
+                            } else {
+                                format!(
+                                    "[{}] {} - {}",
+                                    start_timestamp,
+                                    sanitize_filename(&info.streamer_name),
+                                    sanitize_filename(&info.title)
+                                )
+                            }
+                        };
+
                         let sealed_chunks = watcher.detect_sealed(true);
                         for chunk_path in sealed_chunks {
                             Self::process_sealed_chunk(
@@ -453,13 +494,20 @@ impl EngineOrchestrator {
                                 &mut session_folder_id,
                                 drive_opt.as_ref(),
                                 &root_name,
-                                &drive_subfolder_name,
+                                &current_subfolder_name,
                                 &channel_id,
                                 &info.streamer_name,
                                 &upload_tx,
                                 &event_tx,
                             )
                             .await;
+                        }
+
+                        if session_folder_id.is_some() {
+                            let mut sessions = active_sessions.lock().await;
+                            if let Some(s) = sessions.get_mut(&channel_id) {
+                                s.session_folder_id = session_folder_id.clone();
+                            }
                         }
 
                         break;
@@ -487,6 +535,25 @@ impl EngineOrchestrator {
                             }
                         };
 
+                        let current_subfolder_name = {
+                            let sessions = active_sessions.lock().await;
+                            if let Some(s) = sessions.get(&channel_id) {
+                                format!(
+                                    "[{}] {} - {}",
+                                    s.start_timestamp,
+                                    sanitize_filename(&s.streamer_name),
+                                    sanitize_filename(&s.current_title)
+                                )
+                            } else {
+                                format!(
+                                    "[{}] {} - {}",
+                                    start_timestamp,
+                                    sanitize_filename(&info.streamer_name),
+                                    sanitize_filename(&info.title)
+                                )
+                            }
+                        };
+
                         let sealed_chunks = watcher.detect_sealed(is_finished);
                         for chunk_path in sealed_chunks {
                             Self::process_sealed_chunk(
@@ -494,13 +561,20 @@ impl EngineOrchestrator {
                                 &mut session_folder_id,
                                 drive_opt.as_ref(),
                                 &root_name,
-                                &drive_subfolder_name,
+                                &current_subfolder_name,
                                 &channel_id,
                                 &info.streamer_name,
                                 &upload_tx,
                                 &event_tx,
                             )
                             .await;
+                        }
+
+                        if session_folder_id.is_some() {
+                            let mut sessions = active_sessions.lock().await;
+                            if let Some(s) = sessions.get_mut(&channel_id) {
+                                s.session_folder_id = session_folder_id.clone();
+                            }
                         }
 
                         if is_finished {
@@ -513,6 +587,10 @@ impl EngineOrchestrator {
             {
                 let mut active = active_recordings.lock().await;
                 active.remove(&channel_id);
+            }
+            {
+                let mut sessions = active_sessions.lock().await;
+                sessions.remove(&channel_id);
             }
             {
                 let mut finished = finished_sessions.lock().await;
@@ -594,6 +672,74 @@ impl EngineOrchestrator {
                     };
 
                     if is_recording {
+                        let rename_task = {
+                            let sessions = self.active_sessions.lock().await;
+                            if let Some(session) = sessions.get(&channel.id) {
+                                if session.current_title != info.title {
+                                    let old_title = session.current_title.clone();
+                                    let new_title = info.title.clone();
+                                    let start_ts = session.start_timestamp.clone();
+                                    let safe_streamer = sanitize_filename(&session.streamer_name);
+                                    let safe_new_title = sanitize_filename(&new_title);
+                                    let new_folder_name = format!(
+                                        "[{}] {} - {}",
+                                        start_ts, safe_streamer, safe_new_title
+                                    );
+                                    let folder_id = session.session_folder_id.clone();
+                                    Some((old_title, new_title, new_folder_name, folder_id))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some((old_title, new_title, new_folder_name, folder_id)) =
+                            rename_task
+                        {
+                            let mut should_update_title = false;
+                            if let (Some(ref fid), Some(drive)) = (folder_id, self.drive.as_ref()) {
+                                match drive.rename_folder(fid, &new_folder_name).await {
+                                    Ok(_) => {
+                                        let _ = self
+                                            .event_tx
+                                            .send(AppEvent::Log(format!(
+                                                "[DRIVE] Stream title changed ('{}' -> '{}'). Renamed session folder for {} to '{}'",
+                                                old_title, new_title, channel.id, new_folder_name
+                                            )))
+                                            .await;
+                                        should_update_title = true;
+                                    }
+                                    Err(e) => {
+                                        let _ = self
+                                            .event_tx
+                                            .send(AppEvent::Log(format!(
+                                                "[WARN] Failed to rename Drive folder for {} to '{}': {}",
+                                                channel.id, new_folder_name, e
+                                            )))
+                                            .await;
+                                    }
+                                }
+                            } else {
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::Log(format!(
+                                        "[REC] Stream title changed for {} ('{}' -> '{}'). Pending folder name updated to '{}'",
+                                        channel.id, old_title, new_title, new_folder_name
+                                    )))
+                                    .await;
+                                should_update_title = true;
+                            }
+
+                            if should_update_title {
+                                let mut sessions = self.active_sessions.lock().await;
+                                if let Some(session) = sessions.get_mut(&channel.id) {
+                                    session.current_title = new_title;
+                                }
+                            }
+                        }
+
                         let _ = self
                             .event_tx
                             .send(AppEvent::ChannelUpdate {
@@ -636,6 +782,20 @@ impl EngineOrchestrator {
                             let mut active = self.active_recordings.lock().await;
                             active.insert(channel.id.clone());
                         }
+                        {
+                            let mut sessions = self.active_sessions.lock().await;
+                            sessions.insert(
+                                channel.id.clone(),
+                                ActiveSessionState {
+                                    start_timestamp: Local::now()
+                                        .format("%Y-%m-%d_%H%M")
+                                        .to_string(),
+                                    streamer_name: info.streamer_name.clone(),
+                                    current_title: info.title.clone(),
+                                    session_folder_id: None,
+                                },
+                            );
+                        }
                         self.spawn_recording_session(channel.id.clone(), info, upload_tx.clone());
                     }
                 }
@@ -644,6 +804,10 @@ impl EngineOrchestrator {
                     {
                         let mut finished = self.finished_sessions.lock().await;
                         finished.remove(&channel.id);
+                    }
+                    {
+                        let mut sessions = self.active_sessions.lock().await;
+                        sessions.remove(&channel.id);
                     }
 
                     let _ = self
