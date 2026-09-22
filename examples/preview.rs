@@ -40,10 +40,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         ChannelItem {
             id: channel_lilpa.clone(),
-            name: "릴파 | LILPA".to_string(),
+            name: "너불".to_string(),
             is_live: true,
             is_active: true,
-            title: "노래 연습 및 소통 뱅온!".to_string(),
+            title: "교정야호 교통정비공사 사장 황인정".to_string(),
         },
         ChannelItem {
             id: channel_kangqui.clone(),
@@ -54,17 +54,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         ChannelItem {
             id: channel_wakgood.clone(),
-            name: "우왁굳".to_string(),
+            name: "계춘회".to_string(),
             is_live: true,
             is_active: false,
-            title: "왁물원 구경하기 및 종합 게임".to_string(),
+            title: "고춘애오늘며칠차임 아무튼출근".to_string(),
         },
         ChannelItem {
             id: channel_gosegu.clone(),
-            name: "고세구".to_string(),
+            name: "텐코 시부키".to_string(),
             is_live: true,
             is_active: false,
-            title: "세구세구 온 세상이 고세구".to_string(),
+            title: "봉누도 정지해입니다".to_string(),
         },
         ChannelItem {
             id: channel_looksam.clone(),
@@ -103,10 +103,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         ChannelItem {
             id: channel_okja.clone(),
-            name: "옥자미".to_string(),
+            name: "카가야키 노바".to_string(),
             is_live: false,
             is_active: false,
-            title: "리그 오브 레전드 랭크 게임".to_string(),
+            title: "봉누도2 경찰 김억척 8일차 ".to_string(),
         },
         ChannelItem {
             id: channel_cheol.clone(),
