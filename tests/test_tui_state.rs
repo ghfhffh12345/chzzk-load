@@ -510,7 +510,8 @@ fn test_draw_ui_shutdown_banner_rendering() {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(content_normal.contains("chzzk-load v0.1.0"));
+    let expected_title = format!("chzzk-load v{}", env!("CARGO_PKG_VERSION"));
+    assert!(content_normal.contains(&expected_title));
     assert!(content_normal.contains("[q] Quit"));
     assert!(!content_normal.contains("[ SHUTTING DOWN ]"));
 

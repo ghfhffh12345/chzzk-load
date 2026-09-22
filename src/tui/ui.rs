@@ -34,8 +34,10 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     } else {
         (
             format!(
-                " chzzk-load v0.1.0 │ Reclaimed Space: {:.1} MB │ Chunks Uploaded: {}",
-                app.reclaimed_mb, app.uploaded_count
+                " chzzk-load v{} │ Reclaimed Space: {:.1} MB │ Chunks Uploaded: {}",
+                env!("CARGO_PKG_VERSION"),
+                app.reclaimed_mb,
+                app.uploaded_count
             ),
             Style::default()
                 .fg(Color::Cyan)
