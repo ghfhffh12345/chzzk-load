@@ -52,23 +52,7 @@ function runTest(name, fn) {
   }
 }
 
-/**
- * Creates or locates an executable binary for testing on the current platform.
- */
-function getOrCreateTestBinary(tempDir) {
-  // 1. Check existing target builds
-  const candidates = [
-    process.env.CHZZK_LOAD_BIN,
-    path.join(REPO_ROOT, 'target', 'release', process.platform === 'win32' ? 'chzzk-load.exe' : 'chzzk-load'),
-    path.join(REPO_ROOT, 'target', 'debug', process.platform === 'win32' ? 'chzzk-load.exe' : 'chzzk-load'),
-  ];
-
-  for (const cand of candidates) {
-    if (cand && fs.existsSync(cand)) {
-      return cand;
-    }
-  }
-
+function createMockBinary(tempDir) {
   // 2. Create mock executable script for Unix
   if (process.platform !== 'win32') {
     const mockBinPath = path.join(tempDir, 'mock-chzzk-load');
@@ -82,6 +66,14 @@ function getOrCreateTestBinary(tempDir) {
       '  echo "Real-time Chzzk stream recording and Google Drive syncing"',
       '  echo "Usage: chzzk-load [OPTIONS]"',
       '  exit 0',
+      'fi',
+      'config_file="settings.json"',
+      'if [ "$1" = "-c" ] || [ "$1" = "--config" ]; then',
+      '  config_file="$2"',
+      'fi',
+      'if [ -f "$config_file" ]; then',
+      '  echo "Error: Failed to parse JSON in $(pwd)/$config_file" >&2',
+      '  exit 1',
       'fi',
       'echo "mock binary running with args: $*"',
       'exit 0',
@@ -106,6 +98,17 @@ fn main() {
         println!("Usage: chzzk-load.exe [OPTIONS]");
         std::process::exit(0);
     }
+    let config_arg = args.iter().position(|a| a == "-c" || a == "--config")
+        .and_then(|i| args.get(i + 1));
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let settings_path = match config_arg {
+        Some(p) => cwd.join(p),
+        None => cwd.join("settings.json"),
+    };
+    if settings_path.exists() {
+        eprintln!("Error: Failed to parse JSON in {}", settings_path.display());
+        std::process::exit(1);
+    }
     std::process::exit(0);
 }
 `;
@@ -120,6 +123,26 @@ fn main() {
   }
 
   return null;
+}
+
+/**
+ * Creates or locates an executable binary for testing on the current platform.
+ */
+function getOrCreateTestBinary(tempDir) {
+  // 1. Check existing target builds
+  const candidates = process.env.FORCE_MOCK_BINARY ? [] : [
+    process.env.CHZZK_LOAD_BIN,
+    path.join(REPO_ROOT, 'target', 'release', process.platform === 'win32' ? 'chzzk-load.exe' : 'chzzk-load'),
+    path.join(REPO_ROOT, 'target', 'debug', process.platform === 'win32' ? 'chzzk-load.exe' : 'chzzk-load'),
+  ];
+
+  for (const cand of candidates) {
+    if (cand && fs.existsSync(cand)) {
+      return cand;
+    }
+  }
+
+  return createMockBinary(tempDir);
 }
 
 console.log('\n=== Running npm Package & Launcher Automated Tests ===\n');
@@ -363,7 +386,41 @@ if (testBinary) {
   });
 }
 
-// Test 8: prepare-npm.js filters platforms with --platforms
+// Test 8: Mock binary fallback behavior verification
+const tmpMockEnvDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chzzk-load-mock-launcher-'));
+const standaloneMockBin = createMockBinary(tmpMockEnvDir);
+if (standaloneMockBin) {
+  runTest('Mock binary fallback behavior: handles --version, --help, and settings.json in CWD', () => {
+    // 1. --version
+    const verRes = spawnSync(standaloneMockBin, ['--version'], { encoding: 'utf8' });
+    assert.strictEqual(verRes.status, 0, `Expected 0 from --version, got ${verRes.status}`);
+    assert.ok(verRes.stdout.toLowerCase().includes('chzzk-load'), 'Expected version output to contain chzzk-load');
+
+    // 2. --help
+    const helpRes = spawnSync(standaloneMockBin, ['--help'], { encoding: 'utf8' });
+    assert.strictEqual(helpRes.status, 0, `Expected 0 from --help, got ${helpRes.status}`);
+    assert.ok(
+      helpRes.stdout.toLowerCase().includes('usage') || helpRes.stdout.toLowerCase().includes('chzzk'),
+      'Expected help output to contain usage or chzzk'
+    );
+
+    // 3. settings.json in CWD
+    const userWorkDir = path.join(tmpMockEnvDir, 'mock-work-dir');
+    fs.mkdirSync(userWorkDir, { recursive: true });
+    fs.writeFileSync(path.join(userWorkDir, 'settings.json'), '{ MALFORMED }');
+
+    const cwdRes = spawnSync(standaloneMockBin, [], { cwd: userWorkDir, encoding: 'utf8' });
+    const output = (cwdRes.stderr || '') + (cwdRes.stdout || '');
+    assert.ok(
+      output.includes('Failed to parse JSON') || output.includes('settings.json'),
+      `Should fail parsing settings.json in CWD. Got: ${output}`
+    );
+    assert.ok(output.includes('mock-work-dir'), `Error should include working dir. Got: ${output}`);
+    assert.strictEqual(cwdRes.status, 1, `Expected exit code 1 for malformed settings. Got: ${cwdRes.status}`);
+  });
+}
+
+// Test 9: prepare-npm.js filters platforms with --platforms
 runTest('prepare-npm.js filters platforms with --platforms', () => {
   const tmpFilterDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chzzk-load-filter-test-'));
   const result = spawnSync('node', [
@@ -422,6 +479,9 @@ console.log('----------------------------------------------------\n');
 // Clean up temporary stage directory
 try {
   fs.rmSync(tmpStageDir, { recursive: true, force: true });
+} catch (_) {}
+try {
+  fs.rmSync(tmpMockEnvDir, { recursive: true, force: true });
 } catch (_) {}
 
 if (failedTests > 0) {
