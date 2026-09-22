@@ -402,6 +402,11 @@ impl EngineOrchestrator {
                 active.remove(&channel_id);
                 let mut sessions = active_sessions.lock().await;
                 sessions.remove(&channel_id);
+                let _ = event_tx
+                    .send(AppEvent::RecordingEnded {
+                        channel_id: channel_id.clone(),
+                    })
+                    .await;
                 return;
             }
 
@@ -450,6 +455,13 @@ impl EngineOrchestrator {
                         .await;
                     let mut active = active_recordings.lock().await;
                     active.remove(&channel_id);
+                    let mut sessions = active_sessions.lock().await;
+                    sessions.remove(&channel_id);
+                    let _ = event_tx
+                        .send(AppEvent::RecordingEnded {
+                            channel_id: channel_id.clone(),
+                        })
+                        .await;
                     return;
                 }
             };
