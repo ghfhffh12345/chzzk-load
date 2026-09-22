@@ -11,7 +11,7 @@ use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::drive::auth::{DriveAuth, StoredToken};
 use chzzk_load::drive::client::DriveClient;
-use chzzk_load::engine::EngineOrchestrator;
+use chzzk_load::engine::{ActiveSessionState, EngineOrchestrator};
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::uploader::UploadTask;
 
@@ -1780,4 +1780,41 @@ async fn test_engine_orchestrator_graceful_shutdown_cleans_empty_session_dirs() 
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_active_session_state_folder_name_preserves_question_marks() {
+    let session = ActiveSessionState {
+        start_timestamp: "2026-09-22_2200".to_string(),
+        streamer_name: "Streamer?Name".to_string(),
+        current_title: "Is this live? Yes! Special: 100% <Stream>".to_string(),
+        session_folder_id: None,
+    };
+
+    let folder_name = session.folder_name();
+    assert_eq!(
+        folder_name,
+        "[2026-09-22_2200] Streamer?Name - Is this live? Yes! Special_ 100% _Stream_"
+    );
+    assert!(folder_name.contains("Streamer?Name"));
+    assert!(folder_name.contains("Is this live? Yes!"));
+    assert!(!folder_name.contains(':'));
+    assert!(!folder_name.contains('<'));
+    assert!(!folder_name.contains('>'));
+}
+
+#[test]
+fn test_active_session_state_folder_name_formatting_and_sanitization() {
+    let session = ActiveSessionState {
+        start_timestamp: "2026-09-22_1530".to_string(),
+        streamer_name: "  Chzzk Streamer / Channel  ".to_string(),
+        current_title: "What's Next? Let's Play | Ep. 1 *Final*".to_string(),
+        session_folder_id: Some("folder_123".to_string()),
+    };
+
+    let folder_name = session.folder_name();
+    assert_eq!(
+        folder_name,
+        "[2026-09-22_1530] Chzzk Streamer _ Channel - What's Next? Let's Play _ Ep. 1 _Final_"
+    );
 }
