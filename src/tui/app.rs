@@ -1,7 +1,7 @@
 use crossterm::event::KeyCode;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
-use crate::tui::event::AppEvent;
+use crate::tui::event::{AppEvent, LogEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelItem {
@@ -33,7 +33,7 @@ pub struct App {
     pub uploaded_count: usize,
     pub reclaimed_mb: f64,
     pub active_uploads: HashMap<String, ActiveUpload>,
-    pub logs: Vec<String>,
+    pub logs: VecDeque<LogEntry>,
     pub log_scroll: usize,
     pub show_logs: bool,
     pub is_shutting_down: bool,
@@ -59,7 +59,7 @@ impl App {
             uploaded_count: 0,
             reclaimed_mb: 0.0,
             active_uploads: HashMap::new(),
-            logs: Vec::new(),
+            logs: VecDeque::with_capacity(200),
             log_scroll: 0,
             show_logs: true,
             is_shutting_down: false,
@@ -96,6 +96,25 @@ impl App {
             .channel_scroll
             .min(self.channels.len().saturating_sub(1));
         self.selected_channel_idx = self.channel_scroll;
+    }
+
+    fn update_primary_upload(&mut self, completed_or_failed_chunk: &str) {
+        if self.active_upload_name.as_deref() == Some(completed_or_failed_chunk) {
+            if let Some(first) = self.active_uploads.values().next() {
+                self.active_upload_name = Some(first.chunk_name.clone());
+                if first.total_bytes > 0 {
+                    self.upload_progress_pct =
+                        ((first.uploaded_bytes as f64 / first.total_bytes as f64) * 100.0)
+                            .round()
+                            .min(100.0) as u16;
+                }
+                self.upload_speed = first.speed_mb_s;
+            } else {
+                self.active_upload_name = None;
+                self.upload_progress_pct = 0;
+                self.upload_speed = 0.0;
+            }
+        }
     }
 
     pub fn handle_event(&mut self, event: AppEvent) {
@@ -179,22 +198,7 @@ impl App {
                     self.active_uploads.remove(&channel_id);
                 }
 
-                if self.active_upload_name.as_deref() == Some(&chunk_name) {
-                    if let Some(first) = self.active_uploads.values().next() {
-                        self.active_upload_name = Some(first.chunk_name.clone());
-                        if first.total_bytes > 0 {
-                            self.upload_progress_pct =
-                                ((first.uploaded_bytes as f64 / first.total_bytes as f64) * 100.0)
-                                    .round()
-                                    .min(100.0) as u16;
-                        }
-                        self.upload_speed = first.speed_mb_s;
-                    } else {
-                        self.active_upload_name = None;
-                        self.upload_progress_pct = 0;
-                        self.upload_speed = 0.0;
-                    }
-                }
+                self.update_primary_upload(&chunk_name);
             }
             AppEvent::UploadFailed {
                 channel_id,
@@ -205,24 +209,14 @@ impl App {
                 {
                     self.active_uploads.remove(&channel_id);
                 }
-                if self.active_upload_name.as_deref() == Some(&chunk_name) {
-                    self.active_upload_name = self
-                        .active_uploads
-                        .values()
-                        .next()
-                        .map(|u| u.chunk_name.clone());
-                    if self.active_upload_name.is_none() {
-                        self.upload_progress_pct = 0;
-                        self.upload_speed = 0.0;
-                    }
-                }
+
+                self.update_primary_upload(&chunk_name);
             }
-            AppEvent::Log(msg) => {
-                self.log_scroll = 0;
-                self.logs.push(msg.to_string());
-                if self.logs.len() > 200 {
-                    self.logs.remove(0);
+            AppEvent::Log(entry) => {
+                if self.logs.len() >= 200 {
+                    self.logs.pop_front();
                 }
+                self.logs.push_back(entry);
             }
             AppEvent::Key(key) => {
                 if key.kind == crossterm::event::KeyEventKind::Release {

@@ -112,6 +112,8 @@ fn test_app_refresh_keybinding() {
 
 #[test]
 fn test_app_log_fifo_cap() {
+    use chzzk_load::tui::event::{AppEvent, LogEntry, LogKind};
+
     let mut app = App::new();
 
     for i in 0..250 {
@@ -119,9 +121,59 @@ fn test_app_log_fifo_cap() {
     }
 
     assert_eq!(app.logs.len(), 200);
-    // Oldest 50 should be discarded; logs[0] should be "[INFO] Log message 50"
-    assert_eq!(app.logs[0], "[INFO] Log message 50");
-    assert_eq!(app.logs[199], "[INFO] Log message 249");
+    assert_eq!(app.logs.front().unwrap().message, "Log message 50");
+    assert_eq!(app.logs.front().unwrap().kind, LogKind::Info);
+    assert_eq!(app.logs.back().unwrap().message, "Log message 249");
+}
+
+#[test]
+fn test_app_log_incoming_does_not_reset_scroll() {
+    let mut app = App::new();
+    app.log_scroll = 10;
+    app.handle_event(AppEvent::Log(LogEntry::info(
+        "New message while viewing history",
+    )));
+    assert_eq!(
+        app.log_scroll, 10,
+        "Incoming log must not reset user scroll offset"
+    );
+}
+
+#[test]
+fn test_app_upload_failed_transitions_to_next_active_upload() {
+    let mut app = App::new();
+
+    app.handle_event(AppEvent::UploadProgress {
+        channel_id: "c2".to_string(),
+        chunk_name: "chunk_0002.ts".to_string(),
+        streamer_name: "Streamer 2".to_string(),
+        uploaded_bytes: 20_000_000,
+        total_bytes: 80_000_000,
+        speed_mb_s: 5.0,
+    });
+
+    app.handle_event(AppEvent::UploadProgress {
+        channel_id: "c1".to_string(),
+        chunk_name: "chunk_0001.ts".to_string(),
+        streamer_name: "Streamer 1".to_string(),
+        uploaded_bytes: 50_000_000,
+        total_bytes: 100_000_000,
+        speed_mb_s: 10.0,
+    });
+
+    assert_eq!(app.active_upload_name.as_deref(), Some("chunk_0001.ts"));
+    assert_eq!(app.upload_progress_pct, 50);
+    assert!((app.upload_speed - 10.0).abs() < f64::EPSILON);
+
+    // Failing active upload c1 chunk_0001.ts should transition to c2 chunk_0002.ts
+    app.handle_event(AppEvent::UploadFailed {
+        channel_id: "c1".to_string(),
+        chunk_name: "chunk_0001.ts".to_string(),
+    });
+
+    assert_eq!(app.active_upload_name.as_deref(), Some("chunk_0002.ts"));
+    assert_eq!(app.upload_progress_pct, 25);
+    assert!((app.upload_speed - 5.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -227,7 +279,8 @@ fn test_draw_ui_rendering_smoke() {
     app.upload_speed = 5.2;
     app.uploaded_count = 3;
     app.reclaimed_mb = 150.0;
-    app.logs.push("[INFO] System initialized".to_string());
+    app.logs
+        .push_back(LogEntry::from("[INFO] System initialized"));
 
     // Verify drawing does not panic
     terminal.draw(|f| draw_ui(f, &app)).unwrap();
@@ -253,18 +306,19 @@ fn test_logs_strictly_bounded_and_clipping() {
         // Add single-line logs, multi-line logs, and very long lines exceeding width
         for i in 0..100 {
             if i % 10 == 0 {
-                app.logs.push(format!(
+                app.logs.push_back(LogEntry::from(format!(
                     "[ERROR] Line {} with\nnewline 1\nnewline 2\nnewline 3",
                     i
-                ));
+                )));
             } else if i % 5 == 0 {
-                app.logs.push(format!(
+                app.logs.push_back(LogEntry::from(format!(
                     "[WARN] Very long log line {} {}",
                     i,
                     "x".repeat(200)
-                ));
+                )));
             } else {
-                app.logs.push(format!("[INFO] Regular log {}", i));
+                app.logs
+                    .push_back(LogEntry::from(format!("[INFO] Regular log {}", i)));
             }
         }
 
@@ -310,7 +364,8 @@ fn test_logs_strictly_bounded_and_clipping() {
 fn test_logs_autoscroll_and_pageup_down() {
     let mut app = App::new();
     for i in 0..50 {
-        app.logs.push(format!("[INFO] Entry {}", i));
+        app.logs
+            .push_back(LogEntry::from(format!("[INFO] Entry {}", i)));
     }
     assert_eq!(app.log_scroll, 0);
 
@@ -832,7 +887,7 @@ fn test_l_key_toggles_logs_and_expands_body() {
             title: format!("Title {:02}", i),
         });
     }
-    app.logs.push("[INFO] Log 1".to_string());
+    app.logs.push_back(LogEntry::from("[INFO] Log 1"));
 
     // By default, show_logs is true
     assert!(app.show_logs);

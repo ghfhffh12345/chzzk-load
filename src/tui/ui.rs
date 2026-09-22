@@ -345,8 +345,9 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
             let inner_width = log_area.width as usize;
 
             // Flatten all log entries into individual lines, splitting on newlines
+            let formatted_logs: Vec<String> = app.logs.iter().map(|e| e.to_string()).collect();
             let mut flattened_lines: Vec<&str> = Vec::new();
-            for log in &app.logs {
+            for log in &formatted_logs {
                 for line in log.lines() {
                     flattened_lines.push(line);
                 }

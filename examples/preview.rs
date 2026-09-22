@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use chzzk_load::tui::app::{ActiveUpload, App, ChannelItem};
-use chzzk_load::tui::event::AppEvent;
+use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::tui::ui::draw_ui;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -134,22 +134,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     app.active_uploads = uploads;
 
-    app.logs = vec![
-        "[INFO] Google Drive authenticated successfully".to_string(),
-        "[REC] Spawned FFmpeg segmenter (600s TS chunks) -> recordings/a9a34351_20260922"
-            .to_string(),
-        "[DRIVE] Session folder ready: 'Chzzk_Recordings/2026-09-22 하네 - 쌀먹쥐'".to_string(),
-        "[FFMPEG] Packet corrupt (stream = 0, dts = 1875900).".to_string(),
-        "[FFMPEG] Invalid NAL unit size (10632 > 6612).".to_string(),
-        "[REC] chunk_0140.ts sealed. Pushed to Drive upload queue.".to_string(),
-        "[CLEAN] Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)".to_string(),
-        "[REC] chunk_0141.ts sealed. Pushed to Drive upload queue.".to_string(),
-        "[CLEAN] Uploaded & deleted chunk_0141.ts (reclaimed 28.1 MB)".to_string(),
-        "[REC] Spawned FFmpeg segmenter (600s TS chunks) -> recordings/b1a23456_20260922"
-            .to_string(),
-        "[REC] chunk_0142.ts sealed. Pushed to Drive upload queue.".to_string(),
-        "[INFO] All monitored channels status synced successfully".to_string(),
-    ];
+    app.logs = VecDeque::from([
+        LogEntry::from("[INFO] Google Drive authenticated successfully"),
+        LogEntry::from(
+            "[REC] Spawned FFmpeg segmenter (600s TS chunks) -> recordings/a9a34351_20260922",
+        ),
+        LogEntry::from("[DRIVE] Session folder ready: 'Chzzk_Recordings/2026-09-22 하네 - 쌀먹쥐'"),
+        LogEntry::from("[FFMPEG] Packet corrupt (stream = 0, dts = 1875900)."),
+        LogEntry::from("[FFMPEG] Invalid NAL unit size (10632 > 6612)."),
+        LogEntry::from("[REC] chunk_0140.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::from("[CLEAN] Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)"),
+        LogEntry::from("[REC] chunk_0141.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::from("[CLEAN] Uploaded & deleted chunk_0141.ts (reclaimed 28.1 MB)"),
+        LogEntry::from(
+            "[REC] Spawned FFmpeg segmenter (600s TS chunks) -> recordings/b1a23456_20260922",
+        ),
+        LogEntry::from("[REC] chunk_0142.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::from("[INFO] All monitored channels status synced successfully"),
+    ]);
 
     enable_raw_mode()?;
     let mut stdout = stdout();
