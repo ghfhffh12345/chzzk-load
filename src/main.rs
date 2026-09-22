@@ -218,5 +218,9 @@ async fn main() -> anyhow::Result<()> {
         let _ = tokio::time::timeout(Duration::from_secs(2), orch_handle).await;
     }
 
+    // Clean up any empty stream session folders inside local recordings directory on shutdown
+    let recordings_base = resolve_path(std::path::Path::new(&settings.general.recordings_dir));
+    let _ = EngineOrchestrator::cleanup_empty_session_dirs(&recordings_base).await;
+
     Ok(())
 }

@@ -207,6 +207,31 @@ impl EngineOrchestrator {
         })
     }
 
+    pub async fn cleanup_empty_session_dirs(recordings_dir: &Path) -> std::io::Result<usize> {
+        if !recordings_dir.exists() || !recordings_dir.is_dir() {
+            return Ok(0);
+        }
+
+        let mut removed_count = 0;
+        let mut entries = tokio::fs::read_dir(recordings_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let is_dir = match entry.file_type().await {
+                Ok(ft) => ft.is_dir(),
+                Err(_) => entry.path().is_dir(),
+            };
+            if is_dir {
+                let path = entry.path();
+                if let Ok(mut sub_entries) = tokio::fs::read_dir(&path).await
+                    && let Ok(None) = sub_entries.next_entry().await
+                    && tokio::fs::remove_dir(&path).await.is_ok()
+                {
+                    removed_count += 1;
+                }
+            }
+        }
+        Ok(removed_count)
+    }
+
     pub async fn ensure_session_folder(
         drive: &DriveClient,
         root_name: &str,
@@ -881,6 +906,25 @@ impl EngineOrchestrator {
 
         // 3. Await upload consumer to finish all in-flight and queued uploads
         let _ = tokio::time::timeout(Duration::from_secs(10), upload_handle).await;
+
+        // 4. Clean up any empty stream session folders inside the local recordings directory
+        let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
+        match Self::cleanup_empty_session_dirs(&recordings_base).await {
+            Ok(count) if count > 0 => {
+                let _ = self.event_tx.try_send(AppEvent::Log(format!(
+                    "[CLEAN] Cleaned up {} empty session folder(s) in '{}'",
+                    count,
+                    recordings_base.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let _ = self.event_tx.try_send(AppEvent::Log(format!(
+                    "[WARN] Failed to clean up empty session folders: {}",
+                    e
+                )));
+            }
+        }
 
         let _ = self.event_tx.try_send(AppEvent::Log(
             "[INFO] Engine graceful shutdown complete.".to_string(),

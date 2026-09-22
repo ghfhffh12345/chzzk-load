@@ -1630,3 +1630,128 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_cleanup_empty_session_dirs_removes_empty_and_preserves_non_empty() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_cleanup_empty_session_dirs_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let empty_dir_1 = temp_dir.join("ch1_20260922_100000");
+    let empty_dir_2 = temp_dir.join("ch2_20260922_110000");
+    let non_empty_dir = temp_dir.join("ch3_20260922_120000");
+    let regular_file = temp_dir.join("notes.txt");
+
+    fs::create_dir_all(&empty_dir_1).unwrap();
+    fs::create_dir_all(&empty_dir_2).unwrap();
+    fs::create_dir_all(&non_empty_dir).unwrap();
+    fs::write(non_empty_dir.join("chunk_0000.ts"), b"test_stream_data").unwrap();
+    fs::write(&regular_file, b"standalone file").unwrap();
+
+    let removed = EngineOrchestrator::cleanup_empty_session_dirs(&temp_dir)
+        .await
+        .expect("cleanup should succeed");
+
+    assert_eq!(removed, 2, "Expected exactly 2 empty session dirs removed");
+    assert!(!empty_dir_1.exists(), "empty_dir_1 should be removed");
+    assert!(!empty_dir_2.exists(), "empty_dir_2 should be removed");
+    assert!(non_empty_dir.exists(), "non_empty_dir should still exist");
+    assert!(
+        non_empty_dir.join("chunk_0000.ts").exists(),
+        "chunk inside non_empty_dir should still exist"
+    );
+    assert!(regular_file.exists(), "regular file should not be removed");
+    assert!(
+        temp_dir.exists(),
+        "recordings_dir itself should still exist"
+    );
+
+    // Calling on non-existent directory should return Ok(0) safely
+    let non_existent = temp_dir.join("does_not_exist");
+    let removed_none = EngineOrchestrator::cleanup_empty_session_dirs(&non_existent)
+        .await
+        .expect("nonexistent dir should return Ok(0)");
+    assert_eq!(removed_none, 0);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_graceful_shutdown_cleans_empty_session_dirs() {
+    use tokio_util::sync::CancellationToken;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_orch_shutdown_clean_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let session_empty = temp_dir.join("chan_empty_20260922_100000");
+    let session_non_empty = temp_dir.join("chan_data_20260922_100000");
+
+    fs::create_dir_all(&session_empty).unwrap();
+    fs::create_dir_all(&session_non_empty).unwrap();
+    fs::write(session_non_empty.join("chunk_0000.ts"), b"test").unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![],
+        ..Default::default()
+    };
+    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let cancel_token = CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        None,
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let run_handle = tokio::spawn(orchestrator.run());
+
+    // Give run loop a moment to start
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Trigger graceful shutdown
+    cancel_token.cancel();
+
+    // Await run_handle
+    let res = tokio::time::timeout(std::time::Duration::from_secs(3), run_handle).await;
+    assert!(res.is_ok(), "Engine did not shut down within timeout");
+
+    // Assert empty session folder was deleted
+    assert!(
+        !session_empty.exists(),
+        "Empty session directory must be deleted on shutdown"
+    );
+    // Assert non-empty session folder remains
+    assert!(
+        session_non_empty.exists(),
+        "Non-empty session directory must be preserved"
+    );
+
+    let mut got_clean_log = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(msg) = ev
+            && msg.contains("Cleaned up")
+            && msg.contains("empty session folder")
+        {
+            got_clean_log = true;
+        }
+    }
+    assert!(
+        got_clean_log,
+        "Expected log message indicating cleanup of empty session folder"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
