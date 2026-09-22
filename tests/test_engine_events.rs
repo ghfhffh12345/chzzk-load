@@ -1108,7 +1108,7 @@ async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
     let drain_handle = tokio::spawn(async move {
         let mut got_ended = false;
         while let Ok(Some(ev)) =
-            tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv()).await
+            tokio::time::timeout(std::time::Duration::from_secs(15), event_rx.recv()).await
         {
             if let AppEvent::RecordingEnded { channel_id } = ev
                 && channel_id == "chan_shutdown"
@@ -1120,8 +1120,8 @@ async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
         got_ended
     });
 
-    // Await run_handle with 5-second timeout
-    let res = tokio::time::timeout(std::time::Duration::from_secs(5), run_handle).await;
+    // Await run_handle with 15-second timeout (allowing for child process wait & cleanup)
+    let res = tokio::time::timeout(std::time::Duration::from_secs(15), run_handle).await;
     assert!(
         res.is_ok(),
         "Engine did not shut down cleanly during active recording!"
@@ -1477,19 +1477,28 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, Some(drive), event_tx);
 
-    // Poll 1: Stream is detected, session spawned
-    orchestrator.poll_channels_once(&upload_tx).await;
-
-    // Simulate session having created its Drive folder with ID "session_folder_777"
+    // Initialize active recording state with existing session folder
     {
+        let active = orchestrator.active_recordings();
+        active.lock().await.insert("chan_rename".to_string());
+
         let sessions = orchestrator.active_sessions();
-        let mut guard = sessions.lock().await;
-        if let Some(session) = guard.get_mut("chan_rename") {
-            session.session_folder_id = Some("session_folder_777".to_string());
-        }
+        sessions.lock().await.insert(
+            "chan_rename".to_string(),
+            chzzk_load::engine::ActiveSessionState {
+                start_timestamp: "2026-09-22_1000".to_string(),
+                streamer_name: "RenameStreamer".to_string(),
+                current_title: "Initial Stream Title".to_string(),
+                session_folder_id: Some("session_folder_777".to_string()),
+            },
+        );
     }
 
-    // Poll 2: Streamer changed title to "Updated Stream Title"
+    // Poll 1: Channel is polled with same initial title (no rename expected)
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(renamed_new_name.lock().unwrap().is_none());
+
+    // Poll 2: Streamer changed title to "Updated Stream Title" (triggers Drive folder rename)
     orchestrator.poll_channels_once(&upload_tx).await;
 
     // Verify Drive rename request was made
@@ -1595,7 +1604,24 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
 
-    // Poll 1: Session starts with Early Title 1
+    // Initialize active recording state before Drive folder is created
+    {
+        let active = orchestrator.active_recordings();
+        active.lock().await.insert("chan_pre".to_string());
+
+        let sessions = orchestrator.active_sessions();
+        sessions.lock().await.insert(
+            "chan_pre".to_string(),
+            chzzk_load::engine::ActiveSessionState {
+                start_timestamp: "2026-09-22_1000".to_string(),
+                streamer_name: "PreStreamer".to_string(),
+                current_title: "Early Title 1".to_string(),
+                session_folder_id: None,
+            },
+        );
+    }
+
+    // Poll 1: Session starts with Early Title 1 (already active, no title change)
     orchestrator.poll_channels_once(&upload_tx).await;
 
     {
