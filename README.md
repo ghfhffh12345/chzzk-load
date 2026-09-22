@@ -5,31 +5,29 @@
 [![CI](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml/badge.svg)](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A high-performance, standalone Rust application for real-time Naver Chzzk live stream recording and Google Drive syncing, featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
+A high-performance, standalone tool for automated Naver Chzzk live stream recording and real-time Google Drive syncing, featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
 
-`chzzk-load` monitors live broadcasts, losslessly segments streams into MPEG-TS chunks using FFmpeg stream-copy (`-c copy`), concurrently uploads completed chunks to Google Drive via resumable chunked uploads, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
+`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently uploads completed chunks to Google Drive, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
+
+![chzzk-load TUI Dashboard](assets/tui-preview.png)
 
 ---
 
 ## Key Features
 
-- ⚡ **Zero CPU Transcoding Overhead**: Uses FFmpeg stream-copy (`-c copy`) to segment raw HLS video streams into `.ts` chunks with near-zero CPU and memory usage.
-- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk simultaneously per active stream. Chunks are permanently deleted immediately upon receiving an HTTP 200/201 upload confirmation.
-- 🛡️ **N+1 Segment Boundary Safety**: Segment $N$ is only sealed and queued for upload after segment $N+1$ exists on disk with file size $> 0$ bytes (or upon final stream termination), guaranteeing no partial or corrupted chunks are uploaded.
-- ☁️ **Resumable Google Drive Sync & Local-Only Fallback**: Uploads chunks using the Google Drive API v3 resumable upload protocol with automated PKCE OAuth2 authorization and token refresh. If Google Drive credentials are not provided, the application runs seamlessly in local-only recording mode.
-- 🖥️ **Interactive Ratatui TUI Dashboard**: Real-time status monitoring including monitored channel states, live stream titles, upload progress gauges, transfer speed metrics, disk space reclaimed counters, and a scrollable log console.
-- 🔄 **Anti-Race Cache Deduplication**: Protects against Naver Chzzk CDN cache TTL delays (10–30s) by tracking finished broadcast `live_id`s and enforcing a post-recording cooldown to prevent duplicate sessions.
-- 🍪 **Authenticated Session Support**: Supports optional Naver cookie credentials (`NID_AUT`, `NID_SES`) to access age-restricted or subscriber-only 1080p live streams.
+- ⚡ **Lossless Stream-Copy (`-c copy`)**: Segments live HLS video streams into `.ts` chunks with zero CPU transcoding overhead.
+- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk per active stream. Chunks are permanently deleted immediately upon verified cloud upload.
+- 🛡️ **N+1 Segment Boundary Safety**: Chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
+- ☁️ **Resumable Google Drive Sync & Local Fallback**: Direct cloud upload via Google Drive API v3 with automatic PKCE OAuth2 authorization. Runs in local-only recording mode if Google Drive credentials are omitted.
+- 🖥️ **Interactive Terminal Dashboard**: Real-time channel states, live stream titles, upload progress gauges, transfer speed metrics, disk space reclaimed counters, and live activity logs.
+- 🔄 **Anti-Race Cache Protection**: Enforces post-recording cooldown and tracks broadcast session IDs to prevent duplicate recording triggers caused by CDN cache TTL delays.
 
 ---
 
 ## Prerequisites
 
-- **FFmpeg**: Must be installed and accessible on your system's `PATH` (required for all installation methods).
-- **Node.js**: (Optional) Version 18+ if using the `npx` or `npm` CLI runner.
-- **Rust**: (Optional) Version 1.85+ (Rust 2024 edition) only if building from source.
+- **FFmpeg**: Must be installed and accessible on your system's `PATH`.
 
-To verify FFmpeg is accessible:
 ```bash
 ffmpeg -version
 ```
@@ -38,70 +36,27 @@ ffmpeg -version
 
 ## Installation & Quick Start
 
-### 1. via npm (Instant execution / Global CLI)
-
-The easiest way to run `chzzk-load` without manually managing binaries or installing Rust. The npm wrapper package automatically resolves and executes the matching pre-compiled native binary for your OS and CPU architecture.
+Install globally via npm:
 
 ```bash
-# Run directly with npx
-npx chzzk-load
-
-# Or install globally
 npm install -g chzzk-load
-chzzk-load
 ```
 
-### 2. via Pre-compiled Standalone Binaries (GitHub Releases)
-
-Download pre-compiled standalone executables directly from [GitHub Releases](https://github.com/ghfhffh12345/chzzk-load/releases). No Cargo or Node.js runtime is required.
-
-| Platform | Architecture | Archive | Description |
-| :--- | :--- | :--- | :--- |
-| **Windows** | x86_64 | `chzzk-load-windows-x64.zip` | Windows 64-bit standalone executable (`chzzk-load.exe`) |
-| **Linux** | x86_64 | `chzzk-load-linux-x64.tar.gz` | Linux x86_64 static musl binary (portable, zero glibc dependencies) |
-| **Linux** | ARM64 (aarch64) | `chzzk-load-linux-arm64.tar.gz` | Linux ARM64 static musl binary (Raspberry Pi, AWS Graviton, etc.) |
-| **macOS** | Intel (x86_64) | `chzzk-load-darwin-x64.tar.gz` | macOS 64-bit Intel binary |
-| **macOS** | Apple Silicon (ARM64) | `chzzk-load-darwin-arm64.tar.gz` | macOS Apple Silicon binary (M1/M2/M3/M4) |
-
-Extract the archive and run the executable directly:
-```bash
-# On Linux / macOS
-tar -xzvf chzzk-load-linux-x64.tar.gz
-./chzzk-load
-
-# On Windows
-# Extract chzzk-load-windows-x64.zip and run chzzk-load.exe
-```
-
-### 3. via Cargo (Build from Source)
-
-Clone the repository and build the release binary:
-
-```bash
-git clone https://github.com/ghfhffh12345/chzzk-load.git
-cd chzzk-load
-cargo build --release
-```
-
-The compiled standalone executable will be located at `target/release/chzzk-load` (or `target/release/chzzk-load.exe` on Windows).
-
-### 4. Running & Configuration
+Start the application:
 
 ```bash
 # Run with default settings (automatically creates settings.json if missing)
 chzzk-load
 
-# Or specify a custom configuration file path
+# Or specify a custom configuration file
 chzzk-load --config /path/to/my-settings.json
 ```
 
-On first startup, if `settings.json` is not present, `chzzk-load` automatically generates a default template in the current working directory.
+On first startup, `chzzk-load` generates a default `settings.json` template in the current working directory if one does not exist.
 
 ---
 
 ## Configuration (`settings.json`)
-
-The application is configured using a JSON configuration file (`settings.json`). Paths can be relative to the current working directory (with portable executable directory fallback) or absolute.
 
 ```json
 {
@@ -123,118 +78,53 @@ The application is configured using a JSON configuration file (`settings.json`).
   },
   "channels": [
     {
-      "id": "4c3b44869c9b1399723ec28ec236f736",
-      "name": "SampleStreamer"
+      "id": "1a1dd9ce56fb61a37ffb6f69f6d5b978",
+      "name": "강퀴"
     }
   ]
 }
 ```
 
-### Configuration Parameters
+### Key Settings
 
-| Section | Parameter | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `general` | `chunk_duration_seconds` | `600` (10m) | Duration in seconds for each MPEG-TS chunk. |
-| `general` | `poll_interval_seconds` | `20` | Interval in seconds between live broadcast status checks. |
-| `general` | `stream_cooldown_seconds` | `60` | Post-recording cooldown period in seconds to prevent duplicate sessions from CDN caching. |
-| `general` | `recordings_dir` | `"recordings"` | Local directory where temporary chunks are saved. |
-| `general` | `min_free_disk_gb` | `2.0` | Minimum free disk space required to record. |
-| `google_drive` | `credentials_path` | `"credentials.json"` | Path to Google OAuth2 Client ID credentials JSON file. |
-| `google_drive` | `token_path` | `"token.json"` | Path where authenticated Google OAuth2 tokens are stored. |
-| `google_drive` | `root_folder_name` | `"Chzzk_Recordings"` | Name of the root folder created in Google Drive. |
-| `chzzk` | `nid_aut` | `""` | Optional Naver session cookie (`NID_AUT`) for adult/subscriber streams. |
-| `chzzk` | `nid_ses` | `""` | Optional Naver session cookie (`NID_SES`) for adult/subscriber streams. |
-| `channels` | `id` | - | 32-character Chzzk channel ID (from channel URL). |
-| `channels` | `name` | - | Human-readable channel display name. |
+| Field | Default | Description |
+| :--- | :--- | :--- |
+| `general.chunk_duration_seconds` | `600` (10m) | Duration in seconds for each video chunk. |
+| `general.poll_interval_seconds` | `20` | Interval in seconds between live broadcast status checks. |
+| `general.stream_cooldown_seconds` | `60` | Post-stream cooldown to avoid duplicate sessions from CDN caching. |
+| `general.recordings_dir` | `"recordings"` | Local folder for temporary video segments. |
+| `google_drive.credentials_path` | `"credentials.json"` | Path to Google OAuth2 Desktop client secrets file. |
+| `google_drive.root_folder_name` | `"Chzzk_Recordings"` | Destination folder name created in Google Drive. |
+| `chzzk.nid_aut` / `nid_ses` | `""` | Optional Naver session cookies for adult/subscriber-only streams. |
+| `channels` | - | List of monitored Chzzk channels (`id` from channel URL, `name` for display). |
 
 ---
 
 ## Google Drive Setup
 
-`chzzk-load` uploads chunks directly to Google Drive via resumable upload. If you do not configure Google Drive, `chzzk-load` will automatically run in **local-only recording mode** and save `.ts` files to your `recordings_dir`.
+If Google Drive credentials are not provided, `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files in `recordings_dir`.
 
-### Enabling Google Drive Sync:
-1. Navigate to the [Google Cloud Console](https://console.cloud.google.com/).
-2. Create a new project and enable the **Google Drive API**.
-3. Configure the **OAuth Consent Screen** (User Type: External, add your Google account as a Test User if in testing mode).
-4. Go to **Credentials** $\to$ **Create Credentials** $\to$ **OAuth Client ID**.
-5. Select **Desktop App** as the application type.
-6. Download the generated client secrets JSON and save it as `credentials.json` next to the `chzzk-load` executable (or update `credentials_path` in `settings.json`).
-7. Start `chzzk-load`. A browser window will automatically open asking for authorization.
-8. Approve access. The application will receive the authorization code on a local loopback server and store `token.json` for subsequent automated runs (with automatic token refresh).
+To enable automatic Google Drive upload:
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Google Drive API**.
+2. Under **Credentials** $\to$ **Create Credentials** $\to$ **OAuth Client ID**, select **Desktop App**.
+3. Download the client secrets JSON, rename it to `credentials.json`, and place it in the same directory as `settings.json`.
+4. Run `chzzk-load`. A browser window will open for one-time OAuth2 authorization. Tokens will be automatically saved to `token.json` and refreshed in future runs.
 
 ---
 
-## TUI Keybindings
-
-When `chzzk-load` is running, you can navigate and control the dashboard with the following keyboard shortcuts:
+## Keyboard Shortcuts
 
 | Key | Action |
 | :--- | :--- |
-| `q` | **Quit**: Initiates graceful shutdown (terminates active FFmpeg processes and flushes pending uploads). |
-| `r` | **Refresh**: Immediately triggers a manual channel status check. |
-| `↑` / `k` | **Navigate Up**: Select previous channel in the channels list. |
-| `↓` / `j` | **Navigate Down**: Select next channel in the channels list. |
-| `PageUp` | **Scroll Logs Up**: Scroll up log history by 5 lines. |
-| `PageDown` | **Scroll Logs Down**: Scroll down log history by 5 lines. |
-| `Home` | **Scroll Logs to Top**: Jump to the oldest log messages. |
-| `End` | **Scroll Logs to Bottom**: Jump to latest log messages and re-enable auto-tail. |
-
----
-
-## Architecture Overview
-
-```mermaid
-flowchart TD
-    subgraph Polling["Polling & Detection"]
-        P["Chzzk API Poller"] -->|"GET /service/v2/channels/{id}/live-detail"| O["Engine Orchestrator"]
-        O -->|"status == OPEN & not in cooldown"| S["Spawn Recording Session"]
-    end
-
-    subgraph Recording["Lossless Recording"]
-        S -->|"spawn child process"| F["FFmpeg (-c copy -extension_picky 0)"]
-        F -->|"write stream chunks"| D[("Local Disk: chunk_0000.ts, ...")]
-        W["Segment Watcher"] -->|"poll folder"| D
-        W -->|"chunk N+1 exists & size > 0"| N1["Seal Chunk N"]
-    end
-
-    subgraph Upload["Upload & Cleanup Pipeline"]
-        N1 -->|"send UploadTask"| Q["Upload Channel"]
-        Q -->|"resumable upload POST/PUT"| G["Google Drive API v3"]
-        G -->|"HTTP 200/201 OK"| DEL["tokio::fs::remove_file"]
-        DEL -->|"reclaim space"| D
-    end
-
-    subgraph UI["User Interface"]
-        O -->|"AppEvent"| TUI["Ratatui TUI Dashboard"]
-        Q -->|"UploadProgress / Completed"| TUI
-    end
-```
-
-1. **Stream Poller**: Periodically checks the status of monitored channels. When a broadcast goes live, it retrieves the master playlist and selects the highest resolution stream (1080p, 720p).
-2. **FFmpeg Segmenter**: Runs as an isolated child process with piped stderr and `-extension_picky 0` (handling query parameters on CDN segments). It segments the live stream into `.ts` files using stream-copy (`-c copy`) without CPU transcoding.
-3. **N+1 Segment Watcher**: Ensures only completed chunks are uploaded. Chunk $N$ is only queued for upload after chunk $N+1$ exists and has non-zero size, preventing partial uploads.
-4. **Upload Pipeline**: Streams chunk bytes via Google Drive's resumable upload protocol.
-5. **Immediate Cleanup**: As soon as Google Drive confirms receipt (HTTP 200/201), the local file is removed, strictly bounding local disk usage to 1–2 segments per stream.
-6. **TUI Interface**: Renders channel statuses, upload progress bar, transfer speeds, and diagnostic logs into an interactive raw terminal interface.
-
----
-
-## CLI Options
-
-```bash
-Real-time Chzzk stream recording and Google Drive syncing
-
-Usage: chzzk-load [OPTIONS]
-
-Options:
-  -c, --config <CONFIG>  Path to dedicated settings.json file
-  -h, --help             Print help
-  -V, --version          Print version
-```
+| `q` | **Quit**: Initiates graceful shutdown (stops active recordings and flushes pending uploads). |
+| `r` | **Refresh**: Immediately polls monitored channels. |
+| `↑` / `k` | **Navigate Up**: Select previous channel in the list. |
+| `↓` / `j` | **Navigate Down**: Select next channel in the list. |
+| `PageUp` / `PageDown` | **Scroll Logs**: Move activity logs up/down by 5 lines. |
+| `Home` / `End` | **Log Navigation**: Jump to top (oldest) or bottom (latest, re-enables auto-tail). |
 
 ---
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+Distributed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
