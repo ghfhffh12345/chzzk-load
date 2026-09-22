@@ -126,6 +126,10 @@ function main() {
 
   const child = spawn(binPath, process.argv.slice(2), {
     stdio: 'inherit',
+    env: {
+      ...process.env,
+      CHZZK_LOAD_NPM: '1',
+    },
   });
 
   process.on('SIGINT', () => child.kill('SIGINT'));

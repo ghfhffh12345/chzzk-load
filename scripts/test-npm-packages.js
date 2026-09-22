@@ -316,6 +316,51 @@ if (testBinary) {
     const output = (result.stdout + result.stderr).toLowerCase();
     assert.ok(output.includes('chzzk-load'), `Output should contain chzzk-load: ${result.stdout}`);
   });
+
+  runTest('Launcher execution: respects settings.json in current working directory', () => {
+    const tmpEnvDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chzzk-load-cwd-test-'));
+    const nodeModules = path.join(tmpEnvDir, 'node_modules');
+    const mainPkgDir = path.join(nodeModules, 'chzzk-load');
+    const currentPkgName = `chzzk-load-${process.platform}-${process.arch}`;
+    const currentBinName = process.platform === 'win32' ? 'chzzk-load.exe' : 'chzzk-load';
+    const platformPkgDir = path.join(nodeModules, currentPkgName);
+
+    fs.mkdirSync(path.join(mainPkgDir, 'bin'), { recursive: true });
+    fs.copyFileSync(LAUNCHER_SCRIPT, path.join(mainPkgDir, 'bin', 'chzzk-load.js'));
+
+    fs.mkdirSync(path.join(platformPkgDir, 'bin'), { recursive: true });
+    const targetBinary = path.join(platformPkgDir, 'bin', currentBinName);
+    fs.copyFileSync(testBinary, targetBinary);
+    if (process.platform !== 'win32') {
+      fs.chmodSync(targetBinary, 0o755);
+    }
+
+    // Create a working directory with intentional malformed settings.json
+    const userWorkDir = path.join(tmpEnvDir, 'user-work-dir');
+    fs.mkdirSync(userWorkDir, { recursive: true });
+    const userSettingsPath = path.join(userWorkDir, 'settings.json');
+    fs.writeFileSync(userSettingsPath, '{ MALFORMED_JSON_TEST_MARKER }');
+
+    const stagedLauncher = path.join(mainPkgDir, 'bin', 'chzzk-load.js');
+    const envClean = { ...process.env };
+    delete envClean.CHZZK_LOAD_BIN;
+
+    const result = spawnSync('node', [stagedLauncher], {
+      cwd: userWorkDir,
+      env: envClean,
+      encoding: 'utf8',
+    });
+
+    const output = (result.stderr || '') + (result.stdout || '');
+    assert.ok(
+      output.includes('Failed to parse JSON') || output.includes('settings.json'),
+      `Should attempt to load settings.json from CWD and fail parsing. Got output:\n${output}`
+    );
+    assert.ok(
+      output.includes('user-work-dir'),
+      `Error output should reference CWD settings path. Got output:\n${output}`
+    );
+  });
 }
 
 // Test 8: prepare-npm.js filters platforms with --platforms
