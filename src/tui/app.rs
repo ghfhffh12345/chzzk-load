@@ -35,6 +35,7 @@ pub struct App {
     pub active_uploads: HashMap<String, ActiveUpload>,
     pub logs: Vec<String>,
     pub log_scroll: usize,
+    pub is_shutting_down: bool,
     pub should_quit: bool,
     pub refresh_requested: bool,
 }
@@ -59,6 +60,7 @@ impl App {
             active_uploads: HashMap::new(),
             logs: Vec::new(),
             log_scroll: 0,
+            is_shutting_down: false,
             should_quit: false,
             refresh_requested: false,
         }
@@ -213,7 +215,13 @@ impl App {
                 }
             }
             AppEvent::Key(key) => match key.code {
-                KeyCode::Char('q') => self.should_quit = true,
+                KeyCode::Char('q') => {
+                    if self.is_shutting_down {
+                        self.should_quit = true;
+                    } else {
+                        self.is_shutting_down = true;
+                    }
+                }
                 KeyCode::Char('r') => self.refresh_requested = true,
                 KeyCode::Up | KeyCode::Char('k') => self.prev_channel(),
                 KeyCode::Down | KeyCode::Char('j') => self.next_channel(),

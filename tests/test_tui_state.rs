@@ -125,12 +125,35 @@ fn test_app_log_fifo_cap() {
 }
 
 #[test]
+fn test_app_quit_two_stage_shutdown() {
+    let mut app = App::new();
+    assert!(!app.is_shutting_down);
+    assert!(!app.should_quit);
+
+    // First 'q' press triggers shutdown mode, not immediate quit
+    let q_key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+    app.handle_event(AppEvent::Key(q_key));
+    assert!(app.is_shutting_down);
+    assert!(!app.should_quit);
+
+    // Second 'q' press while in shutdown mode forces immediate quit
+    app.handle_event(AppEvent::Key(q_key));
+    assert!(app.is_shutting_down);
+    assert!(app.should_quit);
+}
+
+#[test]
 fn test_app_keyboard_navigation_and_quit() {
     let mut app = App::new();
     assert!(!app.should_quit);
 
-    // Quit key 'q'
+    // First 'q' sets is_shutting_down
     let q_key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+    app.handle_event(AppEvent::Key(q_key));
+    assert!(app.is_shutting_down);
+    assert!(!app.should_quit);
+
+    // Second 'q' sets should_quit
     app.handle_event(AppEvent::Key(q_key));
     assert!(app.should_quit);
 
