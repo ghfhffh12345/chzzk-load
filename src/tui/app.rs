@@ -27,7 +27,6 @@ pub struct App {
     pub channels: Vec<ChannelItem>,
     pub selected_channel_idx: usize,
     pub channel_scroll: usize,
-    pub active_stream: Option<String>,
     pub active_upload_name: Option<String>,
     pub upload_progress_pct: u16,
     pub upload_speed: f64,
@@ -52,7 +51,6 @@ impl App {
             channels: Vec::new(),
             selected_channel_idx: 0,
             channel_scroll: 0,
-            active_stream: None,
             active_upload_name: None,
             upload_progress_pct: 0,
             upload_speed: 0.0,
@@ -116,9 +114,8 @@ impl App {
             }
             AppEvent::RecordingStarted {
                 channel_id,
-                session_title,
+                session_title: _,
             } => {
-                self.active_stream = Some(format!("{}: {}", channel_id, session_title));
                 if let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) {
                     ch.is_active = true;
                 }
@@ -126,11 +123,6 @@ impl App {
             AppEvent::RecordingEnded { channel_id } => {
                 if let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) {
                     ch.is_active = false;
-                }
-                if let Some(ref stream) = self.active_stream
-                    && stream.starts_with(&format!("{}:", channel_id))
-                {
-                    self.active_stream = None;
                 }
             }
             AppEvent::UploadProgress {

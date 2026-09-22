@@ -187,22 +187,6 @@ fn test_app_keyboard_navigation_and_quit() {
 }
 
 #[test]
-fn test_recording_started_updates_active_stream() {
-    let mut app = App::new();
-    assert!(app.active_stream.is_none());
-
-    app.handle_event(AppEvent::RecordingStarted {
-        channel_id: "ch_abc".to_string(),
-        session_title: "Overwatch 2 Stream".to_string(),
-    });
-
-    assert!(app.active_stream.is_some());
-    let stream_text = app.active_stream.unwrap();
-    assert!(stream_text.contains("ch_abc"));
-    assert!(stream_text.contains("Overwatch 2 Stream"));
-}
-
-#[test]
 fn test_draw_ui_rendering_smoke() {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend).unwrap();
