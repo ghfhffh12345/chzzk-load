@@ -491,3 +491,41 @@ fn test_draw_ui_row_alignment_and_active_status() {
     // Verify Stream Recorder panel was removed
     assert!(!content.contains("Stream Recorder"));
 }
+
+#[test]
+fn test_draw_ui_shutdown_banner_rendering() {
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    app.reclaimed_mb = 42.5;
+    app.uploaded_count = 5;
+
+    // 1. Normal state rendering
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content_normal: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(content_normal.contains("chzzk-load v0.1.0"));
+    assert!(content_normal.contains("[q] Quit"));
+    assert!(!content_normal.contains("[ SHUTTING DOWN ]"));
+
+    // 2. Shutdown state rendering
+    app.is_shutting_down = true;
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content_shutdown: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(content_shutdown.contains("[ SHUTTING DOWN ]"));
+    assert!(content_shutdown.contains("Stopping recordings & finishing uploads..."));
+    assert!(content_shutdown.contains("Reclaimed: 42.5 MB"));
+    assert!(content_shutdown.contains("[q / Ctrl+C] Force Exit Immediately"));
+}

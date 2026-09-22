@@ -20,19 +20,35 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
         .split(area);
 
     // Header
-    let header = Paragraph::new(format!(
-        " chzzk-load v0.1.0 │ Reclaimed Space: {:.1} MB │ Chunks Uploaded: {}",
-        app.reclaimed_mb, app.uploaded_count
-    ))
-    .style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )
-    .block(
+    let (header_text, header_style, border_style) = if app.is_shutting_down {
+        (
+            format!(
+                " [ SHUTTING DOWN ] Stopping recordings & finishing uploads... │ Reclaimed: {:.1} MB │ Uploads: {} ",
+                app.reclaimed_mb, app.uploaded_count
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Yellow),
+        )
+    } else {
+        (
+            format!(
+                " chzzk-load v0.1.0 │ Reclaimed Space: {:.1} MB │ Chunks Uploaded: {}",
+                app.reclaimed_mb, app.uploaded_count
+            ),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            Style::default(),
+        )
+    };
+
+    let header = Paragraph::new(header_text).style(header_style).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded),
+            .border_type(BorderType::Rounded)
+            .border_style(border_style),
     );
     f.render_widget(header, chunks[0]);
 
@@ -276,9 +292,19 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     }
 
     // Footer
-    let footer = Paragraph::new(
-        " [q] Quit   [↑/↓] Channel   [PgUp/PgDn] Scroll Logs   [Home/End] Top/Latest   [r] Refresh ",
-    )
-    .style(Style::default().fg(Color::Yellow));
+    let (footer_text, footer_style) = if app.is_shutting_down {
+        (
+            " [q / Ctrl+C] Force Exit Immediately │ Cleaning up: stopping FFmpeg & flushing uploads... ",
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            " [q] Quit   [↑/↓] Channel   [PgUp/PgDn] Scroll Logs   [Home/End] Top/Latest   [r] Refresh ",
+            Style::default().fg(Color::Yellow),
+        )
+    };
+    let footer = Paragraph::new(footer_text).style(footer_style);
     f.render_widget(footer, chunks[3]);
 }
