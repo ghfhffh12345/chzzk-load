@@ -108,9 +108,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                 app.reclaimed_mb,
                 app.uploaded_count
             ),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
         )
     };
     let header = Paragraph::new(header_text).style(header_style);

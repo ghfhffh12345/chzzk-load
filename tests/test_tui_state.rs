@@ -870,6 +870,30 @@ fn test_draw_ui_shutdown_banner_rendering() {
     assert!(content_shutdown.contains("Stopping recordings & finishing uploads..."));
     assert!(content_shutdown.contains("Reclaimed: 42.5 MB"));
     assert!(content_shutdown.contains("q / Ctrl+C Force Exit Immediately"));
+
+    // Verify shutdown header retains Yellow and BOLD
+    let buffer_shutdown = terminal.backend().buffer();
+    let mut found_yellow_shutdown_char = false;
+    for x in 0..buffer_shutdown.area.width {
+        let cell = buffer_shutdown.cell((x, 0)).unwrap();
+        if !cell.symbol().trim().is_empty() {
+            assert_eq!(
+                cell.fg,
+                ratatui::style::Color::Yellow,
+                "Shutdown header character '{}' at ({}, 0) must be Yellow",
+                cell.symbol(),
+                x
+            );
+            assert!(
+                cell.modifier.contains(ratatui::style::Modifier::BOLD),
+                "Shutdown header character '{}' at ({}, 0) must be BOLD",
+                cell.symbol(),
+                x
+            );
+            found_yellow_shutdown_char = true;
+        }
+    }
+    assert!(found_yellow_shutdown_char);
 }
 
 #[test]
@@ -1160,4 +1184,41 @@ fn test_draw_ui_renders_all_log_kinds_without_brackets() {
     // Ensure zero square brackets anywhere
     assert!(!content.contains("["));
     assert!(!content.contains("]"));
+}
+
+#[test]
+fn test_draw_ui_normal_header_style_has_no_color() {
+    use ratatui::style::{Color, Modifier};
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let app = App::new();
+
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+
+    let mut header_text = String::new();
+    for x in 0..buffer.area.width {
+        let cell = buffer.cell((x, 0)).unwrap();
+        header_text.push_str(cell.symbol());
+        if !cell.symbol().trim().is_empty() {
+            assert_eq!(
+                cell.fg,
+                Color::Reset,
+                "Header character '{}' at ({}, 0) must have default/Reset color (no color), found {:?}",
+                cell.symbol(),
+                x,
+                cell.fg
+            );
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "Header character '{}' at ({}, 0) must be BOLD",
+                cell.symbol(),
+                x
+            );
+        }
+    }
+    assert!(header_text.contains("chzzk-load"));
 }
