@@ -1037,3 +1037,127 @@ fn test_l_key_single_press_toggle_ignores_release_event() {
     app.handle_event(AppEvent::Key(l_release));
     assert!(app.show_logs, "Logs must remain visible after key release!");
 }
+
+#[test]
+fn test_log_kind_badge_and_style_mappings() {
+    use chzzk_load::tui::event::LogKind;
+    use chzzk_load::tui::ui::log_kind_badge_and_style;
+    use ratatui::style::{Color, Modifier, Style};
+
+    let cases = [
+        (
+            LogKind::Error,
+            " ERROR ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+        ),
+        (
+            LogKind::Warn,
+            " WARN  ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM),
+        ),
+        (
+            LogKind::Clean,
+            " CLEAN ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::DIM),
+        ),
+        (
+            LogKind::Rec,
+            " REC   ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+        ),
+        (
+            LogKind::Ffmpeg,
+            " FFMPEG",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::DIM),
+        ),
+        (
+            LogKind::Drive,
+            " DRIVE ",
+            Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
+        ),
+        (
+            LogKind::Poll,
+            " POLL  ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        (
+            LogKind::Info,
+            " INFO  ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+    ];
+
+    for (kind, expected_badge, expected_style) in cases {
+        let (badge, style) = log_kind_badge_and_style(kind);
+        assert_eq!(badge, expected_badge, "Badge mismatch for {:?}", kind);
+        assert_eq!(style, expected_style, "Style mismatch for {:?}", kind);
+    }
+}
+
+#[test]
+fn test_draw_ui_renders_all_log_kinds_without_brackets() {
+    use chzzk_load::tui::event::{LogEntry, LogKind};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    app.logs
+        .push_back(LogEntry::new(LogKind::Error, "Database error"));
+    app.logs
+        .push_back(LogEntry::new(LogKind::Warn, "High memory"));
+    app.logs
+        .push_back(LogEntry::new(LogKind::Clean, "Cleaned chunk"));
+    app.logs
+        .push_back(LogEntry::new(LogKind::Rec, "Started rec"));
+    app.logs
+        .push_back(LogEntry::new(LogKind::Ffmpeg, "Encoding details"));
+    app.logs
+        .push_back(LogEntry::new(LogKind::Drive, "Uploading segment"));
+    app.logs
+        .push_back(LogEntry::new(LogKind::Poll, "Channel poll"));
+    app.logs
+        .push_back(LogEntry::new(LogKind::Info, "Normal info"));
+
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+
+    assert!(content.contains("ERROR"));
+    assert!(content.contains("Database error"));
+    assert!(content.contains("WARN"));
+    assert!(content.contains("High memory"));
+    assert!(content.contains("CLEAN"));
+    assert!(content.contains("Cleaned chunk"));
+    assert!(content.contains("REC"));
+    assert!(content.contains("Started rec"));
+    assert!(content.contains("FFMPEG"));
+    assert!(content.contains("Encoding details"));
+    assert!(content.contains("DRIVE"));
+    assert!(content.contains("Uploading segment"));
+    assert!(content.contains("POLL"));
+    assert!(content.contains("Channel poll"));
+    assert!(content.contains("INFO"));
+    assert!(content.contains("Normal info"));
+
+    // Ensure zero square brackets anywhere
+    assert!(!content.contains("["));
+    assert!(!content.contains("]"));
+}

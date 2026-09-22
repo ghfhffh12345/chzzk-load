@@ -2,6 +2,54 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 
 use crate::tui::app::App;
+use crate::tui::event::LogKind;
+
+pub fn log_kind_badge_and_style(kind: LogKind) -> (&'static str, Style) {
+    match kind {
+        LogKind::Error => (
+            " ERROR ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+        ),
+        LogKind::Warn => (
+            " WARN  ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM),
+        ),
+        LogKind::Clean => (
+            " CLEAN ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::DIM),
+        ),
+        LogKind::Rec => (
+            " REC   ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+        ),
+        LogKind::Ffmpeg => (
+            " FFMPEG",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::DIM),
+        ),
+        LogKind::Drive => (
+            " DRIVE ",
+            Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
+        ),
+        LogKind::Poll => (
+            " POLL  ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        LogKind::Info => (
+            " INFO  ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+    }
+}
 
 pub fn draw_ui(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -344,12 +392,11 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
             let inner_height = log_area.height as usize;
             let inner_width = log_area.width as usize;
 
-            // Flatten all log entries into individual lines, splitting on newlines
-            let formatted_logs: Vec<String> = app.logs.iter().map(|e| e.to_string()).collect();
-            let mut flattened_lines: Vec<&str> = Vec::new();
-            for log in &formatted_logs {
-                for line in log.lines() {
-                    flattened_lines.push(line);
+            // Flatten log entries directly into (LogKind, &str) borrowed pairs
+            let mut flattened_lines: Vec<(LogKind, &str)> = Vec::new();
+            for entry in &app.logs {
+                for line in entry.message.lines() {
+                    flattened_lines.push((entry.kind, line));
                 }
             }
 
@@ -364,53 +411,17 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
 
             let visible_lines: Vec<Line> = slice
                 .iter()
-                .map(|raw_line| {
-                    let (tag_opt, message_str) = if let Some(rest) = raw_line.strip_prefix('[') {
-                        if let Some((tag, msg)) = rest.split_once(']') {
-                            (Some(tag.trim()), msg.trim_start())
-                        } else {
-                            (None, *raw_line)
-                        }
-                    } else {
-                        (None, *raw_line)
-                    };
-
-                    let (badge_str, badge_style) = if let Some(tag) = tag_opt {
-                        let style = match tag {
-                            "ERROR" => Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
-                            "WARN" => Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::DIM),
-                            "CLEAN" => Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::DIM),
-                            "REC" => Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-                            "FFMPEG" => Style::default()
-                                .fg(Color::Magenta)
-                                .add_modifier(Modifier::DIM),
-                            _ => Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::DIM),
-                        };
-                        (format!(" {:<6} ", tag), style)
-                    } else {
-                        ("        ".to_string(), Style::default())
-                    };
-
-                    let clean_msg: String = message_str
-                        .chars()
-                        .filter(|&c| c != '[' && c != ']')
-                        .collect();
-
+                .map(|(kind, message_str)| {
+                    let (badge_str, badge_style) = log_kind_badge_and_style(*kind);
                     let badge_len = 8;
-                    if inner_width >= badge_len + clean_msg.chars().count() {
+                    if inner_width >= badge_len + message_str.chars().count() {
                         Line::from(vec![
                             Span::styled(badge_str, badge_style),
-                            Span::styled(clean_msg, Style::default()),
+                            Span::styled(*message_str, Style::default()),
                         ])
                     } else if inner_width > badge_len {
                         let available = inner_width.saturating_sub(badge_len + 1);
-                        let mut truncated: String = clean_msg.chars().take(available).collect();
+                        let mut truncated: String = message_str.chars().take(available).collect();
                         truncated.push('…');
                         Line::from(vec![
                             Span::styled(badge_str, badge_style),
