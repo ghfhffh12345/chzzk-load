@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let creds_path = resolve_path(&PathBuf::from(&settings.google_drive.credentials_path));
     let token_path = resolve_path(&PathBuf::from(&settings.google_drive.token_path));
 
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AppEvent>(100);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AppEvent>(1000);
 
     // Initialize Google Drive Auth if credentials exist
     let drive_client = if creds_path.exists() {
@@ -91,11 +91,19 @@ async fn main() -> anyhow::Result<()> {
         cancel_token.clone(),
     ));
 
-    // Handle Ctrl+C for graceful shutdown
+    // Handle Ctrl+C: first triggers graceful shutdown, subsequent presses force immediate exit
     let cancel_token_ctrlc = cancel_token.clone();
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            cancel_token_ctrlc.cancel();
+        loop {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                if cancel_token_ctrlc.is_cancelled() {
+                    let _ = disable_raw_mode();
+                    let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+                    std::process::exit(130);
+                } else {
+                    cancel_token_ctrlc.cancel();
+                }
+            }
         }
     });
 
@@ -163,8 +171,12 @@ async fn main() -> anyhow::Result<()> {
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, Show);
 
+    // Drain event_rx in background so event_tx never blocks during shutdown
+    tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+
     // Await graceful engine shutdown (FFmpeg processes exit cleanly & in-flight uploads complete)
-    let _ = orch_handle.await;
+    // with a safety timeout so the process never hangs indefinitely in the background
+    let _ = tokio::time::timeout(Duration::from_secs(10), orch_handle).await;
 
     Ok(())
 }

@@ -401,8 +401,7 @@ impl EngineOrchestrator {
                                 let trimmed = line.trim();
                                 if !trimmed.is_empty() {
                                     let _ = event_tx_stderr
-                                        .send(AppEvent::Log(format!("[FFMPEG] {}", trimmed)))
-                                        .await;
+                                        .try_send(AppEvent::Log(format!("[FFMPEG] {}", trimmed)));
                                 }
                             }
                         });
@@ -458,13 +457,13 @@ impl EngineOrchestrator {
                                     .await;
                             }
                             _ => {
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
                                 let _ = event_tx
                                     .send(AppEvent::Log(
                                         "[REC] FFmpeg did not exit within timeout, terminating process...".to_string(),
                                     ))
                                     .await;
-                                let _ = child.kill().await;
-                                let _ = child.wait().await;
                             }
                         }
 
@@ -874,20 +873,17 @@ impl EngineOrchestrator {
             }
         };
         for handle in handles {
-            let _ = handle.await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
 
         // 2. Drop the orchestrator's upload_tx sender so upload_rx closes when empty
         drop(upload_tx);
 
         // 3. Await upload consumer to finish all in-flight and queued uploads
-        let _ = upload_handle.await;
+        let _ = tokio::time::timeout(Duration::from_secs(10), upload_handle).await;
 
-        let _ = self
-            .event_tx
-            .send(AppEvent::Log(
-                "[INFO] Engine graceful shutdown complete.".to_string(),
-            ))
-            .await;
+        let _ = self.event_tx.try_send(AppEvent::Log(
+            "[INFO] Engine graceful shutdown complete.".to_string(),
+        ));
     }
 }

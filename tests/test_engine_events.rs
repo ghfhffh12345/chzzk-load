@@ -1026,6 +1026,117 @@ async fn test_engine_orchestrator_graceful_shutdown() {
 }
 
 #[tokio::test]
+async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
+    use tokio_util::sync::CancellationToken;
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 123456,
+                    "liveTitle": "Live for shutdown test",
+                    "channel": {
+                        "channelId": "chan_shutdown",
+                        "channelName": "ShutdownStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_orch_shutdown_active_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_shutdown".to_string(),
+            name: "ShutdownStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let cancel_token = CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        None,
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let run_handle = tokio::spawn(orchestrator.clone().run());
+
+    // Wait for RecordingStarted event
+    let mut recording_started = false;
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv()).await
+    {
+        if let AppEvent::RecordingStarted { channel_id, .. } = ev {
+            assert_eq!(channel_id, "chan_shutdown");
+            recording_started = true;
+            break;
+        }
+    }
+    assert!(recording_started, "Recording should have started");
+
+    // Cancel engine token while actively recording
+    cancel_token.cancel();
+
+    // In background, drain event_rx like main.rs should do during shutdown
+    let drain_handle = tokio::spawn(async move {
+        let mut got_ended = false;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv()).await
+        {
+            if let AppEvent::RecordingEnded { channel_id } = ev
+                && channel_id == "chan_shutdown"
+            {
+                got_ended = true;
+                break;
+            }
+        }
+        got_ended
+    });
+
+    // Await run_handle with 5-second timeout
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), run_handle).await;
+    assert!(
+        res.is_ok(),
+        "Engine did not shut down cleanly during active recording!"
+    );
+
+    let got_ended = drain_handle.await.unwrap_or(false);
+    assert!(
+        got_ended,
+        "RecordingEnded event should be emitted upon shutdown"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_engine_orchestrator_manual_refresh() {
     use tokio_util::sync::CancellationToken;
 
