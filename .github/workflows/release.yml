@@ -80,12 +80,12 @@ jobs:
         run: |
           mkdir -p dist/linux-x64 dist/linux-arm64
           cp target/x86_64-unknown-linux-musl/release/chzzk-load dist/linux-x64/
-          cp README.md LICENSE dist/linux-x64/
-          tar -czvf chzzk-load-linux-x64.tar.gz -C dist/linux-x64 chzzk-load README.md LICENSE
+          cp README.md README.ko.md LICENSE dist/linux-x64/
+          tar -czvf chzzk-load-linux-x64.tar.gz -C dist/linux-x64 chzzk-load README.md README.ko.md LICENSE
 
           cp target/aarch64-unknown-linux-musl/release/chzzk-load dist/linux-arm64/
-          cp README.md LICENSE dist/linux-arm64/
-          tar -czvf chzzk-load-linux-arm64.tar.gz -C dist/linux-arm64 chzzk-load README.md LICENSE
+          cp README.md README.ko.md LICENSE dist/linux-arm64/
+          tar -czvf chzzk-load-linux-arm64.tar.gz -C dist/linux-arm64 chzzk-load README.md README.ko.md LICENSE
 
       - name: Compute SHA256 checksums
         run: |
@@ -136,12 +136,12 @@ jobs:
         run: |
           mkdir -p dist/darwin-x64 dist/darwin-arm64
           cp target/x86_64-apple-darwin/release/chzzk-load dist/darwin-x64/
-          cp README.md LICENSE dist/darwin-x64/
-          tar -czvf chzzk-load-darwin-x64.tar.gz -C dist/darwin-x64 chzzk-load README.md LICENSE
+          cp README.md README.ko.md LICENSE dist/darwin-x64/
+          tar -czvf chzzk-load-darwin-x64.tar.gz -C dist/darwin-x64 chzzk-load README.md README.ko.md LICENSE
 
           cp target/aarch64-apple-darwin/release/chzzk-load dist/darwin-arm64/
-          cp README.md LICENSE dist/darwin-arm64/
-          tar -czvf chzzk-load-darwin-arm64.tar.gz -C dist/darwin-arm64 chzzk-load README.md LICENSE
+          cp README.md README.ko.md LICENSE dist/darwin-arm64/
+          tar -czvf chzzk-load-darwin-arm64.tar.gz -C dist/darwin-arm64 chzzk-load README.md README.ko.md LICENSE
 
       - name: Compute SHA256 checksums
         run: |
@@ -199,11 +199,11 @@ jobs:
         run: |
           mkdir -p dist/windows-x64
           cp target/x86_64-pc-windows-msvc/release/chzzk-load.exe dist/windows-x64/
-          cp README.md LICENSE dist/windows-x64/
+          cp README.md README.ko.md LICENSE dist/windows-x64/
           if command -v 7z >/dev/null 2>&1; then
-            (cd dist/windows-x64 && 7z a -tzip ../../chzzk-load-windows-x64.zip chzzk-load.exe README.md LICENSE)
+            (cd dist/windows-x64 && 7z a -tzip ../../chzzk-load-windows-x64.zip chzzk-load.exe README.md README.ko.md LICENSE)
           else
-            tar -a -cf chzzk-load-windows-x64.zip -C dist/windows-x64 chzzk-load.exe README.md LICENSE
+            tar -a -cf chzzk-load-windows-x64.zip -C dist/windows-x64 chzzk-load.exe README.md README.ko.md LICENSE
           fi
 
       - name: Compute SHA256 checksum
