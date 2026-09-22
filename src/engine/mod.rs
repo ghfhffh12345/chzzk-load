@@ -176,11 +176,14 @@ impl EngineOrchestrator {
                                     })
                                     .await;
                                 let _ = event_tx
-                                    .send(AppEvent::Log(format!(
-                                        "[CLEAN] Uploaded & deleted {} (reclaimed {:.1} MB)",
-                                        name,
-                                        reclaimed as f64 / 1_048_576.0
-                                    )))
+                                    .send(AppEvent::Log(
+                                        format!(
+                                            "[CLEAN] Uploaded & deleted {} (reclaimed {:.1} MB)",
+                                            name,
+                                            reclaimed as f64 / 1_048_576.0
+                                        )
+                                        .into(),
+                                    ))
                                     .await;
                             }
                             Err(e) => {
@@ -191,10 +194,9 @@ impl EngineOrchestrator {
                                     })
                                     .await;
                                 let _ = event_tx
-                                    .send(AppEvent::Log(format!(
-                                        "[ERROR] Upload failed for {}: {}",
-                                        name, e
-                                    )))
+                                    .send(AppEvent::Log(
+                                        format!("[ERROR] Upload failed for {}: {}", name, e).into(),
+                                    ))
                                     .await;
                             }
                         }
@@ -246,19 +248,22 @@ impl EngineOrchestrator {
                 {
                     Ok(sub_id) => {
                         let _ = event_tx
-                            .send(AppEvent::Log(format!(
-                                "[DRIVE] Session folder ready: '{}/{}'",
-                                root_name, subfolder_name
-                            )))
+                            .send(AppEvent::Log(
+                                format!(
+                                    "[DRIVE] Session folder ready: '{}/{}'",
+                                    root_name, subfolder_name
+                                )
+                                .into(),
+                            ))
                             .await;
                         Some(sub_id)
                     }
                     Err(e) => {
                         let _ = event_tx
-                            .send(AppEvent::Log(format!(
-                                "[WARN] Failed to create Drive session subfolder: {}",
-                                e
-                            )))
+                            .send(AppEvent::Log(
+                                format!("[WARN] Failed to create Drive session subfolder: {}", e)
+                                    .into(),
+                            ))
                             .await;
                         None
                     }
@@ -266,10 +271,9 @@ impl EngineOrchestrator {
             }
             Err(e) => {
                 let _ = event_tx
-                    .send(AppEvent::Log(format!(
-                        "[WARN] Failed to access Drive root folder: {}",
-                        e
-                    )))
+                    .send(AppEvent::Log(
+                        format!("[WARN] Failed to access Drive root folder: {}", e).into(),
+                    ))
                     .await;
                 None
             }
@@ -321,25 +325,23 @@ impl EngineOrchestrator {
 
                 if send_res.is_ok() {
                     let _ = event_tx
-                        .send(AppEvent::Log(format!(
-                            "[REC] {} sealed. Pushed to Drive upload queue.",
-                            chunk_name
-                        )))
+                        .send(AppEvent::Log(
+                            format!("[REC] {} sealed. Pushed to Drive upload queue.", chunk_name)
+                                .into(),
+                        ))
                         .await;
                 } else {
                     let _ = event_tx
-                        .send(AppEvent::Log(format!(
-                            "[REC] {} sealed (saved locally).",
-                            chunk_name
-                        )))
+                        .send(AppEvent::Log(
+                            format!("[REC] {} sealed (saved locally).", chunk_name).into(),
+                        ))
                         .await;
                 }
             } else {
                 let _ = event_tx
-                    .send(AppEvent::Log(format!(
-                        "[REC] {} sealed (saved locally).",
-                        chunk_name
-                    )))
+                    .send(AppEvent::Log(
+                        format!("[REC] {} sealed (saved locally).", chunk_name).into(),
+                    ))
                     .await;
             }
         }
@@ -392,11 +394,14 @@ impl EngineOrchestrator {
 
             if let Err(e) = tokio::fs::create_dir_all(&session_dir).await {
                 let _ = event_tx
-                    .send(AppEvent::Log(format!(
-                        "[ERROR] Failed to create session directory {}: {}",
-                        session_dir.display(),
-                        e
-                    )))
+                    .send(AppEvent::Log(
+                        format!(
+                            "[ERROR] Failed to create session directory {}: {}",
+                            session_dir.display(),
+                            e
+                        )
+                        .into(),
+                    ))
                     .await;
                 let mut active = active_recordings.lock().await;
                 active.remove(&channel_id);
@@ -430,28 +435,31 @@ impl EngineOrchestrator {
                             while let Ok(Some(line)) = lines.next_line().await {
                                 let trimmed = line.trim();
                                 if !trimmed.is_empty() {
-                                    let _ = event_tx_stderr
-                                        .try_send(AppEvent::Log(format!("[FFMPEG] {}", trimmed)));
+                                    let _ = event_tx_stderr.try_send(AppEvent::Log(
+                                        format!("[FFMPEG] {}", trimmed).into(),
+                                    ));
                                 }
                             }
                         });
                     }
 
                     let _ = event_tx
-                        .send(AppEvent::Log(format!(
-                            "[REC] Spawned FFmpeg segmenter ({}s TS chunks) -> {}",
-                            chunk_dur,
-                            session_dir.display()
-                        )))
+                        .send(AppEvent::Log(
+                            format!(
+                                "[REC] Spawned FFmpeg segmenter ({}s TS chunks) -> {}",
+                                chunk_dur,
+                                session_dir.display()
+                            )
+                            .into(),
+                        ))
                         .await;
                     child
                 }
                 Err(e) => {
                     let _ = event_tx
-                        .send(AppEvent::Log(format!(
-                            "[ERROR] Failed to spawn FFmpeg: {}",
-                            e
-                        )))
+                        .send(AppEvent::Log(
+                            format!("[ERROR] Failed to spawn FFmpeg: {}", e).into(),
+                        ))
                         .await;
                     let mut active = active_recordings.lock().await;
                     active.remove(&channel_id);
@@ -471,10 +479,13 @@ impl EngineOrchestrator {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
                         let _ = event_tx
-                            .send(AppEvent::Log(format!(
-                                "[REC] Cancellation received for channel {}, stopping FFmpeg gracefully...",
-                                channel_id
-                            )))
+                            .send(AppEvent::Log(
+                                format!(
+                                    "[REC] Cancellation received for channel {}, stopping FFmpeg gracefully...",
+                                    channel_id
+                                )
+                                .into(),
+                            ))
                             .await;
 
                         if let Some(mut stdin) = child.stdin.take() {
@@ -487,10 +498,9 @@ impl EngineOrchestrator {
                         match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
                             Ok(Ok(status)) => {
                                 let _ = event_tx
-                                    .send(AppEvent::Log(format!(
-                                        "[REC] FFmpeg process exited cleanly: {}",
-                                        status
-                                    )))
+                                    .send(AppEvent::Log(
+                                        format!("[REC] FFmpeg process exited cleanly: {}", status).into(),
+                                    ))
                                     .await;
                             }
                             _ => {
@@ -498,7 +508,7 @@ impl EngineOrchestrator {
                                 let _ = child.wait().await;
                                 let _ = event_tx
                                     .send(AppEvent::Log(
-                                        "[REC] FFmpeg did not exit within timeout, terminating process...".to_string(),
+                                        "[REC] FFmpeg did not exit within timeout, terminating process...".into(),
                                     ))
                                     .await;
                             }
@@ -552,20 +562,18 @@ impl EngineOrchestrator {
                         let is_finished = match child.try_wait() {
                             Ok(Some(status)) => {
                                 let _ = event_tx
-                                    .send(AppEvent::Log(format!(
-                                        "[REC] FFmpeg process exited with status: {}",
-                                        status
-                                    )))
+                                    .send(AppEvent::Log(
+                                        format!("[REC] FFmpeg process exited with status: {}", status).into(),
+                                    ))
                                     .await;
                                 true
                             }
                             Ok(None) => false,
                             Err(e) => {
                                 let _ = event_tx
-                                    .send(AppEvent::Log(format!(
-                                        "[WARN] Error waiting on FFmpeg child: {}",
-                                        e
-                                    )))
+                                    .send(AppEvent::Log(
+                                        format!("[WARN] Error waiting on FFmpeg child: {}", e).into(),
+                                    ))
                                     .await;
                                 true
                             }
@@ -644,10 +652,13 @@ impl EngineOrchestrator {
                 })
                 .await;
             let _ = event_tx
-                .send(AppEvent::Log(format!(
-                    "[REC] Recording session ended for channel {} (liveId: {:?})",
-                    channel_id, info.live_id
-                )))
+                .send(AppEvent::Log(
+                    format!(
+                        "[REC] Recording session ended for channel {} (liveId: {:?})",
+                        channel_id, info.live_id
+                    )
+                    .into(),
+                ))
                 .await;
 
             // Clean up session directory if no chunks were saved
@@ -740,30 +751,39 @@ impl EngineOrchestrator {
                                     Ok(_) => {
                                         let _ = self
                                             .event_tx
-                                            .send(AppEvent::Log(format!(
-                                                "[DRIVE] Stream title changed ('{}' -> '{}'). Renamed session folder for {} to '{}'",
-                                                old_title, new_title, channel.id, new_folder_name
-                                            )))
+                                            .send(AppEvent::Log(
+                                                format!(
+                                                    "[DRIVE] Stream title changed ('{}' -> '{}'). Renamed session folder for {} to '{}'",
+                                                    old_title, new_title, channel.id, new_folder_name
+                                                )
+                                                .into(),
+                                            ))
                                             .await;
                                         should_update_title = true;
                                     }
                                     Err(e) => {
                                         let _ = self
                                             .event_tx
-                                            .send(AppEvent::Log(format!(
-                                                "[WARN] Failed to rename Drive folder for {} to '{}': {}",
-                                                channel.id, new_folder_name, e
-                                            )))
+                                            .send(AppEvent::Log(
+                                                format!(
+                                                    "[WARN] Failed to rename Drive folder for {} to '{}': {}",
+                                                    channel.id, new_folder_name, e
+                                                )
+                                                .into(),
+                                            ))
                                             .await;
                                     }
                                 }
                             } else {
                                 let _ = self
                                     .event_tx
-                                    .send(AppEvent::Log(format!(
-                                        "[REC] Stream title changed for {} ('{}' -> '{}'). Pending folder name updated to '{}'",
-                                        channel.id, old_title, new_title, new_folder_name
-                                    )))
+                                    .send(AppEvent::Log(
+                                        format!(
+                                            "[REC] Stream title changed for {} ('{}' -> '{}'). Pending folder name updated to '{}'",
+                                            channel.id, old_title, new_title, new_folder_name
+                                        )
+                                        .into(),
+                                    ))
                                     .await;
                                 should_update_title = true;
                             }
@@ -788,10 +808,13 @@ impl EngineOrchestrator {
                     } else if is_duplicate_or_cooldown {
                         let _ = self
                             .event_tx
-                            .send(AppEvent::Log(format!(
-                                "[POLL] Channel {} ({}) stream recently concluded (liveId: {:?}). Waiting for API cache to close...",
-                                channel.id, channel.name, info.live_id
-                            )))
+                            .send(AppEvent::Log(
+                                format!(
+                                    "[POLL] Channel {} ({}) stream recently concluded (liveId: {:?}). Waiting for API cache to close...",
+                                    channel.id, channel.name, info.live_id
+                                )
+                                .into(),
+                            ))
                             .await;
 
                         let _ = self
@@ -859,10 +882,9 @@ impl EngineOrchestrator {
                 Err(e) => {
                     let _ = self
                         .event_tx
-                        .send(AppEvent::Log(format!(
-                            "[WARN] Polling failed for {}: {}",
-                            channel.id, e
-                        )))
+                        .send(AppEvent::Log(
+                            format!("[WARN] Polling failed for {}: {}", channel.id, e).into(),
+                        ))
                         .await;
                 }
             }
@@ -923,23 +945,25 @@ impl EngineOrchestrator {
         let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
         match Self::cleanup_empty_session_dirs(&recordings_base).await {
             Ok(count) if count > 0 => {
-                let _ = self.event_tx.try_send(AppEvent::Log(format!(
-                    "[CLEAN] Cleaned up {} empty session folder(s) in '{}'",
-                    count,
-                    recordings_base.display()
-                )));
+                let _ = self.event_tx.try_send(AppEvent::Log(
+                    format!(
+                        "[CLEAN] Cleaned up {} empty session folder(s) in '{}'",
+                        count,
+                        recordings_base.display()
+                    )
+                    .into(),
+                ));
             }
             Ok(_) => {}
             Err(e) => {
-                let _ = self.event_tx.try_send(AppEvent::Log(format!(
-                    "[WARN] Failed to clean up empty session folders: {}",
-                    e
-                )));
+                let _ = self.event_tx.try_send(AppEvent::Log(
+                    format!("[WARN] Failed to clean up empty session folders: {}", e).into(),
+                ));
             }
         }
 
         let _ = self.event_tx.try_send(AppEvent::Log(
-            "[INFO] Engine graceful shutdown complete.".to_string(),
+            "[INFO] Engine graceful shutdown complete.".into(),
         ));
     }
 }

@@ -218,7 +218,8 @@ impl App {
                 }
             }
             AppEvent::Log(msg) => {
-                self.logs.push(msg);
+                self.log_scroll = 0;
+                self.logs.push(msg.to_string());
                 if self.logs.len() > 200 {
                     self.logs.remove(0);
                 }

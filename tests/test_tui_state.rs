@@ -3,7 +3,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use chzzk_load::tui::app::App;
-use chzzk_load::tui::event::AppEvent;
+use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::tui::ui::draw_ui;
 
 #[test]
@@ -11,9 +11,9 @@ fn test_app_state_mutation_on_events() {
     let mut app = App::new();
     assert_eq!(app.reclaimed_mb, 0.0);
 
-    app.handle_event(AppEvent::Log("Hello".to_string()));
+    app.handle_event(AppEvent::Log(LogEntry::info("Hello")));
     assert_eq!(app.logs.len(), 1);
-    assert_eq!(app.logs[0], "Hello");
+    assert_eq!(app.logs[0], "[INFO] Hello");
 
     app.handle_event(AppEvent::UploadCompleted {
         channel_id: "c1".to_string(),
@@ -115,13 +115,13 @@ fn test_app_log_fifo_cap() {
     let mut app = App::new();
 
     for i in 0..250 {
-        app.handle_event(AppEvent::Log(format!("Log message {}", i)));
+        app.handle_event(AppEvent::Log(LogEntry::info(format!("Log message {}", i))));
     }
 
     assert_eq!(app.logs.len(), 200);
-    // Oldest 50 should be discarded; logs[0] should be "Log message 50"
-    assert_eq!(app.logs[0], "Log message 50");
-    assert_eq!(app.logs[199], "Log message 249");
+    // Oldest 50 should be discarded; logs[0] should be "[INFO] Log message 50"
+    assert_eq!(app.logs[0], "[INFO] Log message 50");
+    assert_eq!(app.logs[199], "[INFO] Log message 249");
 }
 
 #[test]

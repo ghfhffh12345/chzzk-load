@@ -12,7 +12,7 @@ use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::drive::auth::{DriveAuth, StoredToken};
 use chzzk_load::drive::client::DriveClient;
 use chzzk_load::engine::EngineOrchestrator;
-use chzzk_load::tui::event::AppEvent;
+use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::uploader::UploadTask;
 
 async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
@@ -56,7 +56,7 @@ async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
 #[tokio::test]
 async fn test_app_event_mpsc_channel() {
     let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
-    tx.send(AppEvent::Log("Test log".to_string()))
+    tx.send(AppEvent::Log(LogEntry::info("Test log")))
         .await
         .unwrap();
 
@@ -103,7 +103,7 @@ async fn test_all_app_event_variants_mpsc() {
             chunk_name: "chunk_0000.ts".to_string(),
             reclaimed_bytes: 1048576,
         },
-        AppEvent::Log("Info message".to_string()),
+        AppEvent::Log(LogEntry::info("Info message")),
     ];
 
     for ev in &events {

@@ -18,8 +18,8 @@ use chzzk_load::drive::auth::DriveAuth;
 use chzzk_load::drive::client::DriveClient;
 use chzzk_load::engine::EngineOrchestrator;
 use chzzk_load::tui::app::App;
-use chzzk_load::tui::event::AppEvent;
 use chzzk_load::tui::ui::draw_ui;
+use chzzk_load::tui::{AppEvent, LogEntry};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -58,25 +58,28 @@ async fn main() -> anyhow::Result<()> {
         match DriveAuth::load_or_authorize(&creds_path, &token_path).await {
             Ok(auth) => {
                 let _ = event_tx
-                    .send(AppEvent::Log(
-                        "[INFO] Google Drive authenticated successfully".to_string(),
-                    ))
+                    .send(AppEvent::Log(LogEntry::info(
+                        "Google Drive authenticated successfully",
+                    )))
                     .await;
                 Some(DriveClient::new(Arc::new(auth)))
             }
             Err(e) => {
                 let _ = event_tx
-                    .send(AppEvent::Log(format!("[WARN] Drive auth failed: {}", e)))
+                    .send(AppEvent::Log(LogEntry::warn(format!(
+                        "Drive auth failed: {}",
+                        e
+                    ))))
                     .await;
                 None
             }
         }
     } else {
         let _ = event_tx
-            .send(AppEvent::Log(format!(
-                "[INFO] '{}' not found; running in local-only recording mode",
+            .send(AppEvent::Log(LogEntry::info(format!(
+                "'{}' not found; running in local-only recording mode",
                 creds_path.display()
-            )))
+            ))))
             .await;
         None
     };
@@ -187,9 +190,7 @@ async fn main() -> anyhow::Result<()> {
         if app.refresh_requested {
             app.refresh_requested = false;
             let _ = event_tx
-                .send(AppEvent::Log(
-                    "[INFO] Manual refresh triggered...".to_string(),
-                ))
+                .send(AppEvent::Log(LogEntry::info("Manual refresh triggered...")))
                 .await;
             orchestrator.trigger_refresh();
         }
