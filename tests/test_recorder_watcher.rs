@@ -103,7 +103,7 @@ fn test_sanitize_filename() {
     let sanitized = sanitize_filename(raw);
     assert_eq!(
         sanitized,
-        "Streamer's_ Live_ _Game_ _Cool_ _ 100% _good_ _ bad _ test"
+        "Streamer's_ Live? _Game_ _Cool_ _ 100% _good_ _ bad _ test"
     );
 }
 

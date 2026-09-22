@@ -1404,7 +1404,7 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
                 "content": {
                     "status": "OPEN",
                     "liveId": 999111,
-                    "liveTitle": "Updated Stream Title",
+                    "liveTitle": "Updated Stream Title? Playing Now?",
                     "channel": {
                         "channelId": "chan_rename",
                         "channelName": "RenameStreamer"
@@ -1509,8 +1509,8 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
     );
     let new_folder_name = renamed.unwrap();
     assert!(
-        new_folder_name.contains("RenameStreamer - Updated Stream Title"),
-        "Expected folder name to contain 'RenameStreamer - Updated Stream Title', got: {}",
+        new_folder_name.contains("RenameStreamer - Updated Stream Title? Playing Now?"),
+        "Expected folder name to contain 'RenameStreamer - Updated Stream Title? Playing Now?', got: {}",
         new_folder_name
     );
 
@@ -1518,7 +1518,7 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
     let mut got_updated_title_event = false;
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::ChannelUpdate { title, .. } = ev
-            && title == "Updated Stream Title"
+            && title == "Updated Stream Title? Playing Now?"
         {
             got_updated_title_event = true;
         }
@@ -1567,7 +1567,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
                 "content": {
                     "status": "OPEN",
                     "liveId": 555666,
-                    "liveTitle": "Early Title 2",
+                    "liveTitle": "Early Title 2? Pending?",
                     "channel": {
                         "channelId": "chan_pre",
                         "channelName": "PreStreamer"
@@ -1639,7 +1639,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         let sessions = orchestrator.active_sessions();
         let guard = sessions.lock().await;
         let session = guard.get("chan_pre").expect("Session should exist");
-        assert_eq!(session.current_title, "Early Title 2");
+        assert_eq!(session.current_title, "Early Title 2? Pending?");
         assert!(session.session_folder_id.is_none());
     }
 
@@ -1647,7 +1647,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(msg) = ev
             && msg.contains("Pending folder name updated")
-            && msg.contains("Early Title 2")
+            && msg.contains("Early Title 2? Pending?")
         {
             got_pending_log = true;
         }

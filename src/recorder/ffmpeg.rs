@@ -4,7 +4,7 @@ use tokio::process::Command;
 pub fn sanitize_filename(name: &str) -> String {
     name.chars()
         .map(|c| match c {
-            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            '\\' | '/' | ':' | '*' | '"' | '<' | '>' | '|' => '_',
             c if c.is_control() => '_',
             other => other,
         })
@@ -61,7 +61,14 @@ mod tests {
     fn test_sanitize_filename_basic() {
         let input = "a/b\\c:d*e?f\"g<h>i|j";
         let output = sanitize_filename(input);
-        assert_eq!(output, "a_b_c_d_e_f_g_h_i_j");
+        assert_eq!(output, "a_b_c_d_e?f_g_h_i_j");
+    }
+
+    #[test]
+    fn test_sanitize_filename_preserves_question_marks() {
+        let input = "Title? With questions? Yes!";
+        let output = sanitize_filename(input);
+        assert_eq!(output, "Title? With questions? Yes!");
     }
 
     #[test]
