@@ -54,8 +54,9 @@ fn test_cli_version_flag() {
         "Expected exit code 0 for --version"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = format!("chzzk-load {}", env!("CARGO_PKG_VERSION"));
     assert!(
-        stdout.contains("chzzk-load 0.1.0"),
+        stdout.contains(&expected),
         "Version output should match package version: {}",
         stdout
     );
@@ -71,7 +72,12 @@ fn test_cli_short_version_flag() {
 
     assert!(output.status.success(), "Expected exit code 0 for -V");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("chzzk-load 0.1.0"));
+    let expected = format!("chzzk-load {}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        stdout.contains(&expected),
+        "Short version output should match package version: {}",
+        stdout
+    );
 }
 
 #[test]
