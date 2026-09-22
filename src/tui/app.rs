@@ -35,6 +35,7 @@ pub struct App {
     pub active_uploads: HashMap<String, ActiveUpload>,
     pub logs: Vec<String>,
     pub log_scroll: usize,
+    pub show_logs: bool,
     pub is_shutting_down: bool,
     pub should_quit: bool,
     pub refresh_requested: bool,
@@ -60,33 +61,41 @@ impl App {
             active_uploads: HashMap::new(),
             logs: Vec::new(),
             log_scroll: 0,
+            show_logs: true,
             is_shutting_down: false,
             should_quit: false,
             refresh_requested: false,
         }
     }
 
-    pub fn next_channel(&mut self) {
-        if !self.channels.is_empty() && self.selected_channel_idx < self.channels.len() - 1 {
-            self.selected_channel_idx += 1;
-            self.adjust_channel_scroll();
+    pub fn scroll_channels_down(&mut self) {
+        if !self.channels.is_empty() {
+            let max = self.channels.len().saturating_sub(1);
+            if self.channel_scroll < max {
+                self.channel_scroll += 1;
+                self.selected_channel_idx = self.channel_scroll;
+            }
         }
+    }
+
+    pub fn scroll_channels_up(&mut self) {
+        self.channel_scroll = self.channel_scroll.saturating_sub(1);
+        self.selected_channel_idx = self.channel_scroll;
+    }
+
+    pub fn next_channel(&mut self) {
+        self.scroll_channels_down();
     }
 
     pub fn prev_channel(&mut self) {
-        if self.selected_channel_idx > 0 {
-            self.selected_channel_idx -= 1;
-            self.adjust_channel_scroll();
-        }
+        self.scroll_channels_up();
     }
 
     pub fn adjust_channel_scroll(&mut self) {
-        let visible_height = 7; // Inner rows of 9-height body panels
-        if self.selected_channel_idx < self.channel_scroll {
-            self.channel_scroll = self.selected_channel_idx;
-        } else if self.selected_channel_idx >= self.channel_scroll + visible_height {
-            self.channel_scroll = self.selected_channel_idx + 1 - visible_height;
-        }
+        self.channel_scroll = self
+            .channel_scroll
+            .min(self.channels.len().saturating_sub(1));
+        self.selected_channel_idx = self.channel_scroll;
     }
 
     pub fn handle_event(&mut self, event: AppEvent) {
@@ -214,31 +223,43 @@ impl App {
                     self.logs.remove(0);
                 }
             }
-            AppEvent::Key(key) => match key.code {
-                KeyCode::Char('q') => {
-                    if self.is_shutting_down {
-                        self.should_quit = true;
-                    } else {
-                        self.is_shutting_down = true;
+            AppEvent::Key(key) => {
+                if key.kind == crossterm::event::KeyEventKind::Release {
+                    return;
+                }
+                match key.code {
+                    KeyCode::Char('q') => {
+                        if key.kind == crossterm::event::KeyEventKind::Press {
+                            if self.is_shutting_down {
+                                self.should_quit = true;
+                            } else {
+                                self.is_shutting_down = true;
+                            }
+                        }
                     }
+                    KeyCode::Char('r') => self.refresh_requested = true,
+                    KeyCode::Char('l') => {
+                        if key.kind == crossterm::event::KeyEventKind::Press {
+                            self.show_logs = !self.show_logs;
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => self.scroll_channels_up(),
+                    KeyCode::Down | KeyCode::Char('j') => self.scroll_channels_down(),
+                    KeyCode::PageUp => {
+                        self.log_scroll = self.log_scroll.saturating_add(5);
+                    }
+                    KeyCode::PageDown => {
+                        self.log_scroll = self.log_scroll.saturating_sub(5);
+                    }
+                    KeyCode::Home => {
+                        self.log_scroll = usize::MAX / 2;
+                    }
+                    KeyCode::End => {
+                        self.log_scroll = 0;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('r') => self.refresh_requested = true,
-                KeyCode::Up | KeyCode::Char('k') => self.prev_channel(),
-                KeyCode::Down | KeyCode::Char('j') => self.next_channel(),
-                KeyCode::PageUp => {
-                    self.log_scroll = self.log_scroll.saturating_add(5);
-                }
-                KeyCode::PageDown => {
-                    self.log_scroll = self.log_scroll.saturating_sub(5);
-                }
-                KeyCode::Home => {
-                    self.log_scroll = usize::MAX / 2;
-                }
-                KeyCode::End => {
-                    self.log_scroll = 0;
-                }
-                _ => {}
-            },
+            }
             _ => {}
         }
     }

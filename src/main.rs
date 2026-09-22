@@ -159,16 +159,21 @@ async fn main() -> anyhow::Result<()> {
         if event::poll(tick_rate)?
             && let Event::Key(key) = event::read()?
         {
+            if key.kind == crossterm::event::KeyEventKind::Release {
+                continue;
+            }
             if key.code == KeyCode::Char('q') {
-                if app.is_shutting_down {
-                    // Second 'q' press triggers immediate exit
-                    app.should_quit = true;
-                    cancel_token.cancel();
-                    break;
-                } else {
-                    app.is_shutting_down = true;
-                    cancel_token.cancel();
-                    shutdown_start = Some(std::time::Instant::now());
+                if key.kind == crossterm::event::KeyEventKind::Press {
+                    if app.is_shutting_down {
+                        // Second 'q' press triggers immediate exit
+                        app.should_quit = true;
+                        cancel_token.cancel();
+                        break;
+                    } else {
+                        app.is_shutting_down = true;
+                        cancel_token.cancel();
+                        shutdown_start = Some(std::time::Instant::now());
+                    }
                 }
             } else {
                 app.handle_event(AppEvent::Key(key));

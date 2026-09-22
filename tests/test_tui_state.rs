@@ -280,11 +280,12 @@ fn test_logs_strictly_bounded_and_clipping() {
             .map(|x| buffer.cell((x, height - 1)).unwrap().symbol())
             .collect();
         assert!(
-            last_line.contains("[q] Quit"),
+            last_line.contains("q Quit"),
             "Footer missing on {}x{}",
             width,
             height
         );
+        assert!(!last_line.contains("[q]"));
 
         // Verify that the logs panel title is present
         let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
@@ -326,7 +327,7 @@ fn test_logs_autoscroll_and_pageup_down() {
         .map(|c| c.symbol())
         .collect();
     assert!(content.contains("Entry 49"));
-    assert!(!content.contains("[Scrolled:"));
+    assert!(!content.contains("Scrolled"));
 
     // PageUp scrolls into history
     let pgup = crossterm::event::KeyEvent::new(
@@ -344,7 +345,8 @@ fn test_logs_autoscroll_and_pageup_down() {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(content_scrolled.contains("[Scrolled: -5]"));
+    assert!(content_scrolled.contains("-5"));
+    assert!(!content_scrolled.contains("[Scrolled: -5]"));
 
     // PageDown scrolls back down
     let pgdn = crossterm::event::KeyEvent::new(
@@ -423,24 +425,21 @@ fn test_channel_synchronized_scrolling() {
     assert_eq!(app.channel_scroll, 0);
 
     let down_key = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
-    // Scroll down 7 times: index reaches 7 (8th item), viewport height is 7
+    // Direct scrolling: Down key directly scrolls the views
     for _ in 0..7 {
         app.handle_event(AppEvent::Key(down_key));
     }
-    assert_eq!(app.selected_channel_idx, 7);
-    assert_eq!(app.channel_scroll, 1);
+    assert_eq!(app.channel_scroll, 7);
 
-    // Scroll down once more to index 8
+    // Scroll down once more to offset 8
     app.handle_event(AppEvent::Key(down_key));
-    assert_eq!(app.selected_channel_idx, 8);
-    assert_eq!(app.channel_scroll, 2);
+    assert_eq!(app.channel_scroll, 8);
 
-    // Scroll back up to index 1
+    // Scroll back up 7 times to offset 1
     let up_key = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
     for _ in 0..7 {
         app.handle_event(AppEvent::Key(up_key));
     }
-    assert_eq!(app.selected_channel_idx, 1);
     assert_eq!(app.channel_scroll, 1);
 }
 
@@ -480,16 +479,302 @@ fn test_draw_ui_row_alignment_and_active_status() {
     let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
 
     // Verify ACTIVE tag appears in Monitored Channels
-    assert!(content.contains("[ ACTIVE ]"));
+    assert!(content.contains("ACTIVE"));
+    assert!(!content.contains("[ ACTIVE ]"));
+    assert!(!content.contains("["));
     assert!(content.contains("StreamerActive"));
 
     // Verify chunk and progress appear in Cloud Upload aligned with c1
-    assert!(content.contains("chunk_0001.ts"));
+    assert!(content.contains("UP"));
+    assert!(!content.contains("▲"));
+    assert!(!content.contains("chunk_0001.ts"));
     assert!(content.contains("50%"));
-    assert!(content.contains("7.5 MB/s"));
+    assert!(content.contains("7.5MB/s"));
+    assert!(content.contains("━"));
+    assert!(content.contains("─"));
 
     // Verify Stream Recorder panel was removed
     assert!(!content.contains("Stream Recorder"));
+}
+
+#[test]
+fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
+    use ratatui::style::{Color, Modifier};
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    // c1: Actively uploading
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "c1".to_string(),
+        name: "Streamer1".to_string(),
+        is_live: true,
+        is_active: true,
+        title: "Live 1".to_string(),
+    });
+    // c2: Recording (is_active: true, but no active upload)
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "c2".to_string(),
+        name: "Streamer2".to_string(),
+        is_live: true,
+        is_active: true,
+        title: "Live 2".to_string(),
+    });
+    // c3: Live standby (is_live: true, is_active: false)
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "c3".to_string(),
+        name: "Streamer3".to_string(),
+        is_live: true,
+        is_active: false,
+        title: "Live 3".to_string(),
+    });
+    // c4: Offline (is_live: false, is_active: false)
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "c4".to_string(),
+        name: "Streamer4".to_string(),
+        is_live: false,
+        is_active: false,
+        title: "Offline".to_string(),
+    });
+
+    app.handle_event(AppEvent::UploadProgress {
+        channel_id: "c1".to_string(),
+        chunk_name: "chunk_0001.ts".to_string(),
+        streamer_name: "Streamer1".to_string(),
+        uploaded_bytes: 10_485_760,
+        total_bytes: 20_971_520,
+        speed_mb_s: 7.5,
+    });
+
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
+
+    // 1. Uploading state:
+    // Has "UP" badge, no "▲"
+    assert!(content.contains("UP"));
+    assert!(!content.contains("▲"));
+    assert!(!content.contains("●"));
+    assert!(!content.contains("○"));
+    // Does NOT contain chunk filename in UI
+    assert!(!content.contains("chunk_0001.ts"));
+    // Uses box drawing characters ━ and ─
+    assert!(content.contains("━"));
+    assert!(content.contains("─"));
+    assert!(!content.contains("█") && !content.contains("░"));
+    assert!(!content.contains("▰") && !content.contains("▱"));
+    // Contains progress bar symbols, percentage, and compact speed
+    assert!(content.contains("50%"));
+    assert!(content.contains("7.5MB/s"));
+
+    // 2. Recording state:
+    // Has "REC" badge and compact "Staging..." instead of verbose text
+    assert!(content.contains("REC"));
+    assert!(content.contains("Staging..."));
+    assert!(!content.contains("[Recording] Waiting for sealed chunk..."));
+
+    // 3. Live standby state:
+    // Has "IDLE" badge and "Standby" instead of verbose text
+    assert!(content.contains("IDLE"));
+    assert!(content.contains("Standby"));
+    assert!(!content.contains("[Idle] Waiting for stream..."));
+
+    // 4. Offline state:
+    assert!(content.contains("—"));
+
+    // 5. Colors and Column Alignment:
+    // Badges must be padded so that following content starts at the exact same column (offset 5 in Cloud Upload panel).
+    let mut found_up_green = false;
+    let mut found_rec_red = false;
+    let mut found_pct_dim = false;
+    let mut checked_up_align = false;
+    let mut checked_rec_align = false;
+    let mut checked_idle_align = false;
+
+    for y in 0..buffer.area.height {
+        let mut row_symbols = String::new();
+        for x in 0..buffer.area.width {
+            row_symbols.push_str(buffer.cell((x, y)).unwrap().symbol());
+        }
+
+        if row_symbols.contains("UP") && row_symbols.contains("50%") {
+            // Find x where 'U' starts in this row
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).unwrap();
+                if cell.symbol() == "U" && buffer.cell((x + 1, y)).unwrap().symbol() == "P" {
+                    assert_eq!(cell.fg, Color::Green, "UP badge must be green");
+                    assert!(
+                        cell.modifier.contains(Modifier::DIM),
+                        "UP badge must be dimmed"
+                    );
+                    found_up_green = true;
+
+                    // Whatever follows (progress bar ━) must start at x + 5
+                    let next_cell = buffer.cell((x + 5, y)).unwrap();
+                    assert_eq!(
+                        next_cell.symbol(),
+                        "━",
+                        "Progress bar must start at offset 5"
+                    );
+                    checked_up_align = true;
+                }
+                // Check that '50%' is dimmed (Modifier::DIM)
+                if cell.symbol() == "%" {
+                    assert!(
+                        cell.modifier.contains(Modifier::DIM),
+                        "Progress percentage must be dimmed"
+                    );
+                    found_pct_dim = true;
+                }
+            }
+        }
+
+        if row_symbols.contains("REC") && row_symbols.contains("Staging...") {
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).unwrap();
+                if cell.symbol() == "R" && buffer.cell((x + 1, y)).unwrap().symbol() == "E" {
+                    assert_eq!(cell.fg, Color::Red, "REC badge must be red");
+                    assert!(
+                        cell.modifier.contains(Modifier::DIM),
+                        "REC badge must be dimmed"
+                    );
+                    found_rec_red = true;
+
+                    // Staging... must start at x + 5
+                    let next_cell = buffer.cell((x + 5, y)).unwrap();
+                    assert_eq!(next_cell.symbol(), "S", "Staging... must start at offset 5");
+                    checked_rec_align = true;
+                }
+            }
+        }
+
+        if row_symbols.contains("IDLE") && row_symbols.contains("Standby") {
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).unwrap();
+                if cell.symbol() == "I" && buffer.cell((x + 1, y)).unwrap().symbol() == "D" {
+                    // Standby must start at x + 5
+                    let next_cell = buffer.cell((x + 5, y)).unwrap();
+                    assert_eq!(next_cell.symbol(), "S", "Standby must start at offset 5");
+                    checked_idle_align = true;
+                }
+            }
+        }
+    }
+
+    assert!(found_up_green, "Did not find UP cell");
+    assert!(found_rec_red, "Did not find REC cell");
+    assert!(found_pct_dim, "Did not find dimmed % cell");
+    assert!(checked_up_align, "Did not check UP column alignment");
+    assert!(checked_rec_align, "Did not check REC column alignment");
+    assert!(checked_idle_align, "Did not check IDLE column alignment");
+
+    // 6. Monitored Channels: No brackets, padded status text, unstyled streamer name/title
+    assert!(!content.contains("[ ACTIVE ]"));
+    assert!(!content.contains("[ LIVE ]"));
+    assert!(!content.contains("[ OFFLINE ]"));
+    assert!(content.contains("ACTIVE"));
+    assert!(content.contains("LIVE"));
+    assert!(content.contains("OFFLINE"));
+
+    // Verify streamer names are unstyled (Color::Reset) and aligned
+    let mut checked_ch_active_align = false;
+    let mut checked_ch_live_align = false;
+    let mut checked_ch_offline_align = false;
+
+    for y in 0..buffer.area.height {
+        let mut row_symbols = String::new();
+        for x in 0..buffer.area.width {
+            row_symbols.push_str(buffer.cell((x, y)).unwrap().symbol());
+        }
+
+        if row_symbols.contains("ACTIVE") && row_symbols.contains("Streamer1") {
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).unwrap();
+                if cell.symbol() == "A" && buffer.cell((x + 1, y)).unwrap().symbol() == "C" {
+                    assert_eq!(cell.fg, Color::Cyan, "ACTIVE badge must be cyan");
+                    assert!(
+                        cell.modifier.contains(Modifier::DIM),
+                        "ACTIVE badge must be dimmed"
+                    );
+
+                    // Streamer1 must start at x + 8 (ACTIVE padded to 7 + 1 space)
+                    let name_cell = buffer.cell((x + 8, y)).unwrap();
+                    assert_eq!(
+                        name_cell.symbol(),
+                        "S",
+                        "Streamer name must start at offset 8"
+                    );
+                    assert_eq!(name_cell.fg, Color::Reset, "Streamer name must be unstyled");
+                    checked_ch_active_align = true;
+                }
+            }
+        }
+
+        if row_symbols.contains("LIVE") && row_symbols.contains("Streamer3") {
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).unwrap();
+                if cell.symbol() == "L" && buffer.cell((x + 1, y)).unwrap().symbol() == "I" {
+                    assert_eq!(cell.fg, Color::Green, "LIVE badge must be green");
+                    assert!(
+                        cell.modifier.contains(Modifier::DIM),
+                        "LIVE badge must be dimmed"
+                    );
+
+                    // Streamer3 must start at x + 8
+                    let name_cell = buffer.cell((x + 8, y)).unwrap();
+                    assert_eq!(
+                        name_cell.symbol(),
+                        "S",
+                        "Streamer name must start at offset 8"
+                    );
+                    assert_eq!(name_cell.fg, Color::Reset, "Streamer name must be unstyled");
+                    checked_ch_live_align = true;
+                }
+            }
+        }
+
+        if row_symbols.contains("OFFLINE") && row_symbols.contains("Streamer4") {
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).unwrap();
+                if cell.symbol() == "O" && buffer.cell((x + 1, y)).unwrap().symbol() == "F" {
+                    assert_eq!(cell.fg, Color::DarkGray, "OFFLINE badge must be dark gray");
+                    assert!(
+                        cell.modifier.contains(Modifier::DIM),
+                        "OFFLINE badge must be dimmed"
+                    );
+
+                    // Streamer4 must start at x + 8
+                    let name_cell = buffer.cell((x + 8, y)).unwrap();
+                    assert_eq!(
+                        name_cell.symbol(),
+                        "S",
+                        "Streamer name must start at offset 8"
+                    );
+                    assert_eq!(name_cell.fg, Color::Reset, "Streamer name must be unstyled");
+                    checked_ch_offline_align = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        checked_ch_active_align,
+        "Did not check ACTIVE channel alignment"
+    );
+    assert!(
+        checked_ch_live_align,
+        "Did not check LIVE channel alignment"
+    );
+    assert!(
+        checked_ch_offline_align,
+        "Did not check OFFLINE channel alignment"
+    );
+
+    // 7. Verify zero square brackets across the entire screen
+    assert!(!content.contains("["), "UI must not contain '[' anywhere");
+    assert!(!content.contains("]"), "UI must not contain ']' anywhere");
 }
 
 #[test]
@@ -512,8 +797,8 @@ fn test_draw_ui_shutdown_banner_rendering() {
         .collect();
     let expected_title = format!("chzzk-load v{}", env!("CARGO_PKG_VERSION"));
     assert!(content_normal.contains(&expected_title));
-    assert!(content_normal.contains("[q] Quit"));
-    assert!(!content_normal.contains("[ SHUTTING DOWN ]"));
+    assert!(content_normal.contains("q Quit"));
+    assert!(!content_normal.contains("SHUTTING DOWN"));
 
     // 2. Shutdown state rendering
     app.is_shutting_down = true;
@@ -525,8 +810,175 @@ fn test_draw_ui_shutdown_banner_rendering() {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(content_shutdown.contains("[ SHUTTING DOWN ]"));
+    assert!(content_shutdown.contains("SHUTTING DOWN"));
+    assert!(!content_shutdown.contains("[ SHUTTING DOWN ]"));
     assert!(content_shutdown.contains("Stopping recordings & finishing uploads..."));
     assert!(content_shutdown.contains("Reclaimed: 42.5 MB"));
-    assert!(content_shutdown.contains("[q / Ctrl+C] Force Exit Immediately"));
+    assert!(content_shutdown.contains("q / Ctrl+C Force Exit Immediately"));
+}
+
+#[test]
+fn test_l_key_toggles_logs_and_expands_body() {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    for i in 0..15 {
+        app.channels.push(chzzk_load::tui::app::ChannelItem {
+            id: format!("c{}", i),
+            name: format!("Streamer{:02}", i),
+            is_live: true,
+            is_active: false,
+            title: format!("Title {:02}", i),
+        });
+    }
+    app.logs.push("[INFO] Log 1".to_string());
+
+    // By default, show_logs is true
+    assert!(app.show_logs);
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content_with_logs: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(content_with_logs.contains("Live Activity Logs"));
+    assert!(content_with_logs.contains("l Logs"));
+    // With logs shown, body height is 9 visible items (00..08)
+    assert!(content_with_logs.contains("Streamer00"));
+    assert!(content_with_logs.contains("Streamer08"));
+    assert!(!content_with_logs.contains("Streamer10"));
+
+    // Press 'l' to toggle logs off
+    let l_key = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('l'),
+        crossterm::event::KeyModifiers::NONE,
+    );
+    app.handle_event(AppEvent::Key(l_key));
+    assert!(!app.show_logs);
+
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content_no_logs: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    // Logs panel is hidden
+    assert!(!content_no_logs.contains("Live Activity Logs"));
+    assert!(!content_no_logs.contains("Log 1"));
+    // Channels section expanded dynamically to fill vertical space!
+    // Streamer00 through Streamer14 should now all be visible
+    assert!(content_no_logs.contains("Streamer00"));
+    assert!(content_no_logs.contains("Streamer06"));
+    assert!(content_no_logs.contains("Streamer08"));
+    assert!(content_no_logs.contains("Streamer14"));
+
+    // Press 'l' again to toggle logs back on
+    app.handle_event(AppEvent::Key(l_key));
+    assert!(app.show_logs);
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content_logs_restored: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(content_logs_restored.contains("Live Activity Logs"));
+    assert!(content_logs_restored.contains("l Logs"));
+}
+
+#[test]
+fn test_no_underline_on_channels_and_direct_view_scrolling() {
+    use ratatui::style::Modifier;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    for i in 0..10 {
+        app.channels.push(chzzk_load::tui::app::ChannelItem {
+            id: format!("c{}", i),
+            name: format!("Streamer{:02}", i),
+            is_live: true,
+            is_active: false,
+            title: format!("Title {:02}", i),
+        });
+    }
+
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // Verify NO cell has UNDERLINED modifier across the entire buffer
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            let cell = buffer.cell((x, y)).unwrap();
+            assert!(
+                !cell.modifier.contains(Modifier::UNDERLINED),
+                "No cell should be UNDERLINED (found at ({}, {}))",
+                x,
+                y
+            );
+        }
+    }
+
+    // Direct scrolling interaction:
+    assert_eq!(app.channel_scroll, 0);
+    let down_key = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    app.handle_event(AppEvent::Key(down_key));
+    assert_eq!(app.channel_scroll, 1);
+
+    app.handle_event(AppEvent::Key(down_key));
+    assert_eq!(app.channel_scroll, 2);
+
+    let up_key = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Up,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    app.handle_event(AppEvent::Key(up_key));
+    assert_eq!(app.channel_scroll, 1);
+}
+
+#[test]
+fn test_l_key_single_press_toggle_ignores_release_event() {
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    let mut app = App::new();
+    assert!(app.show_logs);
+
+    let l_press = KeyEvent {
+        code: KeyCode::Char('l'),
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Press,
+        state: KeyEventState::NONE,
+    };
+    let l_release = KeyEvent {
+        code: KeyCode::Char('l'),
+        modifiers: KeyModifiers::NONE,
+        kind: KeyEventKind::Release,
+        state: KeyEventState::NONE,
+    };
+
+    // 1. Initial key press toggles logs to false (hidden)
+    app.handle_event(AppEvent::Key(l_press));
+    assert!(!app.show_logs, "Logs must be hidden after first press");
+
+    // 2. Key release MUST NOT toggle logs back (must remain hidden!)
+    app.handle_event(AppEvent::Key(l_release));
+    assert!(!app.show_logs, "Logs must remain hidden after key release!");
+
+    // 3. Second key press toggles logs back to true (visible)
+    app.handle_event(AppEvent::Key(l_press));
+    assert!(app.show_logs, "Logs must be visible after second press");
+
+    // 4. Second key release MUST NOT toggle logs
+    app.handle_event(AppEvent::Key(l_release));
+    assert!(app.show_logs, "Logs must remain visible after key release!");
 }
