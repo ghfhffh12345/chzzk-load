@@ -1047,50 +1047,50 @@ fn test_log_kind_badge_and_style_mappings() {
     let cases = [
         (
             LogKind::Error,
-            " ERROR ",
+            " ERROR  ",
             Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
         ),
         (
             LogKind::Warn,
-            " WARN  ",
+            " WARN   ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::DIM),
         ),
         (
             LogKind::Clean,
-            " CLEAN ",
+            " CLEAN  ",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::DIM),
         ),
         (
             LogKind::Rec,
-            " REC   ",
+            " REC    ",
             Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
         ),
         (
             LogKind::Ffmpeg,
-            " FFMPEG",
+            " FFMPEG ",
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::DIM),
         ),
         (
             LogKind::Drive,
-            " DRIVE ",
+            " DRIVE  ",
             Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
         ),
         (
             LogKind::Poll,
-            " POLL  ",
+            " POLL   ",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
         ),
         (
             LogKind::Info,
-            " INFO  ",
+            " INFO   ",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
