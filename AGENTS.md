@@ -26,6 +26,8 @@ chzzk-load/
 │       ├── ci.yml            # CI validation (fmt, clippy, multi-OS tests, npm tests)
 │       └── release.yml       # Release pipeline (multi-platform builds, GitHub Release, npm publish)
 ├── Cargo.toml                # Dependencies and binary target definitions
+├── README.md                 # Primary documentation (English)
+├── README.ko.md              # Documentation (Korean)
 ├── settings.json             # Dedicated configuration file (portable)
 ├── npm/
 │   └── chzzk-load/           # Root npm CLI wrapper package
