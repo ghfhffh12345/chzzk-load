@@ -110,12 +110,13 @@ chzzk-load/
 
 ### 3.4. Ratatui TUI Dashboard (`src/tui/`)
 - Uses strict vertical layout constraints:
-  - Header: `Constraint::Length(3)`
-  - Body: `Constraint::Length(9)` (Horizontal split: Channels list on left, Upload gauge + Recorder status on right)
-  - Logs: `Constraint::Fill(1)` (Fills all remaining vertical space dynamically)
-  - Footer: `Constraint::Length(1)`
-- **Log Slicing & Clipping**: Logs are flattened by `\n` to support multi-line error traces, and sliced to exactly `inner_height = (log_area.height - 2)`. Lines exceeding `inner_width` are horizontally truncated with `…` to guarantee zero word-wrap overflow or terminal buffer scrolling.
+  - Header & Divider: `Constraint::Length(1)` each
+  - Body: `Constraint::Length(10)` (or `Constraint::Fill(1)` when logs are hidden via 'l' key; horizontal split: Monitored Channels on left, Cloud Upload progress/status on right)
+  - Logs Title Divider: `Constraint::Length(1)` & Logs Content: `Constraint::Fill(1)` (omitted when logs are toggled off via 'l' key)
+  - Footer Divider & Keybind Footer: `Constraint::Length(1)` each
+- **Log Slicing & Clipping**: Logs are flattened by `\n` to support multi-line error traces, and sliced to exactly `inner_height = log_area.height`. Lines exceeding `inner_width` are horizontally truncated with `…` to guarantee zero word-wrap overflow or terminal buffer scrolling.
 - **Log Scrolling**: Tail auto-scroll is maintained by default (`log_scroll = 0`). Users can navigate history using `PageUp`, `PageDown`, `Home`, and `End`.
+- **View Scrolling**: Channels and Cloud Upload scroll in synchronized lockstep using `Up`, `Down`, `k`, and `j`.
 
 ---
 
