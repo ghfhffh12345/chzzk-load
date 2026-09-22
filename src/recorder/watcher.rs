@@ -17,15 +17,25 @@ pub fn detect_sealed_chunks(
 
     if let Ok(entries) = fs::read_dir(session_dir) {
         for entry in entries.flatten() {
+            let is_file = match entry.file_type() {
+                Ok(ft) => ft.is_file(),
+                Err(_) => entry.path().is_file(),
+            };
+            if !is_file {
+                continue;
+            }
+
             let path = entry.path();
-            if path.is_file()
-                && path
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("ts"))
+            if path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("ts"))
                 && let Some(name) = path.file_name().and_then(|n| n.to_str())
             {
-                let meta = fs::metadata(&path).or_else(|_| entry.metadata());
+                let meta = match entry.metadata() {
+                    Ok(m) if m.len() > 0 => Ok(m),
+                    _ => fs::metadata(&path),
+                };
                 if let Ok(meta) = meta
                     && meta.len() > 0
                 {

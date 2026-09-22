@@ -135,3 +135,43 @@ fn test_build_ffmpeg_command() {
         .expect("missing -headers");
     assert!(args[headers_idx + 1].contains("Cookie: NID_AUT=abc; NID_SES=xyz"));
 }
+
+#[test]
+fn test_detect_sealed_chunks_ignores_subdirectories_and_non_ts() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_watcher_filter_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    // Create a directory that ends with .ts
+    let dir_as_ts = temp_dir.join("subfolder.ts");
+    std::fs::create_dir_all(&dir_as_ts).unwrap();
+
+    // Create a non-ts file
+    let other_file = temp_dir.join("notes.txt");
+    std::fs::write(&other_file, b"some notes").unwrap();
+
+    // Create a zero-byte .ts chunk
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    File::create(&chunk0).unwrap();
+
+    let mut enqueued = HashSet::new();
+    let sealed = detect_sealed_chunks(&temp_dir, &mut enqueued, false);
+    assert_eq!(sealed.len(), 0);
+
+    // Populate chunk 0
+    std::fs::write(&chunk0, b"chunk 0 data").unwrap();
+    let sealed = detect_sealed_chunks(&temp_dir, &mut enqueued, false);
+    assert_eq!(sealed.len(), 0);
+
+    // Create chunk 1
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+    std::fs::write(&chunk1, b"chunk 1 data").unwrap();
+
+    let sealed = detect_sealed_chunks(&temp_dir, &mut enqueued, false);
+    assert_eq!(sealed, vec![chunk0]);
+
+    let sealed = detect_sealed_chunks(&temp_dir, &mut enqueued, true);
+    assert_eq!(sealed, vec![chunk1]);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
