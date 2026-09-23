@@ -3,51 +3,18 @@ use ratatui::widgets::*;
 
 use crate::tui::app::App;
 use crate::tui::event::LogKind;
+use crate::tui::theme;
 
 pub fn log_kind_badge_and_style(kind: LogKind) -> (&'static str, Style) {
     match kind {
-        LogKind::Error => (
-            " ERROR  ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
-        ),
-        LogKind::Warn => (
-            " WARN   ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::DIM),
-        ),
-        LogKind::Clean => (
-            " CLEAN  ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::DIM),
-        ),
-        LogKind::Rec => (
-            " REC    ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-        ),
-        LogKind::Ffmpeg => (
-            " FFMPEG ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::DIM),
-        ),
-        LogKind::Drive => (
-            " DRIVE  ",
-            Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
-        ),
-        LogKind::Poll => (
-            " POLL   ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ),
-        LogKind::Info => (
-            " INFO   ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ),
+        LogKind::Error => (" ERROR  ", Style::default().fg(theme::RED)),
+        LogKind::Warn => (" WARN   ", Style::default().fg(theme::YELLOW)),
+        LogKind::Clean => (" CLEAN  ", Style::default().fg(theme::GREEN)),
+        LogKind::Rec => (" REC    ", Style::default().fg(theme::CYAN)),
+        LogKind::Ffmpeg => (" FFMPEG ", Style::default().fg(theme::MAGENTA)),
+        LogKind::Drive => (" DRIVE  ", Style::default().fg(theme::BLUE)),
+        LogKind::Poll => (" POLL   ", Style::default().fg(theme::MUTED_GRAY)),
+        LogKind::Info => (" INFO   ", Style::default().fg(theme::MUTED_GRAY)),
     }
 }
 
@@ -102,7 +69,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                 active_count, total_count, archived_str
             ),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -123,7 +90,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
 
     // 1. Header Divider
     let header_divider = Paragraph::new("─".repeat(header_div_area.width as usize))
-        .style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(theme::DIVIDER));
     f.render_widget(header_divider, header_div_area);
 
     // 2. Body: Horizontal split (40% Monitored Channels, 60% Cloud Upload)
@@ -153,28 +120,28 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     // 2.1. Left Panel: Monitored Channels
     let channels_header = Paragraph::new(" Monitored Channels").style(
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(theme::MUTED_GRAY)
             .add_modifier(Modifier::BOLD),
     );
     f.render_widget(channels_header, left_chunks[0]);
 
     let channel_items: Vec<ListItem> = if visible_channels.is_empty() {
-        vec![ListItem::new(" No monitored channels").style(Style::default().fg(Color::DarkGray))]
+        vec![ListItem::new(" No monitored channels").style(Style::default().fg(theme::MUTED_GRAY))]
     } else {
         visible_channels
             .iter()
             .map(|c| {
                 let (status, color) = if c.is_active {
-                    ("ACTIVE", Color::Cyan)
+                    ("ACTIVE", theme::CYAN)
                 } else if c.is_live {
-                    ("LIVE", Color::Green)
+                    ("LIVE", theme::GREEN)
                 } else {
-                    ("OFFLINE", Color::DarkGray)
+                    ("OFFLINE", theme::MUTED_GRAY)
                 };
 
                 let badge_str = format!(" {:<7} ", status);
                 let badge_len = 9;
-                let badge_style = Style::default().fg(color).add_modifier(Modifier::DIM);
+                let badge_style = Style::default().fg(color);
 
                 let name_and_title = format!("{} - {}", c.name, c.title);
                 let name_style = Style::default();
@@ -221,7 +188,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     };
     let upload_header = Paragraph::new(upload_title).style(
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(theme::MUTED_GRAY)
             .add_modifier(Modifier::BOLD),
     );
     f.render_widget(upload_header, right_chunks[0]);
@@ -229,7 +196,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     let upload_items: Vec<ListItem> = if visible_channels.is_empty() {
         vec![
             ListItem::new(" Idle (Waiting for monitored channels)")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme::MUTED_GRAY)),
         ]
     } else {
         visible_channels
@@ -248,9 +215,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
 
                     let badge = " UP   ";
                     let badge_len = 6;
-                    let badge_style = Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::DIM);
+                    let badge_style = Style::default().fg(theme::GREEN);
 
                     let metrics_str = if inner_width_right >= 48 {
                         format!(
@@ -279,7 +244,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                             Span::styled("━".repeat(filled_count), Style::default()),
                             Span::styled(
                                 "─".repeat(unfilled_count),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(theme::DIVIDER),
                             ),
                             Span::styled(metrics_str, Style::default().add_modifier(Modifier::DIM)),
                         ])
@@ -301,7 +266,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                     }
                 } else if c.is_active {
                     let badge = " REC  ";
-                    let badge_style = Style::default().fg(Color::Red).add_modifier(Modifier::DIM);
+                    let badge_style = Style::default().fg(theme::RED);
                     let rest = "Staging...";
                     if inner_width_right >= 6 + rest.chars().count() {
                         Line::from(vec![
@@ -326,9 +291,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                     }
                 } else if c.is_live {
                     let badge = " IDLE ";
-                    let badge_style = Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM);
+                    let badge_style = Style::default().fg(theme::MUTED_GRAY);
                     let rest = "Standby";
                     if inner_width_right >= 6 + rest.chars().count() {
                         Line::from(vec![
@@ -354,7 +317,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                 } else {
                     Line::from(vec![Span::styled(
                         " —",
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::MUTED_GRAY),
                     )])
                 };
 
@@ -385,7 +348,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
             .take(log_divider_area.width as usize)
             .collect();
         let log_divider =
-            Paragraph::new(log_divider_text).style(Style::default().fg(Color::DarkGray));
+            Paragraph::new(log_divider_text).style(Style::default().fg(theme::DIVIDER));
         f.render_widget(log_divider, log_divider_area);
 
         if log_area.height > 0 && log_area.width > 0 {
@@ -445,7 +408,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
 
     // 5. Footer Divider
     let footer_divider = Paragraph::new("─".repeat(footer_div_area.width as usize))
-        .style(Style::default().fg(Color::DarkGray));
+        .style(Style::default().fg(theme::DIVIDER));
     f.render_widget(footer_divider, footer_div_area);
 
     // 6. Keybind Footer
@@ -453,18 +416,18 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
         (
             " q / Ctrl+C Force Exit Immediately │ Cleaning up: stopping FFmpeg & flushing uploads... ",
             Style::default()
-                .fg(Color::LightRed)
+                .fg(theme::SOFT_RED)
                 .add_modifier(Modifier::BOLD),
         )
     } else if app.show_logs {
         (
             " q Quit   l Logs   ↑/↓ Scroll   PgUp/PgDn Scroll Logs   Home/End Top/Latest   r Refresh ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED_GRAY),
         )
     } else {
         (
             " q Quit   l Logs   ↑/↓ Scroll   r Refresh ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme::MUTED_GRAY),
         )
     };
     let footer = Paragraph::new(footer_text).style(footer_style);

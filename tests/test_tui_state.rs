@@ -4,6 +4,7 @@ use ratatui::backend::TestBackend;
 
 use chzzk_load::tui::app::App;
 use chzzk_load::tui::event::{AppEvent, LogEntry};
+use chzzk_load::tui::theme;
 use chzzk_load::tui::ui::draw_ui;
 
 #[test]
@@ -659,10 +660,10 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
             for x in 0..buffer.area.width {
                 let cell = buffer.cell((x, y)).unwrap();
                 if cell.symbol() == "U" && buffer.cell((x + 1, y)).unwrap().symbol() == "P" {
-                    assert_eq!(cell.fg, Color::Green, "UP badge must be green");
+                    assert_eq!(cell.fg, theme::GREEN, "UP badge must be theme green");
                     assert!(
-                        cell.modifier.contains(Modifier::DIM),
-                        "UP badge must be dimmed"
+                        !cell.modifier.contains(Modifier::DIM),
+                        "UP badge must not be dimmed"
                     );
                     found_up_green = true;
 
@@ -690,10 +691,10 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
             for x in 0..buffer.area.width {
                 let cell = buffer.cell((x, y)).unwrap();
                 if cell.symbol() == "R" && buffer.cell((x + 1, y)).unwrap().symbol() == "E" {
-                    assert_eq!(cell.fg, Color::Red, "REC badge must be red");
+                    assert_eq!(cell.fg, theme::RED, "REC badge must be theme red");
                     assert!(
-                        cell.modifier.contains(Modifier::DIM),
-                        "REC badge must be dimmed"
+                        !cell.modifier.contains(Modifier::DIM),
+                        "REC badge must not be dimmed"
                     );
                     found_rec_red = true;
 
@@ -748,10 +749,10 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
             for x in 0..buffer.area.width {
                 let cell = buffer.cell((x, y)).unwrap();
                 if cell.symbol() == "A" && buffer.cell((x + 1, y)).unwrap().symbol() == "C" {
-                    assert_eq!(cell.fg, Color::Cyan, "ACTIVE badge must be cyan");
+                    assert_eq!(cell.fg, theme::CYAN, "ACTIVE badge must be theme cyan");
                     assert!(
-                        cell.modifier.contains(Modifier::DIM),
-                        "ACTIVE badge must be dimmed"
+                        !cell.modifier.contains(Modifier::DIM),
+                        "ACTIVE badge must not be dimmed"
                     );
 
                     // Streamer1 must start at x + 8 (ACTIVE padded to 7 + 1 space)
@@ -771,10 +772,10 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
             for x in 0..buffer.area.width {
                 let cell = buffer.cell((x, y)).unwrap();
                 if cell.symbol() == "L" && buffer.cell((x + 1, y)).unwrap().symbol() == "I" {
-                    assert_eq!(cell.fg, Color::Green, "LIVE badge must be green");
+                    assert_eq!(cell.fg, theme::GREEN, "LIVE badge must be theme green");
                     assert!(
-                        cell.modifier.contains(Modifier::DIM),
-                        "LIVE badge must be dimmed"
+                        !cell.modifier.contains(Modifier::DIM),
+                        "LIVE badge must not be dimmed"
                     );
 
                     // Streamer3 must start at x + 8
@@ -794,10 +795,14 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
             for x in 0..buffer.area.width {
                 let cell = buffer.cell((x, y)).unwrap();
                 if cell.symbol() == "O" && buffer.cell((x + 1, y)).unwrap().symbol() == "F" {
-                    assert_eq!(cell.fg, Color::DarkGray, "OFFLINE badge must be dark gray");
+                    assert_eq!(
+                        cell.fg,
+                        theme::MUTED_GRAY,
+                        "OFFLINE badge must be theme muted gray"
+                    );
                     assert!(
-                        cell.modifier.contains(Modifier::DIM),
-                        "OFFLINE badge must be dimmed"
+                        !cell.modifier.contains(Modifier::DIM),
+                        "OFFLINE badge must not be dimmed"
                     );
 
                     // Streamer4 must start at x + 8
@@ -879,7 +884,7 @@ fn test_draw_ui_shutdown_banner_rendering() {
         if !cell.symbol().trim().is_empty() {
             assert_eq!(
                 cell.fg,
-                ratatui::style::Color::Yellow,
+                theme::YELLOW,
                 "Shutdown header character '{}' at ({}, 0) must be Yellow",
                 cell.symbol(),
                 x
@@ -1066,58 +1071,36 @@ fn test_l_key_single_press_toggle_ignores_release_event() {
 fn test_log_kind_badge_and_style_mappings() {
     use chzzk_load::tui::event::LogKind;
     use chzzk_load::tui::ui::log_kind_badge_and_style;
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::Style;
 
     let cases = [
-        (
-            LogKind::Error,
-            " ERROR  ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
-        ),
+        (LogKind::Error, " ERROR  ", Style::default().fg(theme::RED)),
         (
             LogKind::Warn,
             " WARN   ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(theme::YELLOW),
         ),
         (
             LogKind::Clean,
             " CLEAN  ",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(theme::GREEN),
         ),
-        (
-            LogKind::Rec,
-            " REC    ",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-        ),
+        (LogKind::Rec, " REC    ", Style::default().fg(theme::CYAN)),
         (
             LogKind::Ffmpeg,
             " FFMPEG ",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(theme::MAGENTA),
         ),
-        (
-            LogKind::Drive,
-            " DRIVE  ",
-            Style::default().fg(Color::Blue).add_modifier(Modifier::DIM),
-        ),
+        (LogKind::Drive, " DRIVE  ", Style::default().fg(theme::BLUE)),
         (
             LogKind::Poll,
             " POLL   ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(theme::MUTED_GRAY),
         ),
         (
             LogKind::Info,
             " INFO   ",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(theme::MUTED_GRAY),
         ),
     ];
 
@@ -1362,7 +1345,7 @@ fn test_draw_ui_header_preset_a_metrics() {
 
 #[test]
 fn test_draw_ui_dividers_render_correctly_on_various_widths() {
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
 
     let widths = [10, 25, 40, 80, 120];
     for &width in &widths {
@@ -1385,8 +1368,8 @@ fn test_draw_ui_dividers_render_correctly_on_various_widths() {
             );
             assert_eq!(
                 cell.fg,
-                Color::DarkGray,
-                "Header divider must have Color::DarkGray"
+                theme::DIVIDER,
+                "Header divider must have theme::DIVIDER"
             );
             assert!(
                 !cell.modifier.contains(Modifier::DIM),
