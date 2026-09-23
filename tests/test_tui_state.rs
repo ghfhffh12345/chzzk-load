@@ -868,7 +868,7 @@ fn test_draw_ui_shutdown_banner_rendering() {
     assert!(content_shutdown.contains("SHUTTING DOWN"));
     assert!(!content_shutdown.contains("[ SHUTTING DOWN ]"));
     assert!(content_shutdown.contains("Stopping recordings & finishing uploads..."));
-    assert!(content_shutdown.contains("Reclaimed: 42.5 MB"));
+    assert!(content_shutdown.contains("Archived: 42.5 MB"));
     assert!(content_shutdown.contains("q / Ctrl+C Force Exit Immediately"));
 
     // Verify shutdown header retains Yellow and BOLD
@@ -1221,4 +1221,141 @@ fn test_draw_ui_normal_header_style_has_no_color() {
         }
     }
     assert!(header_text.contains("chzzk-load"));
+}
+
+#[test]
+fn test_app_recording_duration_tracking() {
+    let mut app = App::new();
+    assert_eq!(app.total_recorded_duration(), std::time::Duration::ZERO);
+    assert_eq!(app.format_total_recorded(), "0s");
+
+    // Start recording channel 1
+    app.handle_event(AppEvent::RecordingStarted {
+        channel_id: "ch_1".to_string(),
+        session_title: "Stream 1".to_string(),
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(app.total_recorded_duration() >= std::time::Duration::from_millis(40));
+
+    // End recording channel 1
+    app.handle_event(AppEvent::RecordingEnded {
+        channel_id: "ch_1".to_string(),
+    });
+    let dur_after_end = app.total_recorded_duration();
+    assert!(dur_after_end >= std::time::Duration::from_millis(40));
+
+    // Wait a bit and verify total duration does not tick up when no recordings are active
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert_eq!(app.total_recorded_duration(), dur_after_end);
+}
+
+#[test]
+fn test_format_duration_helper() {
+    assert_eq!(
+        App::format_duration(std::time::Duration::from_secs(0)),
+        "0s"
+    );
+    assert_eq!(
+        App::format_duration(std::time::Duration::from_secs(45)),
+        "45s"
+    );
+    assert_eq!(
+        App::format_duration(std::time::Duration::from_secs(65)),
+        "1m 05s"
+    );
+    assert_eq!(
+        App::format_duration(std::time::Duration::from_secs(845)),
+        "14m 05s"
+    );
+    assert_eq!(
+        App::format_duration(std::time::Duration::from_secs(3600)),
+        "1h 00m"
+    );
+    assert_eq!(
+        App::format_duration(std::time::Duration::from_secs(11700)),
+        "3h 15m"
+    );
+}
+
+#[test]
+fn test_app_format_archived_size() {
+    let mut app = App::new();
+    app.reclaimed_mb = 0.0;
+    assert_eq!(app.format_archived_size(), "0.0 MB");
+
+    app.reclaimed_mb = 142.5;
+    assert_eq!(app.format_archived_size(), "142.5 MB");
+
+    app.reclaimed_mb = 1024.0;
+    assert_eq!(app.format_archived_size(), "1.00 GB");
+
+    app.reclaimed_mb = 4935.68;
+    assert_eq!(app.format_archived_size(), "4.82 GB");
+}
+
+#[test]
+fn test_draw_ui_header_preset_a_metrics() {
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    app.channels = vec![
+        chzzk_load::tui::app::ChannelItem {
+            id: "ch_1".to_string(),
+            name: "Streamer A".to_string(),
+            is_live: true,
+            is_active: true,
+            title: "Live Game".to_string(),
+        },
+        chzzk_load::tui::app::ChannelItem {
+            id: "ch_2".to_string(),
+            name: "Streamer B".to_string(),
+            is_live: true,
+            is_active: false,
+            title: "Chatting".to_string(),
+        },
+        chzzk_load::tui::app::ChannelItem {
+            id: "ch_3".to_string(),
+            name: "Streamer C".to_string(),
+            is_live: false,
+            is_active: false,
+            title: "Offline".to_string(),
+        },
+    ];
+    app.reclaimed_mb = 1450.0;
+    app.total_recorded_duration = std::time::Duration::from_secs(5040); // 1h 24m
+
+    // 1. Normal state rendering
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content_normal: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+
+    assert!(content_normal.contains("Recording: 1/3"));
+    assert!(content_normal.contains("Total Recorded: 1h 24m"));
+    assert!(content_normal.contains("Archived: 1.42 GB"));
+    assert!(!content_normal.contains("Reclaimed Space"));
+    assert!(!content_normal.contains("Chunks Uploaded"));
+
+    // 2. Shutdown state rendering
+    app.is_shutting_down = true;
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content_shutdown: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+
+    assert!(content_shutdown.contains("SHUTTING DOWN"));
+    assert!(content_shutdown.contains("Recording: 1/3"));
+    assert!(content_shutdown.contains("Archived: 1.42 GB"));
+    assert!(!content_shutdown.contains("Reclaimed:"));
+    assert!(!content_shutdown.contains("Uploads:"));
 }

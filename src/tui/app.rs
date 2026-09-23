@@ -1,5 +1,6 @@
 use crossterm::event::KeyCode;
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use crate::tui::event::{AppEvent, LogEntry};
 
@@ -33,6 +34,8 @@ pub struct App {
     pub uploaded_count: usize,
     pub reclaimed_mb: f64,
     pub active_uploads: HashMap<String, ActiveUpload>,
+    pub active_recording_starts: HashMap<String, Instant>,
+    pub total_recorded_duration: Duration,
     pub logs: VecDeque<LogEntry>,
     pub log_scroll: usize,
     pub show_logs: bool,
@@ -59,6 +62,8 @@ impl App {
             uploaded_count: 0,
             reclaimed_mb: 0.0,
             active_uploads: HashMap::new(),
+            active_recording_starts: HashMap::new(),
+            total_recorded_duration: Duration::ZERO,
             logs: VecDeque::with_capacity(200),
             log_scroll: 0,
             show_logs: true,
@@ -117,6 +122,42 @@ impl App {
         }
     }
 
+    pub fn total_recorded_duration(&self) -> Duration {
+        let active_duration: Duration = self
+            .active_recording_starts
+            .values()
+            .map(|start| start.elapsed())
+            .sum();
+        self.total_recorded_duration + active_duration
+    }
+
+    pub fn format_duration(dur: Duration) -> String {
+        let total_secs = dur.as_secs();
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        let secs = total_secs % 60;
+
+        if hours > 0 {
+            format!("{}h {:02}m", hours, mins)
+        } else if mins > 0 {
+            format!("{}m {:02}s", mins, secs)
+        } else {
+            format!("{}s", secs)
+        }
+    }
+
+    pub fn format_total_recorded(&self) -> String {
+        Self::format_duration(self.total_recorded_duration())
+    }
+
+    pub fn format_archived_size(&self) -> String {
+        if self.reclaimed_mb >= 1024.0 {
+            format!("{:.2} GB", self.reclaimed_mb / 1024.0)
+        } else {
+            format!("{:.1} MB", self.reclaimed_mb)
+        }
+    }
+
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::ChannelUpdate {
@@ -131,6 +172,9 @@ impl App {
                     ch.title = title;
                     if !is_live {
                         ch.is_active = false;
+                        if let Some(start) = self.active_recording_starts.remove(&channel_id) {
+                            self.total_recorded_duration += start.elapsed();
+                        }
                     }
                 } else {
                     self.channels.push(ChannelItem {
@@ -149,10 +193,16 @@ impl App {
                 if let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) {
                     ch.is_active = true;
                 }
+                self.active_recording_starts
+                    .entry(channel_id)
+                    .or_insert_with(Instant::now);
             }
             AppEvent::RecordingEnded { channel_id } => {
                 if let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) {
                     ch.is_active = false;
+                }
+                if let Some(start) = self.active_recording_starts.remove(&channel_id) {
+                    self.total_recorded_duration += start.elapsed();
                 }
             }
             AppEvent::UploadProgress {

@@ -90,11 +90,16 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
         };
 
     // 0. Header Status Line
+    let active_count = app.channels.iter().filter(|c| c.is_active).count();
+    let total_count = app.channels.len();
+    let duration_str = app.format_total_recorded();
+    let archived_str = app.format_archived_size();
+
     let (header_text, header_style) = if app.is_shutting_down {
         (
             format!(
-                " SHUTTING DOWN │ Stopping recordings & finishing uploads... │ Reclaimed: {:.1} MB │ Uploads: {} ",
-                app.reclaimed_mb, app.uploaded_count
+                " SHUTTING DOWN │ Stopping recordings & finishing uploads... │ Recording: {}/{} │ Archived: {}",
+                active_count, total_count, archived_str
             ),
             Style::default()
                 .fg(Color::Yellow)
@@ -103,10 +108,12 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     } else {
         (
             format!(
-                " chzzk-load v{} │ Reclaimed Space: {:.1} MB │ Chunks Uploaded: {}",
+                " chzzk-load v{} │ Recording: {}/{} │ Total Recorded: {} │ Archived: {}",
                 env!("CARGO_PKG_VERSION"),
-                app.reclaimed_mb,
-                app.uploaded_count
+                active_count,
+                total_count,
+                duration_str,
+                archived_str
             ),
             Style::default().add_modifier(Modifier::BOLD),
         )
