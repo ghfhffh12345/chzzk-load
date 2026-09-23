@@ -26,31 +26,41 @@ fn test_console_codepage_guard_lifecycle() {
 #[test]
 fn test_console_codepage_guard_restore() {
     let guard = ConsoleCodePageGuard::init();
-    let orig = guard.orig_output_codepage();
-
-    guard.restore();
 
     #[cfg(windows)]
     {
+        let orig = guard.orig_output_codepage();
+        guard.restore();
         unsafe {
             let current = windows_sys::Win32::System::Console::GetConsoleOutputCP();
             assert_eq!(current, orig);
         }
+    }
+
+    #[cfg(not(windows))]
+    {
+        guard.restore();
+        assert!(guard.is_utf8());
     }
 }
 
 #[test]
 fn test_console_codepage_guard_restore_original_static() {
     let guard = ConsoleCodePageGuard::init();
-    let orig = guard.orig_output_codepage();
-
-    ConsoleCodePageGuard::restore_original();
 
     #[cfg(windows)]
     {
+        let orig = guard.orig_output_codepage();
+        ConsoleCodePageGuard::restore_original();
         unsafe {
             let current = windows_sys::Win32::System::Console::GetConsoleOutputCP();
             assert_eq!(current, orig);
         }
+    }
+
+    #[cfg(not(windows))]
+    {
+        ConsoleCodePageGuard::restore_original();
+        assert!(guard.is_utf8());
     }
 }
