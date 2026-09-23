@@ -21,7 +21,7 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 - 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk per active stream. Chunks are permanently deleted immediately upon verified cloud upload.
 - 🛡️ **N+1 Segment Boundary Safety**: Chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
 - ☁️ **Resumable Google Drive Sync & Local Fallback**: Direct cloud upload via Google Drive API v3 with automatic PKCE OAuth2 authorization. Runs in local-only recording mode if Google Drive credentials are omitted.
-- 🖥️ **Interactive Terminal Dashboard**: Real-time channel states, live stream titles, upload progress gauges, transfer speed metrics, disk space reclaimed counters, and live activity logs.
+- 🖥️ **Interactive Terminal Dashboard**: Real-time channel states, live stream titles, upload progress gauges, transfer speed metrics, header statistics (active recordings, total duration, archived size), collapsible activity logs (`l` key), and native Windows UTF-8 console code page support.
 - 🔄 **Anti-Race Cache Protection**: Enforces post-recording cooldown and tracks broadcast session IDs to prevent duplicate recording triggers caused by CDN cache TTL delays.
 
 ---
@@ -95,7 +95,9 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 | `general.poll_interval_seconds` | `20` | Interval in seconds between live broadcast status checks. |
 | `general.stream_cooldown_seconds` | `60` | Post-stream cooldown to avoid duplicate sessions from CDN caching. |
 | `general.recordings_dir` | `"recordings"` | Local folder for temporary video segments. |
+| `general.min_free_disk_gb` | `2.0` | Minimum required free disk space in GB to continue recording. |
 | `google_drive.credentials_path` | `"credentials.json"` | Path to Google OAuth2 Desktop client secrets file. |
+| `google_drive.token_path` | `"token.json"` | Path to saved OAuth2 authorization tokens file. |
 | `google_drive.root_folder_name` | `"Chzzk_Recordings"` | Destination folder name created in Google Drive. |
 | `chzzk.nid_aut` / `nid_ses` | `""` | Optional Naver session cookies for adult/subscriber-only streams. |
 | `channels` | - | List of monitored Chzzk channels (`id` from channel URL, `name` for display). |
@@ -118,10 +120,11 @@ To enable automatic Google Drive upload:
 
 | Key | Action |
 | :--- | :--- |
-| `q` | **Quit**: Initiates graceful shutdown (stops active recordings and flushes pending uploads). |
+| `q` | **Quit**: Initiates graceful shutdown (stops active recordings and flushes pending uploads). Press `q` or `Ctrl+C` again to force exit immediately. |
+| `l` | **Toggle Logs**: Show or hide the activity log section (expands channels and cloud upload views when hidden). |
 | `r` | **Refresh**: Immediately polls monitored channels. |
-| `↑` / `k` | **Navigate Up**: Select previous channel in the list. |
-| `↓` / `j` | **Navigate Down**: Select next channel in the list. |
+| `↑` / `k` | **Scroll Up**: Scroll visible channels and cloud uploads upward. |
+| `↓` / `j` | **Scroll Down**: Scroll visible channels and cloud uploads downward. |
 | `PageUp` / `PageDown` | **Scroll Logs**: Move activity logs up/down by 5 lines. |
 | `Home` / `End` | **Log Navigation**: Jump to top (oldest) or bottom (latest, re-enables auto-tail). |
 
