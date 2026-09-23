@@ -122,11 +122,8 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     f.render_widget(header, header_area);
 
     // 1. Header Divider
-    let header_divider = Paragraph::new("─".repeat(header_div_area.width as usize)).style(
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::DIM),
-    );
+    let header_divider = Paragraph::new("─".repeat(header_div_area.width as usize))
+        .style(Style::default().fg(Color::DarkGray));
     f.render_widget(header_divider, header_div_area);
 
     // 2. Body: Horizontal split (40% Monitored Channels, 60% Cloud Upload)
@@ -282,9 +279,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                             Span::styled("━".repeat(filled_count), Style::default()),
                             Span::styled(
                                 "─".repeat(unfilled_count),
-                                Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::DIM),
+                                Style::default().fg(Color::DarkGray),
                             ),
                             Span::styled(metrics_str, Style::default().add_modifier(Modifier::DIM)),
                         ])
@@ -385,12 +380,12 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
         };
         let title_len = log_title.chars().count();
         let rule_len = (log_divider_area.width as usize).saturating_sub(title_len);
-        let log_divider_text = format!("{}{}", log_title, "─".repeat(rule_len));
-        let log_divider = Paragraph::new(log_divider_text).style(
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        );
+        let log_divider_text: String = format!("{}{}", log_title, "─".repeat(rule_len))
+            .chars()
+            .take(log_divider_area.width as usize)
+            .collect();
+        let log_divider =
+            Paragraph::new(log_divider_text).style(Style::default().fg(Color::DarkGray));
         f.render_widget(log_divider, log_divider_area);
 
         if log_area.height > 0 && log_area.width > 0 {
@@ -449,11 +444,8 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     }
 
     // 5. Footer Divider
-    let footer_divider = Paragraph::new("─".repeat(footer_div_area.width as usize)).style(
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::DIM),
-    );
+    let footer_divider = Paragraph::new("─".repeat(footer_div_area.width as usize))
+        .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer_divider, footer_div_area);
 
     // 6. Keybind Footer

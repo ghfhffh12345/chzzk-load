@@ -1359,3 +1359,39 @@ fn test_draw_ui_header_preset_a_metrics() {
     assert!(!content_shutdown.contains("Reclaimed:"));
     assert!(!content_shutdown.contains("Uploads:"));
 }
+
+#[test]
+fn test_draw_ui_dividers_render_correctly_on_various_widths() {
+    use ratatui::style::{Color, Modifier};
+
+    let widths = [10, 25, 40, 80, 120];
+    for &width in &widths {
+        let backend = TestBackend::new(width, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = App::new();
+
+        terminal.draw(|f| draw_ui(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Row 1 is header divider: verify all cells are horizontal rule '─' with Color::DarkGray and NO Modifier::DIM
+        for x in 0..width {
+            let cell = buffer.cell((x, 1)).unwrap();
+            assert_eq!(
+                cell.symbol(),
+                "─",
+                "Header divider at x={} on width={} should be '─'",
+                x,
+                width
+            );
+            assert_eq!(
+                cell.fg,
+                Color::DarkGray,
+                "Header divider must have Color::DarkGray"
+            );
+            assert!(
+                !cell.modifier.contains(Modifier::DIM),
+                "Header divider must not have Modifier::DIM (which causes invisible lines on dark themes)"
+            );
+        }
+    }
+}
