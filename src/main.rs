@@ -34,11 +34,14 @@ pub struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _console_guard = chzzk_load::tui::ConsoleCodePageGuard::init();
+
     // Register panic hook to restore terminal on panic
     let default_panic = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
         let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+        chzzk_load::tui::ConsoleCodePageGuard::restore_original();
         default_panic(panic_info);
     }));
 
@@ -102,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
                 if cancel_token_ctrlc.is_cancelled() {
                     let _ = disable_raw_mode();
                     let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+                    chzzk_load::tui::ConsoleCodePageGuard::restore_original();
                     std::process::exit(130);
                 } else {
                     cancel_token_ctrlc.cancel();

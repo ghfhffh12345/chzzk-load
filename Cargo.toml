@@ -22,6 +22,9 @@ tiny_http = "0.12"
 url = "2.5"
 futures-util = "0.3"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
 [lib]
 name = "chzzk_load"
 path = "src/lib.rs"
