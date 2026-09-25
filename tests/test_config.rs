@@ -1,4 +1,25 @@
-use chzzk_load::config::Settings;
+use chzzk_load::config::{GeneralConfig, Settings};
+
+#[test]
+fn test_general_config_chat_settings_default() {
+    let json_data = r#"{}"#;
+    let cfg: GeneralConfig =
+        serde_json::from_str(json_data).expect("Failed to parse empty general config");
+    assert!(cfg.record_chat);
+    assert_eq!(cfg.chat_flush_interval_seconds, 30);
+}
+
+#[test]
+fn test_general_config_chat_settings_custom() {
+    let json_data = r#"{
+        "record_chat": false,
+        "chat_flush_interval_seconds": 60
+    }"#;
+    let cfg: GeneralConfig =
+        serde_json::from_str(json_data).expect("Failed to parse custom chat config");
+    assert!(!cfg.record_chat);
+    assert_eq!(cfg.chat_flush_interval_seconds, 60);
+}
 
 #[test]
 fn test_default_settings_and_serialization() {

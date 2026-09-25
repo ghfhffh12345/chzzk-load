@@ -15,6 +15,10 @@ pub struct GeneralConfig {
     pub recordings_dir: String,
     #[serde(default = "default_min_free_disk_gb")]
     pub min_free_disk_gb: f64,
+    #[serde(default = "default_record_chat")]
+    pub record_chat: bool,
+    #[serde(default = "default_chat_flush_interval")]
+    pub chat_flush_interval_seconds: u64,
 }
 
 fn default_chunk_duration() -> u64 {
@@ -32,6 +36,12 @@ fn default_recordings_dir() -> String {
 fn default_min_free_disk_gb() -> f64 {
     2.0
 }
+fn default_record_chat() -> bool {
+    true
+}
+fn default_chat_flush_interval() -> u64 {
+    30
+}
 
 impl Default for GeneralConfig {
     fn default() -> Self {
@@ -41,6 +51,8 @@ impl Default for GeneralConfig {
             stream_cooldown_seconds: default_stream_cooldown(),
             recordings_dir: default_recordings_dir(),
             min_free_disk_gb: default_min_free_disk_gb(),
+            record_chat: default_record_chat(),
+            chat_flush_interval_seconds: default_chat_flush_interval(),
         }
     }
 }

@@ -21,6 +21,7 @@ base64 = "0.22"
 tiny_http = "0.12"
 url = "2.5"
 futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
