@@ -255,10 +255,7 @@ impl ChzzkChatClient {
         'outer: while !self.cancel_token.is_cancelled() {
             let connect_result = tokio_tungstenite::connect_async(&ws_url).await;
             let (ws_stream, _) = match connect_result {
-                Ok(stream) => {
-                    reconnect_attempt = 0;
-                    stream
-                }
+                Ok(stream) => stream,
                 Err(_err) => {
                     if self.cancel_token.is_cancelled() {
                         break 'outer;
@@ -298,44 +295,65 @@ impl ChzzkChatClient {
                 if self.cancel_token.is_cancelled() {
                     break 'outer;
                 }
-                continue 'outer;
+                reconnect_attempt += 1;
+                let backoff =
+                    Duration::from_millis(std::cmp::min(1000 * reconnect_attempt as u64, 5000));
+                tokio::select! {
+                    _ = self.cancel_token.cancelled() => break 'outer,
+                    _ = tokio::time::sleep(backoff) => continue 'outer,
+                }
             }
 
-            // Await CONNECTED (cmd: 10100)
-            let mut connected = false;
-            while !connected && !self.cancel_token.is_cancelled() {
-                tokio::select! {
-                    _ = self.cancel_token.cancelled() => {
-                        let _ = ws_sink.send(Message::Close(None)).await;
-                        break 'outer;
-                    }
-                    msg = ws_reader.next() => {
-                        match msg {
-                            Some(Ok(Message::Text(text))) => {
-                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text)
-                                    && extract_cmd(&val) == Some(CMD_CONNECTED)
-                                {
-                                    connected = true;
+            // Await CONNECTED (cmd: 10100) with 10-second timeout
+            let handshake_res = tokio::time::timeout(Duration::from_secs(10), async {
+                while !self.cancel_token.is_cancelled() {
+                    tokio::select! {
+                        _ = self.cancel_token.cancelled() => {
+                            let _ = ws_sink.send(Message::Close(None)).await;
+                            return false;
+                        }
+                        msg = ws_reader.next() => {
+                            match msg {
+                                Some(Ok(Message::Text(text))) => {
+                                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text)
+                                        && extract_cmd(&val) == Some(CMD_CONNECTED)
+                                    {
+                                        return true;
+                                    }
                                 }
+                                Some(Ok(Message::Ping(data))) => {
+                                    let _ = ws_sink.send(Message::Pong(data)).await;
+                                }
+                                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                                    return false;
+                                }
+                                _ => {}
                             }
-                            Some(Ok(Message::Ping(data))) => {
-                                let _ = ws_sink.send(Message::Pong(data)).await;
-                            }
-                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
-                                break;
-                            }
-                            _ => {}
                         }
                     }
                 }
+                false
+            })
+            .await;
+
+            let connected = matches!(handshake_res, Ok(true));
+
+            if self.cancel_token.is_cancelled() {
+                break 'outer;
             }
 
             if !connected {
-                if self.cancel_token.is_cancelled() {
-                    break 'outer;
+                reconnect_attempt += 1;
+                let backoff =
+                    Duration::from_millis(std::cmp::min(1000 * reconnect_attempt as u64, 5000));
+                tokio::select! {
+                    _ = self.cancel_token.cancelled() => break 'outer,
+                    _ = tokio::time::sleep(backoff) => continue 'outer,
                 }
-                continue 'outer;
             }
+
+            // Handshake confirmed: reset reconnect attempt counter
+            reconnect_attempt = 0;
 
             let mut ping_interval = tokio::time::interval_at(
                 tokio::time::Instant::now() + Duration::from_secs(20),
@@ -384,7 +402,7 @@ impl ChzzkChatClient {
                                                 }
                                                 if let Some(ref tx) = on_stats {
                                                     let count = writer.total_written() + writer.buffered_count() as u64;
-                                                    let _ = tx.send(count).await;
+                                                    let _ = tx.try_send(count);
                                                 }
                                             }
                                         }
@@ -422,7 +440,7 @@ impl ChzzkChatClient {
 
         let total = writer.flush_and_close().await?;
         if let Some(ref tx) = on_stats {
-            let _ = tx.send(total).await;
+            let _ = tx.try_send(total);
         }
         Ok(total)
     }

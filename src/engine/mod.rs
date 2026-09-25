@@ -531,12 +531,10 @@ impl EngineOrchestrator {
                         let forward_tx = event_tx_chat.clone();
                         let forward_handle = tokio::spawn(async move {
                             while let Some(count) = stats_rx.recv().await {
-                                let _ = forward_tx
-                                    .send(AppEvent::ChatStats {
-                                        channel_id: forward_cid.clone(),
-                                        message_count: count,
-                                    })
-                                    .await;
+                                let _ = forward_tx.try_send(AppEvent::ChatStats {
+                                    channel_id: forward_cid.clone(),
+                                    message_count: count,
+                                });
                             }
                         });
 
@@ -625,6 +623,11 @@ impl EngineOrchestrator {
                     if let Some(chat_handle) = chat_task {
                         let _ = tokio::time::timeout(Duration::from_secs(5), chat_handle).await;
                     }
+                    let chat_file = session_dir.join("chat.jsonl");
+                    if tokio::fs::try_exists(&chat_file).await.unwrap_or(false) {
+                        let _ = tokio::fs::remove_file(&chat_file).await;
+                    }
+                    let _ = tokio::fs::remove_dir(&session_dir).await;
                     let mut active = active_recordings.lock().await;
                     active.remove(&channel_id);
                     let mut sessions = active_sessions.lock().await;

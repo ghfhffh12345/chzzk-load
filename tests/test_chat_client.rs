@@ -121,3 +121,156 @@ fn test_parse_chat_packet_types_and_donations() {
     assert_eq!(msg.msg_type, "DONATION");
     assert_eq!(msg.donation_amount, Some(10000));
 }
+
+#[tokio::test]
+async fn test_handshake_failure_reconnects_with_backoff() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{}", addr);
+
+    let connection_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let conn_count_clone = connection_count.clone();
+
+    let server_task = tokio::spawn(async move {
+        // Connection 1: Accept, receive CONNECT, but close immediately without CONNECTED
+        if let Ok((stream, _)) = listener.accept().await {
+            conn_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                let _ = ws.next().await; // Read CONNECT
+                let _ = ws.close(None).await;
+            }
+        }
+
+        // Connection 2: Accept, handshake properly, send a chat message
+        if let Ok((stream, _)) = listener.accept().await {
+            conn_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                let _ = ws.next().await; // Read CONNECT
+                let resp = serde_json::json!({
+                    "cmd": 10100,
+                    "bdy": { "sid": "session_reconnect_xyz" }
+                });
+                let _ = ws.send(Message::Text(resp.to_string().into())).await;
+
+                let chat_packet = serde_json::json!({
+                    "cmd": 93101,
+                    "bdy": [
+                        {
+                            "msg": "Message after reconnect!",
+                            "msgTime": 1727268158000u64,
+                            "msgTypeCode": 1,
+                            "profile": "{\"nickname\":\"ReconnectViewer\"}",
+                            "extras": "{}"
+                        }
+                    ]
+                });
+                let _ = ws.send(Message::Text(chat_packet.to_string().into())).await;
+            }
+        }
+    });
+
+    let cancel_token = CancellationToken::new();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_ws_reconnect_{}", rand::random::<u32>()));
+    let chat_file = temp_dir.join("chat.jsonl");
+
+    let client = ChzzkChatClient::new(
+        "mock_channel".to_string(),
+        "mock_access_token".to_string(),
+        chat_file.clone(),
+        Duration::from_millis(50),
+        cancel_token.clone(),
+    )
+    .with_custom_ws_url(ws_url);
+
+    let cancel_clone = cancel_token.clone();
+    tokio::spawn(async move {
+        // Allow enough time for connection 1 failure, backoff sleep (1s), and connection 2 success
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        cancel_clone.cancel();
+    });
+
+    let total = client.run(None).await.unwrap();
+    assert_eq!(total, 1);
+    assert_eq!(
+        connection_count.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+
+    let _ = server_task.await;
+
+    let content = tokio::fs::read_to_string(&chat_file).await.unwrap();
+    assert!(content.contains("Message after reconnect!"));
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_chat_telemetry_non_blocking_when_receiver_full() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{}", addr);
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+        // 1. Handshake
+        let _ = ws.next().await;
+        let resp = serde_json::json!({
+            "cmd": 10100,
+            "bdy": { "sid": "session_stats_test" }
+        });
+        ws.send(Message::Text(resp.to_string().into()))
+            .await
+            .unwrap();
+
+        // 2. Send multiple chat packets without delay
+        for i in 0..10 {
+            let chat_packet = serde_json::json!({
+                "cmd": 93101,
+                "bdy": [
+                    {
+                        "msg": format!("Spam msg {}", i),
+                        "msgTime": 1727268158000u64 + i as u64,
+                        "msgTypeCode": 1,
+                        "profile": "{\"nickname\":\"StatsTester\"}",
+                        "extras": "{}"
+                    }
+                ]
+            });
+            ws.send(Message::Text(chat_packet.to_string().into()))
+                .await
+                .unwrap();
+        }
+    });
+
+    let cancel_token = CancellationToken::new();
+    let temp_dir = std::env::temp_dir().join(format!("test_ws_stats_{}", rand::random::<u32>()));
+    let chat_file = temp_dir.join("chat.jsonl");
+
+    let client = ChzzkChatClient::new(
+        "mock_channel".to_string(),
+        "mock_access_token".to_string(),
+        chat_file.clone(),
+        Duration::from_millis(50),
+        cancel_token.clone(),
+    )
+    .with_custom_ws_url(ws_url);
+
+    // Channel with buffer 1: deliberately full and never read from!
+    let (stats_tx, _stats_rx) = tokio::sync::mpsc::channel::<u64>(1);
+
+    let cancel_clone = cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        cancel_clone.cancel();
+    });
+
+    // Run must NOT block or deadlock even though stats_tx is saturated
+    let total = client.run(Some(stats_tx)).await.unwrap();
+    assert_eq!(total, 10);
+
+    let _ = server_task.await;
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
