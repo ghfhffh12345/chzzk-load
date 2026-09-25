@@ -253,7 +253,10 @@ impl ChzzkChatClient {
         let mut reconnect_attempt: u32 = 0;
 
         'outer: while !self.cancel_token.is_cancelled() {
-            let connect_result = tokio_tungstenite::connect_async(&ws_url).await;
+            let connect_result = tokio::select! {
+                _ = self.cancel_token.cancelled() => break 'outer,
+                res = tokio_tungstenite::connect_async(&ws_url) => res,
+            };
             let (ws_stream, _) = match connect_result {
                 Ok(stream) => stream,
                 Err(_err) => {
@@ -287,11 +290,12 @@ impl ChzzkChatClient {
                 }
             });
 
-            if ws_sink
-                .send(Message::Text(connect_packet.to_string().into()))
-                .await
-                .is_err()
-            {
+            let send_res = tokio::select! {
+                _ = self.cancel_token.cancelled() => break 'outer,
+                res = ws_sink.send(Message::Text(connect_packet.to_string().into())) => res,
+            };
+
+            if send_res.is_err() {
                 if self.cancel_token.is_cancelled() {
                     break 'outer;
                 }
@@ -364,7 +368,11 @@ impl ChzzkChatClient {
             'session: loop {
                 tokio::select! {
                     _ = self.cancel_token.cancelled() => {
-                        let _ = ws_sink.send(Message::Close(None)).await;
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(500),
+                            ws_sink.send(Message::Close(None)),
+                        )
+                        .await;
                         break 'outer;
                     }
                     _ = ping_interval.tick() => {

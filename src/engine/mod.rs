@@ -538,13 +538,16 @@ impl EngineOrchestrator {
                             }
                         });
 
-                        let client = ChzzkChatClient::new(
+                        let mut client = ChzzkChatClient::new(
                             chat_cid,
                             access_token,
                             chat_target_path,
                             Duration::from_secs(flush_sec),
                             chat_session_cancel,
                         );
+                        if let Some(ws_url) = chzzk_chat.chat_ws_url() {
+                            client = client.with_custom_ws_url(ws_url);
+                        }
 
                         let _ = event_tx_chat
                             .send(AppEvent::Log(LogEntry::chat(format!(
@@ -620,8 +623,12 @@ impl EngineOrchestrator {
                         ))))
                         .await;
                     session_cancel.cancel();
-                    if let Some(chat_handle) = chat_task {
-                        let _ = tokio::time::timeout(Duration::from_secs(5), chat_handle).await;
+                    if let Some(mut chat_handle) = chat_task
+                        && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
+                            .await
+                            .is_err()
+                    {
+                        chat_handle.abort();
                     }
                     let chat_file = session_dir.join("chat.jsonl");
                     if tokio::fs::try_exists(&chat_file).await.unwrap_or(false) {
@@ -834,8 +841,12 @@ impl EngineOrchestrator {
             }
 
             session_cancel.cancel();
-            if let Some(chat_handle) = chat_task {
-                let _ = tokio::time::timeout(Duration::from_secs(5), chat_handle).await;
+            if let Some(mut chat_handle) = chat_task
+                && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
+                    .await
+                    .is_err()
+            {
+                chat_handle.abort();
             }
 
             let chat_path = session_dir.join("chat.jsonl");

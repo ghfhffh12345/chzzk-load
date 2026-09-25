@@ -54,6 +54,39 @@ async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
     Arc::new(auth)
 }
 
+async fn spawn_mock_chat_ws_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{}", addr);
+
+    let handle = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
+                    use futures_util::{SinkExt, StreamExt};
+                    // Read CONNECT packet
+                    if let Some(Ok(_)) = ws.next().await {
+                        let resp = serde_json::json!({
+                            "cmd": 10100,
+                            "bdy": { "sid": "mock_test_session" }
+                        });
+                        let _ = ws
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                resp.to_string().into(),
+                            ))
+                            .await;
+
+                        // Drain until client disconnects
+                        while let Some(Ok(_)) = ws.next().await {}
+                    }
+                }
+            });
+        }
+    });
+
+    (ws_url, handle)
+}
+
 #[tokio::test]
 async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     let temp_dir =
@@ -62,6 +95,8 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
 
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
+
+    let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
 
     let token_requested = Arc::new(AtomicBool::new(false));
     let token_req_clone = token_requested.clone();
@@ -97,8 +132,9 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         name: "ChatStreamer".to_string(),
     }];
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_game_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk)
+        .with_game_base_url(format!("http://127.0.0.1:{}", port))
+        .with_chat_ws_url(ws_url);
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -124,14 +160,20 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     orchestrator.spawn_recording_session("chan_chat_test".to_string(), info, upload_tx);
 
     let cancel_clone = cancel_token.clone();
+    let token_req_for_cancel = token_requested.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        for _ in 0..100 {
+            if token_req_for_cancel.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         cancel_clone.cancel();
     });
 
     let mut saw_recording_started = false;
     let mut saw_recording_ended = false;
-    let timeout = tokio::time::sleep(Duration::from_secs(4));
+    let timeout = tokio::time::sleep(Duration::from_secs(10));
     tokio::pin!(timeout);
 
     loop {
@@ -236,7 +278,7 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
         cancel_clone.cancel();
     });
 
-    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(3), event_rx.recv()).await {
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
         if let AppEvent::RecordingEnded { .. } = ev {
             break;
         }
@@ -258,6 +300,8 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
 
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
+
+    let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
 
     std::thread::spawn(move || {
         while let Ok(request) = server.recv() {
@@ -281,8 +325,9 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = true;
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_game_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk)
+        .with_game_base_url(format!("http://127.0.0.1:{}", port))
+        .with_chat_ws_url(ws_url);
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -309,7 +354,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
 
     // Wait for the session dir to be created, then create a mock chat.jsonl to simulate captured chat
     let mut session_dir_opt = None;
-    for _ in 0..20 {
+    for _ in 0..100 {
         if let Ok(mut entries) = tokio::fs::read_dir(&temp_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 if entry
@@ -336,7 +381,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
     // Cancel session
     cancel_token.cancel();
 
-    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(3), event_rx.recv()).await {
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
         if let AppEvent::RecordingEnded { .. } = ev {
             break;
         }
@@ -365,6 +410,8 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
 
     let drive_server = Server::http("127.0.0.1:0").unwrap();
     let drive_port = drive_server.server_addr().to_ip().unwrap().port();
+
+    let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
 
     std::thread::spawn(move || {
         while let Ok(request) = chzzk_server.recv() {
@@ -454,7 +501,8 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
     settings.google_drive.root_folder_name = "chzzk_records".to_string();
 
     let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_game_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+        .with_game_base_url(format!("http://127.0.0.1:{}", chzzk_port))
+        .with_chat_ws_url(ws_url);
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -479,29 +527,37 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
     orchestrator.spawn_recording_session("chan_drive_chat".to_string(), info, upload_tx);
 
-    // Give time to create directory and write mock chat.jsonl
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let mut chat_file_path = None;
-    if let Ok(mut entries) = tokio::fs::read_dir(&temp_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if entry
-                .file_type()
-                .await
-                .map(|ft| ft.is_dir())
-                .unwrap_or(false)
-            {
-                let p = entry.path().join("chat.jsonl");
-                let _ = fs::write(&p, b"{\"content\":\"stream chat message\"}\n");
-                chat_file_path = Some(p);
-                break;
+    // Condition-based wait for session directory to be created
+    let mut session_dir_opt = None;
+    for _ in 0..100 {
+        if let Ok(mut entries) = tokio::fs::read_dir(&temp_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry
+                    .file_type()
+                    .await
+                    .map(|ft| ft.is_dir())
+                    .unwrap_or(false)
+                {
+                    session_dir_opt = Some(entry.path());
+                    break;
+                }
             }
         }
+        if session_dir_opt.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    let session_dir = session_dir_opt.expect("Session directory must be created within timeout");
+    let chat_file_path = session_dir.join("chat.jsonl");
+    fs::write(&chat_file_path, b"{\"content\":\"stream chat message\"}\n")
+        .expect("Failed to write mock chat.jsonl");
 
     cancel_token.cancel();
 
     let mut saw_drive_uploaded_log = false;
-    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(4), event_rx.recv()).await {
+    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
         match ev {
             AppEvent::Log(ref entry)
                 if entry.contains("Uploaded 'chat.jsonl' for chan_drive_chat") =>
@@ -524,12 +580,10 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
         "Must emit Drive log for chat.jsonl upload"
     );
 
-    if let Some(path) = chat_file_path {
-        assert!(
-            !path.exists(),
-            "chat.jsonl must be deleted locally upon confirmed upload to maintain strictly bounded disk footprint"
-        );
-    }
+    assert!(
+        !chat_file_path.exists(),
+        "chat.jsonl must be deleted locally upon confirmed upload to maintain strictly bounded disk footprint"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

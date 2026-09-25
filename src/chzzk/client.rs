@@ -56,6 +56,7 @@ pub struct ChzzkClient {
     client: reqwest::Client,
     base_url: String,
     game_base_url: String,
+    chat_ws_url: Option<String>,
     cookie_header: Option<String>,
 }
 
@@ -89,6 +90,7 @@ impl ChzzkClient {
             client,
             base_url: "https://api.chzzk.naver.com".to_string(),
             game_base_url: "https://comm-api.game.naver.com/nng_main".to_string(),
+            chat_ws_url: None,
             cookie_header: cookie_str,
         }
     }
@@ -101,6 +103,15 @@ impl ChzzkClient {
     pub fn with_game_base_url(mut self, game_base_url: impl Into<String>) -> Self {
         self.game_base_url = game_base_url.into();
         self
+    }
+
+    pub fn with_chat_ws_url(mut self, chat_ws_url: impl Into<String>) -> Self {
+        self.chat_ws_url = Some(chat_ws_url.into());
+        self
+    }
+
+    pub fn chat_ws_url(&self) -> Option<&str> {
+        self.chat_ws_url.as_deref()
     }
 
     pub fn cookie_header(&self) -> Option<&str> {
