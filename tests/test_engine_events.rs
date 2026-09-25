@@ -2121,3 +2121,209 @@ async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupt
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() {
+    use tokio_util::sync::CancellationToken;
+
+    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
+    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = chzzk_server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 998877,
+                    "liveTitle": "Live for upload shutdown test",
+                    "channel": {
+                        "channelId": "chan_upload_shutdown",
+                        "channelName": "ShutdownUploader"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_orch_shutdown_upload_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let drive_server = Server::http("127.0.0.1:0").unwrap();
+    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
+
+    let upload_url = format!("http://127.0.0.1:{}/resumable_chunk_upload", drive_port);
+    let upload_url_clone = upload_url.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(req) = drive_server.recv() {
+            let path = req.url().to_string();
+            if req.method().as_str() == "GET" && path.contains("/drive/v3/files") {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "files": [{ "id": "mock_folder_111", "name": "Chzzk_Recordings" }]
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
+                let response = Response::empty(200).with_header(
+                    Header::from_bytes(&b"Location"[..], upload_url_clone.as_bytes()).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "PUT" && path.contains("resumable_chunk_upload") {
+                // Simulate an upload that takes 11 seconds (exceeding old 10s timeout)
+                std::thread::sleep(std::time::Duration::from_millis(11000));
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "id": "uploaded_chunk_id",
+                        "name": "chunk_0000.ts"
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "POST" && path.contains("/drive/v3/files") {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "id": "mock_subfolder_222",
+                        "name": "mock_subfolder"
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else {
+                let response = Response::empty(200);
+                let _ = req.respond(response);
+            }
+        }
+    });
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let drive_client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{}", drive_port),
+    );
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            record_chat: false,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_upload_shutdown".to_string(),
+            name: "ShutdownUploader".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let cancel_token = CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        Some(drive_client),
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let run_handle = tokio::spawn(orchestrator.clone().run());
+
+    // Wait for RecordingStarted event
+    let mut recording_started = false;
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv()).await
+    {
+        if let AppEvent::RecordingStarted { channel_id, .. } = ev {
+            assert_eq!(channel_id, "chan_upload_shutdown");
+            recording_started = true;
+            break;
+        }
+    }
+    assert!(recording_started, "Recording should have started");
+
+    // Locate the active session folder in temp_dir and create chunk_0000.ts
+    let mut session_folder = None;
+    for _ in 0..20 {
+        if let Ok(entries) = fs::read_dir(&temp_dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    session_folder = Some(entry.path());
+                    break;
+                }
+            }
+        }
+        if session_folder.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let session_dir = session_folder.expect("Session directory must exist");
+    let chunk_path = session_dir.join("chunk_0000.ts");
+    fs::write(&chunk_path, b"TEST_CHUNK_PAYLOAD_DATA_FOR_SHUTDOWN_TEST").unwrap();
+    assert!(chunk_path.exists());
+
+    // Cancel engine token while actively recording
+    cancel_token.cancel();
+
+    // Drain events in background and track UploadCompleted
+    let drain_handle = tokio::spawn(async move {
+        let mut got_completed = false;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_secs(20), event_rx.recv()).await
+        {
+            if let AppEvent::UploadCompleted { chunk_name, .. } = ev
+                && chunk_name == "chunk_0000.ts"
+            {
+                got_completed = true;
+            }
+        }
+        got_completed
+    });
+
+    // Await run_handle with 20-second timeout (allowing 11s upload + cleanup)
+    let res = tokio::time::timeout(std::time::Duration::from_secs(20), run_handle).await;
+    assert!(
+        res.is_ok(),
+        "Engine run_handle timed out before completing graceful shutdown!"
+    );
+
+    // CRITICAL: At the exact moment EngineOrchestrator::run() finishes, the chunk upload
+    // MUST have completed and the chunk must already be deleted from local disk!
+    // In the broken code, EngineOrchestrator::run() prematurely exits at 10 seconds,
+    // leaving the chunk still on disk and still uploading when the engine shuts down.
+    assert!(
+        !chunk_path.exists(),
+        "Chunk file must already be uploaded and deleted when EngineOrchestrator::run completes! (Engine shut down prematurely while upload was still in progress)"
+    );
+
+    let got_completed = drain_handle.await.unwrap_or(false);
+    assert!(
+        got_completed,
+        "UploadCompleted event for chunk_0000.ts must be emitted during graceful shutdown!"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

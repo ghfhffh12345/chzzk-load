@@ -127,13 +127,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Main TUI render loop
     let tick_rate = Duration::from_millis(100);
-    let mut shutdown_start: Option<std::time::Instant> = None;
 
     loop {
         // Check if external shutdown signal (e.g. Ctrl+C) was received
         if cancel_token.is_cancelled() && !app.is_shutting_down {
             app.is_shutting_down = true;
-            shutdown_start = Some(std::time::Instant::now());
         }
 
         // Check exit conditions
@@ -141,15 +139,8 @@ async fn main() -> anyhow::Result<()> {
             cancel_token.cancel();
             break;
         }
-        if app.is_shutting_down {
-            if orch_handle.is_finished() {
-                break;
-            }
-            if let Some(start) = shutdown_start
-                && start.elapsed() >= Duration::from_secs(10)
-            {
-                break;
-            }
+        if app.is_shutting_down && orch_handle.is_finished() {
+            break;
         }
 
         terminal.draw(|f| draw_ui(f, &app))?;
@@ -170,7 +161,6 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         app.is_shutting_down = true;
                         cancel_token.cancel();
-                        shutdown_start = Some(std::time::Instant::now());
                     }
                 }
             } else {
@@ -195,15 +185,8 @@ async fn main() -> anyhow::Result<()> {
             cancel_token.cancel();
             break;
         }
-        if app.is_shutting_down {
-            if orch_handle.is_finished() {
-                break;
-            }
-            if let Some(start) = shutdown_start
-                && start.elapsed() >= Duration::from_secs(10)
-            {
-                break;
-            }
+        if app.is_shutting_down && orch_handle.is_finished() {
+            break;
         }
     }
 

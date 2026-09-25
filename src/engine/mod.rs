@@ -1245,14 +1245,14 @@ impl EngineOrchestrator {
             }
         };
         for handle in handles {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            let _ = handle.await;
         }
 
         // 2. Drop the orchestrator's upload_tx sender so upload_rx closes when empty
         drop(upload_tx);
 
         // 3. Await upload consumer to finish all in-flight and queued uploads
-        let _ = tokio::time::timeout(Duration::from_secs(10), upload_handle).await;
+        let _ = upload_handle.await;
 
         // 4. Clean up any empty stream session folders inside the local recordings directory
         let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
