@@ -622,6 +622,153 @@ async fn test_upload_worker_preserves_file_on_upload_failure() {
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
+#[tokio::test]
+async fn test_upload_text_file_create_new() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_drive_client_text_new_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    std::thread::spawn(move || {
+        // 1. Query if file exists
+        if let Ok(req) = server.recv() {
+            assert_eq!(req.method().as_str(), "GET");
+            assert!(req.url().contains("/drive/v3/files"));
+            let response = Response::from_string(serde_json::json!({ "files": [] }).to_string())
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+            let _ = req.respond(response);
+        }
+
+        // 2. Create file metadata
+        if let Ok(mut req) = server.recv() {
+            assert_eq!(req.method().as_str(), "POST");
+            assert!(req.url().contains("/drive/v3/files"));
+            let mut body = String::new();
+            req.as_reader().read_to_string(&mut body).unwrap();
+            let val: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(val["name"], "title_history.txt");
+            assert_eq!(val["parents"][0], "parent_123");
+
+            let response = Response::from_string(
+                serde_json::json!({
+                    "id": "file_new_999",
+                    "name": "title_history.txt"
+                })
+                .to_string(),
+            )
+            .with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = req.respond(response);
+        }
+
+        // 3. Patch media content
+        if let Ok(mut req) = server.recv() {
+            assert_eq!(req.method().as_str(), "PATCH");
+            assert!(req.url().contains("/upload/drive/v3/files/file_new_999"));
+            let mut body = String::new();
+            req.as_reader().read_to_string(&mut body).unwrap();
+            assert_eq!(body, "[2026-09-25 21:00:00] Initial Title\n");
+
+            let response = Response::from_string(
+                serde_json::json!({
+                    "id": "file_new_999",
+                    "name": "title_history.txt"
+                })
+                .to_string(),
+            )
+            .with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = req.respond(response);
+        }
+    });
+
+    let res = client
+        .upload_text_file(
+            "parent_123",
+            "title_history.txt",
+            "[2026-09-25 21:00:00] Initial Title\n",
+            None,
+        )
+        .await;
+
+    assert!(res.is_ok());
+    assert_eq!(res.unwrap(), "file_new_999");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_upload_text_file_update_existing() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_drive_client_text_update_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    std::thread::spawn(move || {
+        // Direct Patch media content
+        if let Ok(mut req) = server.recv() {
+            assert_eq!(req.method().as_str(), "PATCH");
+            assert!(
+                req.url()
+                    .contains("/upload/drive/v3/files/file_existing_888")
+            );
+            let mut body = String::new();
+            req.as_reader().read_to_string(&mut body).unwrap();
+            assert!(body.contains("Updated Title"));
+
+            let response = Response::from_string(
+                serde_json::json!({
+                    "id": "file_existing_888",
+                    "name": "title_history.txt"
+                })
+                .to_string(),
+            )
+            .with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = req.respond(response);
+        }
+    });
+
+    let res = client
+        .upload_text_file(
+            "parent_123",
+            "title_history.txt",
+            "[2026-09-25 21:00:00] Initial Title\n[2026-09-25 21:30:00] Updated Title\n",
+            Some("file_existing_888"),
+        )
+        .await;
+
+    assert!(res.is_ok());
+    assert_eq!(res.unwrap(), "file_existing_888");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
 #[test]
 fn test_root_credentials_not_touched() {
     // If credentials.json exists in root, ensure it is readable and intact

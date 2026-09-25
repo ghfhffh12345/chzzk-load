@@ -21,15 +21,29 @@ pub struct FinishedSession {
     pub finished_at: std::time::Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ActiveSessionState {
     pub start_timestamp: String,
     pub streamer_name: String,
     pub current_title: String,
     pub session_folder_id: Option<String>,
+    pub title_history: Vec<(String, String)>,
+    pub title_history_file_id: Option<String>,
 }
 
 impl ActiveSessionState {
+    pub fn new(start_timestamp: String, streamer_name: String, current_title: String) -> Self {
+        let initial_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        Self {
+            start_timestamp,
+            streamer_name,
+            title_history: vec![(initial_time, current_title.clone())],
+            current_title,
+            session_folder_id: None,
+            title_history_file_id: None,
+        }
+    }
+
     pub fn folder_name(&self) -> String {
         format!(
             "[{}] {} - {}",
@@ -37,6 +51,19 @@ impl ActiveSessionState {
             sanitize_filename(&self.streamer_name),
             sanitize_filename(&self.current_title)
         )
+    }
+
+    pub fn record_title_change(&mut self, new_title: String, timestamp: String) {
+        self.current_title = new_title.clone();
+        self.title_history.push((timestamp, new_title));
+    }
+
+    pub fn format_title_history(&self) -> String {
+        let mut out = String::new();
+        for (timestamp, title) in &self.title_history {
+            out.push_str(&format!("[{}] {}\n", timestamp, title));
+        }
+        out
     }
 }
 
@@ -414,6 +441,7 @@ impl EngineOrchestrator {
                 .await;
 
             let start_timestamp = Local::now().format("%Y-%m-%d_%H%M").to_string();
+            let initial_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             {
                 let mut sessions = active_sessions.lock().await;
                 sessions
@@ -423,6 +451,8 @@ impl EngineOrchestrator {
                         streamer_name: info.streamer_name.clone(),
                         current_title: info.title.clone(),
                         session_folder_id: None,
+                        title_history: vec![(initial_time, info.title.clone())],
+                        title_history_file_id: None,
                     });
             }
 
@@ -555,6 +585,8 @@ impl EngineOrchestrator {
                                     streamer_name: info.streamer_name.clone(),
                                     current_title: info.title.clone(),
                                     session_folder_id: None,
+                                    title_history: vec![],
+                                    title_history_file_id: None,
                                 }
                                 .folder_name()
                             }
@@ -578,6 +610,29 @@ impl EngineOrchestrator {
                             let mut sessions = active_sessions.lock().await;
                             if let Some(s) = sessions.get_mut(&channel_id) {
                                 s.session_folder_id = session_folder_id.clone();
+                                if s.title_history_file_id.is_none()
+                                    && let (Some(fid), Some(drive)) =
+                                        (session_folder_id.as_deref(), drive_opt.as_ref())
+                                {
+                                    let history_text = s.format_title_history();
+                                    if let Ok(file_id) = drive
+                                        .upload_text_file(
+                                            fid,
+                                            "title_history.txt",
+                                            &history_text,
+                                            None,
+                                        )
+                                        .await
+                                    {
+                                        s.title_history_file_id = Some(file_id);
+                                        let _ = event_tx
+                                            .send(AppEvent::Log(LogEntry::drive(format!(
+                                                "Initialized 'title_history.txt' in Drive folder for {}",
+                                                channel_id
+                                            ))))
+                                            .await;
+                                    }
+                                }
                             }
                         }
 
@@ -616,6 +671,8 @@ impl EngineOrchestrator {
                                     streamer_name: info.streamer_name.clone(),
                                     current_title: info.title.clone(),
                                     session_folder_id: None,
+                                    title_history: vec![],
+                                    title_history_file_id: None,
                                 }
                                 .folder_name()
                             }
@@ -639,6 +696,29 @@ impl EngineOrchestrator {
                             let mut sessions = active_sessions.lock().await;
                             if let Some(s) = sessions.get_mut(&channel_id) {
                                 s.session_folder_id = session_folder_id.clone();
+                                if s.title_history_file_id.is_none()
+                                    && let (Some(fid), Some(drive)) =
+                                        (session_folder_id.as_deref(), drive_opt.as_ref())
+                                {
+                                    let history_text = s.format_title_history();
+                                    if let Ok(file_id) = drive
+                                        .upload_text_file(
+                                            fid,
+                                            "title_history.txt",
+                                            &history_text,
+                                            None,
+                                        )
+                                        .await
+                                    {
+                                        s.title_history_file_id = Some(file_id);
+                                        let _ = event_tx
+                                            .send(AppEvent::Log(LogEntry::drive(format!(
+                                                "Initialized 'title_history.txt' in Drive folder for {}",
+                                                channel_id
+                                            ))))
+                                            .await;
+                                    }
+                                }
                             }
                         }
 
@@ -736,16 +816,26 @@ impl EngineOrchestrator {
 
                     if is_recording {
                         let rename_task = {
-                            let sessions = self.active_sessions.lock().await;
-                            if let Some(session) = sessions.get(&channel.id) {
+                            let mut sessions = self.active_sessions.lock().await;
+                            if let Some(session) = sessions.get_mut(&channel.id) {
                                 if session.current_title != info.title {
                                     let old_title = session.current_title.clone();
                                     let new_title = info.title.clone();
-                                    let mut updated_session = session.clone();
-                                    updated_session.current_title = new_title.clone();
-                                    let new_folder_name = updated_session.folder_name();
+                                    let now_str =
+                                        Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+                                    session.record_title_change(new_title.clone(), now_str);
+                                    let new_folder_name = session.folder_name();
                                     let folder_id = session.session_folder_id.clone();
-                                    Some((old_title, new_title, new_folder_name, folder_id))
+                                    let history_file_id = session.title_history_file_id.clone();
+                                    let history_content = session.format_title_history();
+                                    Some((
+                                        old_title,
+                                        new_title,
+                                        new_folder_name,
+                                        folder_id,
+                                        history_file_id,
+                                        history_content,
+                                    ))
                                 } else {
                                     None
                                 }
@@ -754,10 +844,15 @@ impl EngineOrchestrator {
                             }
                         };
 
-                        if let Some((old_title, new_title, new_folder_name, folder_id)) =
-                            rename_task
+                        if let Some((
+                            old_title,
+                            new_title,
+                            new_folder_name,
+                            folder_id,
+                            history_file_id,
+                            history_content,
+                        )) = rename_task
                         {
-                            let mut should_update_title = false;
                             if let (Some(ref fid), Some(drive)) = (folder_id, self.drive.as_ref()) {
                                 match drive.rename_folder(fid, &new_folder_name).await {
                                     Ok(_) => {
@@ -768,7 +863,6 @@ impl EngineOrchestrator {
                                                 old_title, new_title, channel.id, new_folder_name
                                             ))))
                                             .await;
-                                        should_update_title = true;
                                     }
                                     Err(e) => {
                                         let _ = self
@@ -776,6 +870,39 @@ impl EngineOrchestrator {
                                             .send(AppEvent::Log(LogEntry::warn(format!(
                                                 "Failed to rename Drive folder for {} to '{}': {}",
                                                 channel.id, new_folder_name, e
+                                            ))))
+                                            .await;
+                                    }
+                                }
+
+                                match drive
+                                    .upload_text_file(
+                                        fid,
+                                        "title_history.txt",
+                                        &history_content,
+                                        history_file_id.as_deref(),
+                                    )
+                                    .await
+                                {
+                                    Ok(file_id) => {
+                                        let mut sessions = self.active_sessions.lock().await;
+                                        if let Some(session) = sessions.get_mut(&channel.id) {
+                                            session.title_history_file_id = Some(file_id);
+                                        }
+                                        let _ = self
+                                            .event_tx
+                                            .send(AppEvent::Log(LogEntry::drive(format!(
+                                                "Updated 'title_history.txt' in Drive folder for {}",
+                                                channel.id
+                                            ))))
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        let _ = self
+                                            .event_tx
+                                            .send(AppEvent::Log(LogEntry::warn(format!(
+                                                "Failed to update 'title_history.txt' for {}: {}",
+                                                channel.id, e
                                             ))))
                                             .await;
                                     }
@@ -788,14 +915,6 @@ impl EngineOrchestrator {
                                         channel.id, old_title, new_title, new_folder_name
                                     ))))
                                     .await;
-                                should_update_title = true;
-                            }
-
-                            if should_update_title {
-                                let mut sessions = self.active_sessions.lock().await;
-                                if let Some(session) = sessions.get_mut(&channel.id) {
-                                    session.current_title = new_title;
-                                }
                             }
                         }
 
@@ -852,6 +971,11 @@ impl EngineOrchestrator {
                                     streamer_name: info.streamer_name.clone(),
                                     current_title: info.title.clone(),
                                     session_folder_id: None,
+                                    title_history: vec![(
+                                        Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                                        info.title.clone(),
+                                    )],
+                                    title_history_file_id: None,
                                 },
                             );
                         }

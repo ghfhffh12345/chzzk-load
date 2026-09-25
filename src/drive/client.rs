@@ -145,6 +145,80 @@ impl DriveClient {
         Ok(())
     }
 
+    pub async fn upload_text_file(
+        &self,
+        parent_folder_id: &str,
+        file_name: &str,
+        content: &str,
+        existing_file_id: Option<&str>,
+    ) -> Result<String> {
+        let token = self.auth.get_valid_access_token().await?;
+
+        let file_id = if let Some(fid) = existing_file_id.filter(|id| !id.is_empty()) {
+            fid.to_string()
+        } else {
+            let escaped_name = file_name.replace('\\', "\\\\").replace('\'', "\\'");
+            let mut query = format!("name = '{}' and trashed = false", escaped_name);
+            if !parent_folder_id.is_empty() {
+                query.push_str(&format!(" and '{}' in parents", parent_folder_id));
+            }
+
+            let url = format!("{}/drive/v3/files", self.base_url);
+            let resp: DriveFileList = self
+                .client
+                .get(&url)
+                .header(AUTHORIZATION, format!("Bearer {}", token))
+                .query(&[("q", query.as_str()), ("fields", "files(id, name)")])
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+
+            if let Some(first) = resp.files.first() {
+                first.id.clone()
+            } else {
+                let mut meta = serde_json::json!({
+                    "name": file_name,
+                    "mimeType": "text/plain"
+                });
+                if !parent_folder_id.is_empty() {
+                    meta["parents"] = serde_json::json!([parent_folder_id]);
+                }
+
+                let created: DriveFileItem = self
+                    .client
+                    .post(&url)
+                    .header(AUTHORIZATION, format!("Bearer {}", token))
+                    .header(CONTENT_TYPE, "application/json; charset=UTF-8")
+                    .body(meta.to_string())
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+
+                created.id
+            }
+        };
+
+        let upload_url = format!(
+            "{}/upload/drive/v3/files/{}?uploadType=media",
+            self.upload_base_url, file_id
+        );
+
+        self.client
+            .patch(&upload_url)
+            .header(AUTHORIZATION, format!("Bearer {}", token))
+            .header(CONTENT_TYPE, "text/plain; charset=UTF-8")
+            .body(content.to_string())
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(file_id)
+    }
+
     pub async fn upload_file_resumable<F>(
         &self,
         file_path: &Path,

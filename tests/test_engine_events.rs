@@ -1420,11 +1420,12 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
     });
 
     std::thread::spawn(move || {
-        // Handle Drive requests: Expect a PATCH to /drive/v3/files/session_folder_777
+        // Handle Drive requests: Expect a PATCH to /drive/v3/files/session_folder_777 and any title_history calls
         while let Ok(mut req) = drive_server.recv() {
-            if req.method().as_str() == "PATCH"
-                && req.url().contains("/drive/v3/files/session_folder_777")
-            {
+            let method = req.method().as_str().to_string();
+            let url = req.url().to_string();
+
+            if method == "PATCH" && url.contains("/drive/v3/files/session_folder_777") {
                 let mut body = String::new();
                 req.as_reader().read_to_string(&mut body).unwrap();
                 let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1439,7 +1440,21 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
                     Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
                 );
                 let _ = req.respond(response);
-                break;
+            } else if method == "GET" && url.contains("/drive/v3/files") {
+                let resp_body = serde_json::json!({ "files": [] });
+                let response = Response::from_string(resp_body.to_string()).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if (method == "POST" && url.contains("/drive/v3/files"))
+                || (method == "PATCH" && url.contains("/upload/drive/v3/files"))
+            {
+                let resp_body =
+                    serde_json::json!({ "id": "hist_123", "name": "title_history.txt" });
+                let response = Response::from_string(resp_body.to_string()).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
             } else {
                 let response = Response::from_string(r#"{"error":"Not handled"}"#)
                     .with_status_code(StatusCode(400));
@@ -1490,6 +1505,7 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
                 streamer_name: "RenameStreamer".to_string(),
                 current_title: "Initial Stream Title".to_string(),
                 session_folder_id: Some("session_folder_777".to_string()),
+                ..Default::default()
             },
         );
     }
@@ -1527,6 +1543,204 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
         got_updated_title_event,
         "Expected ChannelUpdate with Updated Stream Title"
     );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_stream_title_change_updates_title_history_file() {
+    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
+    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
+
+    let drive_server = Server::http("127.0.0.1:0").unwrap();
+    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
+
+    let uploaded_history_content = Arc::new(std::sync::Mutex::new(None));
+    let history_clone = uploaded_history_content.clone();
+
+    std::thread::spawn(move || {
+        // Poll 1: Initial title "Initial Stream Title"
+        if let Ok(request) = chzzk_server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 999111,
+                    "liveTitle": "Initial Stream Title",
+                    "channel": {
+                        "channelId": "chan_rename",
+                        "channelName": "RenameStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+
+        // Poll 2: Streamer changes title to "Updated Stream Title"
+        if let Ok(request) = chzzk_server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 999111,
+                    "liveTitle": "Updated Stream Title? Playing Now?",
+                    "channel": {
+                        "channelId": "chan_rename",
+                        "channelName": "RenameStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    std::thread::spawn(move || {
+        while let Ok(mut req) = drive_server.recv() {
+            let method = req.method().as_str().to_string();
+            let url = req.url().to_string();
+
+            if method == "PATCH" && url.contains("/drive/v3/files/session_folder_777") {
+                // Folder rename
+                let resp_body = serde_json::json!({
+                    "id": "session_folder_777",
+                    "name": "Renamed"
+                });
+                let response = Response::from_string(resp_body.to_string()).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if method == "GET"
+                && url.contains("/drive/v3/files")
+                && url.contains("title_history.txt")
+            {
+                // Check if title_history.txt exists
+                let resp_body = serde_json::json!({ "files": [] });
+                let response = Response::from_string(resp_body.to_string()).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if method == "POST" && url.contains("/drive/v3/files") {
+                // Create title_history.txt metadata
+                let resp_body = serde_json::json!({
+                    "id": "title_history_file_555",
+                    "name": "title_history.txt"
+                });
+                let response = Response::from_string(resp_body.to_string()).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if method == "PATCH"
+                && url.contains("/upload/drive/v3/files/title_history_file_555")
+            {
+                // Media upload PATCH
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                *history_clone.lock().unwrap() = Some(body.clone());
+
+                let resp_body = serde_json::json!({
+                    "id": "title_history_file_555",
+                    "name": "title_history.txt"
+                });
+                let response = Response::from_string(resp_body.to_string()).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+                break;
+            } else {
+                let response = Response::from_string(r#"{"error":"Not handled"}"#)
+                    .with_status_code(StatusCode(400));
+                let _ = req.respond(response);
+            }
+        }
+    });
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_history_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_rename".to_string(),
+            name: "RenameStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let drive = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{}", drive_port),
+    );
+
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, Some(drive), event_tx);
+
+    {
+        let active = orchestrator.active_recordings();
+        active.lock().await.insert("chan_rename".to_string());
+
+        let sessions = orchestrator.active_sessions();
+        sessions.lock().await.insert(
+            "chan_rename".to_string(),
+            chzzk_load::engine::ActiveSessionState {
+                start_timestamp: "2026-09-22_1000".to_string(),
+                streamer_name: "RenameStreamer".to_string(),
+                current_title: "Initial Stream Title".to_string(),
+                session_folder_id: Some("session_folder_777".to_string()),
+                title_history: vec![(
+                    "2026-09-22 10:00:00".to_string(),
+                    "Initial Stream Title".to_string(),
+                )],
+                title_history_file_id: None,
+            },
+        );
+    }
+
+    // Poll 1: Channel is polled with same initial title (no rename or history upload)
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(uploaded_history_content.lock().unwrap().is_none());
+
+    // Poll 2: Streamer changed title to "Updated Stream Title" (triggers Drive upload of title_history.txt)
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    let content_opt = uploaded_history_content.lock().unwrap().clone();
+    assert!(
+        content_opt.is_some(),
+        "title_history.txt upload was not received by Drive mock!"
+    );
+    let content = content_opt.unwrap();
+    assert!(content.contains("[2026-09-22 10:00:00] Initial Stream Title"));
+    assert!(content.contains("Updated Stream Title? Playing Now?"));
+
+    {
+        let sessions = orchestrator.active_sessions();
+        let guard = sessions.lock().await;
+        let session = guard.get("chan_rename").unwrap();
+        assert_eq!(
+            session.title_history_file_id,
+            Some("title_history_file_555".to_string())
+        );
+        assert_eq!(session.title_history.len(), 2);
+    }
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -1617,6 +1831,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
                 streamer_name: "PreStreamer".to_string(),
                 current_title: "Early Title 1".to_string(),
                 session_folder_id: None,
+                ..Default::default()
             },
         );
     }
@@ -1789,6 +2004,7 @@ fn test_active_session_state_folder_name_preserves_question_marks() {
         streamer_name: "Streamer?Name".to_string(),
         current_title: "Is this live? Yes! Special: 100% <Stream>".to_string(),
         session_folder_id: None,
+        ..Default::default()
     };
 
     let folder_name = session.folder_name();
@@ -1810,6 +2026,7 @@ fn test_active_session_state_folder_name_formatting_and_sanitization() {
         streamer_name: "  Chzzk Streamer / Channel  ".to_string(),
         current_title: "What's Next? Let's Play | Ep. 1 *Final*".to_string(),
         session_folder_id: Some("folder_123".to_string()),
+        ..Default::default()
     };
 
     let folder_name = session.folder_name();
