@@ -123,7 +123,9 @@ chzzk-load/
   7. On session cancellation or stream termination, flushes all remaining records, guaranteeing zero lost messages.
 
 ### 3.4. Google Drive Upload Pipeline & Title History Sync (`src/drive/` & `src/uploader/`)
-- Sealed chunks are sent over an unbounded or bounded `mpsc::Sender<UploadTask>` channel to `spawn_upload_consumer`.
+- Sealed chunks are sent over an `mpsc::Sender<UploadTask>` channel to `spawn_upload_consumer_with_concurrency`.
+- **Per-Channel Serialization & Cross-Channel Concurrency**: To prevent uplink bandwidth contention, disk accumulation, and Google Drive segment ordering disruption, chunks belonging to the same channel are strictly serialized in FIFO order. Independent channels upload concurrently up to `concurrency` (default: 3) using fair round-robin scheduling.
+- **High-Throughput Streaming Buffer**: Resumable file streaming uses an 8 MiB buffer (`RESUMABLE_UPLOAD_BUFFER_SIZE`, 32 * 256 KiB) via `FramedRead`, eliminating thread-pool switching overhead and saturating uplink bandwidth on high-speed networks.
 - Drive subfolders are created lazily by `process_sealed_chunk` only when the first valid chunk is confirmed sealed.
 - **Stream Title History**: If the broadcast title changes during a session, the engine appends the timestamped change to `title_history.txt`, and asynchronously renames the Google Drive folder via `drive.rename_folder`.
 - Resumable upload initiates with a `POST /upload/drive/v3/files?uploadType=resumable` metadata request, obtaining a session URI.
