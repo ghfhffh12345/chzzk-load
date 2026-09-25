@@ -5,6 +5,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs::File;
 use tokio_util::codec::{BytesCodec, FramedRead};
 
@@ -151,7 +152,7 @@ impl DriveClient {
         progress_cb: F,
     ) -> Result<String>
     where
-        F: Fn(u64, u64) + Send + 'static,
+        F: Fn(u64, u64) + Send + Sync + 'static,
     {
         let filename = file_path
             .file_name()
@@ -193,30 +194,72 @@ impl DriveClient {
             .ok_or_else(|| anyhow!("Missing Location header in Google Drive resumable init"))?
             .to_string();
 
-        // 2. Stream chunk with progress using 256KB buffer
-        let file = File::open(file_path).await?;
-        let stream = FramedRead::with_capacity(file, BytesCodec::new(), 256 * 1024);
-        let mut uploaded = 0u64;
+        let content_range = if file_size == 0 {
+            "bytes */0".to_string()
+        } else {
+            format!("bytes 0-{}/{}", file_size - 1, file_size)
+        };
 
-        let progress_stream = stream.map(move |chunk_result| {
-            if let Ok(ref bytes) = chunk_result {
-                uploaded += bytes.len() as u64;
-                progress_cb(uploaded, file_size);
+        let progress_cb = Arc::new(progress_cb);
+        let max_retries = 3;
+        let mut last_error = None;
+
+        // 2. Stream chunk with progress using 256KB buffer, retrying transient errors
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                let backoff_ms = 50 * (1 << (attempt - 1));
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
-            chunk_result
-        });
 
-        let upload_resp = self
-            .client
-            .put(&location)
-            .header(CONTENT_LENGTH, file_size.to_string())
-            .header(CONTENT_TYPE, "video/mp2t")
-            .body(reqwest::Body::wrap_stream(progress_stream))
-            .send()
-            .await?
-            .error_for_status()?;
+            let file = match File::open(file_path).await {
+                Ok(f) => f,
+                Err(e) => return Err(anyhow!("Failed to open file for upload: {}", e)),
+            };
 
-        let created: DriveFileItem = upload_resp.json().await?;
-        Ok(created.id)
+            let stream = FramedRead::with_capacity(file, BytesCodec::new(), 256 * 1024);
+            let mut uploaded = 0u64;
+            let cb = Arc::clone(&progress_cb);
+
+            let progress_stream = stream.map(move |chunk_result| {
+                if let Ok(ref bytes) = chunk_result {
+                    uploaded += bytes.len() as u64;
+                    cb(uploaded, file_size);
+                }
+                chunk_result
+            });
+
+            let upload_res = self
+                .client
+                .put(&location)
+                .header(CONTENT_LENGTH, file_size.to_string())
+                .header(CONTENT_TYPE, "video/mp2t")
+                .header("Content-Range", &content_range)
+                .body(reqwest::Body::wrap_stream(progress_stream))
+                .send()
+                .await;
+
+            match upload_res {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        let created: DriveFileItem = resp.json().await?;
+                        return Ok(created.id);
+                    } else if status.as_u16() == 429 || status.is_server_error() {
+                        let err_msg = format!("HTTP error: status {}", status);
+                        last_error = Some(anyhow!(err_msg));
+                        continue;
+                    } else {
+                        let err = resp.error_for_status().unwrap_err();
+                        return Err(anyhow!(err));
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(anyhow!(e));
+                    continue;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("Upload failed after retries")))
     }
 }

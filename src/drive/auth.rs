@@ -221,37 +221,42 @@ impl DriveAuth {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 
         // Refresh if within 5 minutes of expiration
-        if guard.expires_at_epoch_sec <= now + 300
-            && let Some(ref refresh) = guard.refresh_token
-        {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()?;
-            let resp: TokenResponse = client
-                .post(&self.token_uri)
-                .form(&[
-                    ("client_id", self.client_id.as_str()),
-                    ("client_secret", self.client_secret.as_str()),
-                    ("refresh_token", refresh.as_str()),
-                    ("grant_type", "refresh_token"),
-                ])
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
+        if guard.expires_at_epoch_sec <= now + 300 {
+            if let Some(ref refresh) = guard.refresh_token {
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(30))
+                    .build()?;
+                let resp: TokenResponse = client
+                    .post(&self.token_uri)
+                    .form(&[
+                        ("client_id", self.client_id.as_str()),
+                        ("client_secret", self.client_secret.as_str()),
+                        ("refresh_token", refresh.as_str()),
+                        ("grant_type", "refresh_token"),
+                    ])
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
 
-            guard.access_token = resp.access_token;
-            guard.expires_at_epoch_sec = now + resp.expires_in;
-            if resp.refresh_token.is_some() {
-                guard.refresh_token = resp.refresh_token;
-            }
+                guard.access_token = resp.access_token;
+                guard.expires_at_epoch_sec = now + resp.expires_in;
+                if resp.refresh_token.is_some() {
+                    guard.refresh_token = resp.refresh_token;
+                }
 
-            let json = serde_json::to_string_pretty(&*guard)?;
-            if let Some(parent) = self.token_path.parent() {
-                let _ = fs::create_dir_all(parent);
+                let json = serde_json::to_string_pretty(&*guard)?;
+                if let Some(parent) = self.token_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&self.token_path, json);
+            } else {
+                return Err(anyhow!(
+                    "Google Drive access token is expired and no refresh_token is present in {}",
+                    self.token_path.display()
+                ));
             }
-            let _ = fs::write(&self.token_path, json);
         }
 
         Ok(guard.access_token.clone())

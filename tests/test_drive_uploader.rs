@@ -390,6 +390,21 @@ async fn test_upload_file_resumable_success() {
             });
             assert_eq!(c_type.unwrap().value.as_str(), "video/mp2t");
 
+            let c_range = request.headers().iter().find(|h| {
+                h.field
+                    .as_str()
+                    .as_str()
+                    .eq_ignore_ascii_case("content-range")
+            });
+            assert!(
+                c_range.is_some(),
+                "Missing Content-Range header in Google Drive resumable upload PUT"
+            );
+            assert_eq!(
+                c_range.unwrap().value.as_str(),
+                format!("bytes 0-{}/{}", file_len - 1, file_len)
+            );
+
             let mut received_bytes = Vec::new();
             request
                 .as_reader()
@@ -426,6 +441,67 @@ async fn test_upload_file_resumable_success() {
     assert_eq!(progress_total.load(Ordering::SeqCst), file_len);
     // File must NOT be deleted by upload_file_resumable itself
     assert!(chunk_file.exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_upload_file_resumable_retries_transient_error_and_succeeds() {
+    let temp_dir = std::env::temp_dir().join(format!("test_drive_retry_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk_file = temp_dir.join("chunk_retry.ts");
+    let test_data = b"RETRYABLE_STREAM_CHUNK_DATA";
+    fs::write(&chunk_file, test_data).unwrap();
+    let file_len = test_data.len() as u64;
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    std::thread::spawn(move || {
+        // 1. Resumable Init POST
+        if let Ok(request) = server.recv() {
+            let upload_url = format!("http://127.0.0.1:{}/retry_session", port);
+            let response = Response::empty(200)
+                .with_header(Header::from_bytes(&b"Location"[..], upload_url.as_bytes()).unwrap());
+            let _ = request.respond(response);
+        }
+
+        // 2. First PUT fails with 503 Service Unavailable
+        if let Ok(request) = server.recv() {
+            let response = Response::from_string("Temporary service unavailable")
+                .with_status_code(StatusCode(503));
+            let _ = request.respond(response);
+        }
+
+        // 3. Second PUT succeeds!
+        if let Ok(mut request) = server.recv() {
+            let mut received = Vec::new();
+            request.as_reader().read_to_end(&mut received).unwrap();
+            assert_eq!(received.len() as u64, file_len);
+            let mock_response = serde_json::json!({
+                "id": "retry_success_id_777",
+                "name": "chunk_retry.ts"
+            });
+            let response = Response::from_string(mock_response.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let file_id = client
+        .upload_file_resumable(&chunk_file, "folder_target_55", |_, _| {})
+        .await
+        .expect("Upload should succeed after retrying transient 503 error");
+
+    assert_eq!(file_id, "retry_success_id_777");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

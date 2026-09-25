@@ -238,3 +238,47 @@ async fn test_credentials_invalid_json_error() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_expired_token_without_refresh_token_fails() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_norefresh_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let cred_path = temp_dir.join("credentials.json");
+    let token_path = temp_dir.join("token.json");
+
+    let cred_json = r#"{
+        "installed": {
+            "client_id": "test_id",
+            "client_secret": "test_secret",
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token"
+        }
+    }"#;
+    fs::write(&cred_path, cred_json).unwrap();
+
+    // Expired token with NO refresh token
+    let token_data = StoredToken {
+        access_token: "expired_token_no_refresh".to_string(),
+        refresh_token: None,
+        expires_at_epoch_sec: 1000,
+    };
+    fs::write(
+        &token_path,
+        serde_json::to_string_pretty(&token_data).unwrap(),
+    )
+    .unwrap();
+
+    let auth = DriveAuth::load_or_authorize(&cred_path, &token_path)
+        .await
+        .expect("load_or_authorize should succeed");
+
+    let result = auth.get_valid_access_token().await;
+    assert!(
+        result.is_err(),
+        "get_valid_access_token must return error when token is expired and no refresh token is present"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

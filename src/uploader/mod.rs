@@ -16,7 +16,7 @@ impl UploadWorker {
     pub async fn upload_and_delete(
         client: &DriveClient,
         task: UploadTask,
-        on_progress: impl Fn(u64, u64) + Send + 'static,
+        on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
     ) -> anyhow::Result<u64> {
         let size = tokio::fs::metadata(&task.chunk_path).await?.len();
         client
