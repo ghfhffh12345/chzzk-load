@@ -54,6 +54,8 @@ pub struct LiveDetailContent {
     pub live_title: Option<String>,
     pub channel: ChannelInfo,
     pub live_playback_json: Option<String>,
+    #[serde(default)]
+    pub chat_channel_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -86,4 +88,5 @@ pub struct LiveStreamInfo {
     pub streamer_name: String,
     pub title: String,
     pub hls_url: String,
+    pub chat_channel_id: Option<String>,
 }

@@ -1,5 +1,6 @@
-use chzzk_load::chzzk::client::extract_best_hls_url;
+use chzzk_load::chzzk::client::{ChzzkClient, extract_best_hls_url};
 use chzzk_load::chzzk::models::{ChzzkResponse, LiveDetailContent};
+use chzzk_load::config::ChzzkConfig;
 
 #[test]
 fn test_parse_live_detail_and_extract_hls() {
@@ -256,4 +257,151 @@ fn test_parse_live_detail_with_numeric_and_string_live_id() {
     }"#;
     let resp_null: ChzzkResponse<LiveDetailContent> = serde_json::from_str(json_null).unwrap();
     assert_eq!(resp_null.content.unwrap().live_id, None);
+}
+
+#[tokio::test]
+async fn test_get_chat_access_token_success() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let server_handle = tokio::task::spawn_blocking(move || {
+        let req = server.recv().unwrap();
+        assert!(req.url().contains("/v1/chats/access-token"));
+        assert!(req.url().contains("channelId=chat_chan_123"));
+        let response_body = r#"{
+            "code": 200,
+            "message": null,
+            "content": {
+                "accessToken": "mock_token_abc123",
+                "extraToken": "mock_extra"
+            }
+        }"#;
+        let resp = tiny_http::Response::from_string(response_body).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+        );
+        req.respond(resp).unwrap();
+    });
+
+    let config = ChzzkConfig::default();
+    let client = ChzzkClient::new(&config).with_game_base_url(&base_url);
+    let token = client.get_chat_access_token("chat_chan_123").await.unwrap();
+    assert_eq!(token, "mock_token_abc123");
+
+    server_handle.await.unwrap();
+}
+
+#[test]
+fn test_parse_live_detail_with_chat_channel_id() {
+    let mock_json = r#"{
+        "code": 200,
+        "message": null,
+        "content": {
+            "status": "OPEN",
+            "liveTitle": "Stream Title",
+            "channel": {
+                "channelId": "4c3b44869c9b1399723ec28ec236f736",
+                "channelName": "TesterStreamer"
+            },
+            "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://live.chzzk.naver.com/hls/master.m3u8\"}]}",
+            "chatChannelId": "chat_chan_xyz789"
+        }
+    }"#;
+
+    let response: ChzzkResponse<LiveDetailContent> = serde_json::from_str(mock_json).unwrap();
+    let content = response.content.expect("content should be present");
+    assert_eq!(
+        content.chat_channel_id,
+        Some("chat_chan_xyz789".to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_get_live_detail_with_chat_channel_id() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveTitle": "Test Live",
+                    "channel": {
+                        "channelId": "chan123",
+                        "channelName": "Streamer123"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
+                    "chatChannelId": "chat_999"
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = ChzzkConfig::default();
+    let client = ChzzkClient::new(&config).with_base_url(format!("http://127.0.0.1:{}", port));
+
+    let stream_info = client
+        .get_live_detail("chan123")
+        .await
+        .unwrap()
+        .expect("stream info");
+    assert_eq!(stream_info.chat_channel_id, Some("chat_999".to_string()));
+}
+
+#[tokio::test]
+async fn test_get_chat_access_token_api_error() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{}", port);
+
+    let server_handle = tokio::task::spawn_blocking(move || {
+        let req = server.recv().unwrap();
+        let response_body = r#"{
+            "code": 403,
+            "message": "Access denied",
+            "content": null
+        }"#;
+        let resp = tiny_http::Response::from_string(response_body).with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+        );
+        req.respond(resp).unwrap();
+    });
+
+    let config = ChzzkConfig::default();
+    let client = ChzzkClient::new(&config).with_game_base_url(&base_url);
+    let result = client.get_chat_access_token("chat_chan_123").await;
+    assert!(result.is_err());
+    let err_str = result.unwrap_err().to_string();
+    assert!(err_str.contains("403") || err_str.contains("Access denied"));
+
+    server_handle.await.unwrap();
+}
+
+#[test]
+fn test_recorded_chat_message_serde() {
+    use chzzk_load::chzzk::models_chat::RecordedChatMessage;
+
+    let msg = RecordedChatMessage {
+        time_ms: 1727268158000,
+        datetime: "2026-09-25 21:42:38".to_string(),
+        msg_type: "TEXT".to_string(),
+        nickname: "Viewer123".to_string(),
+        user_id_hash: Some("hash123".to_string()),
+        content: "Hello world!".to_string(),
+        donation_amount: Some(1000),
+        extras: Some(serde_json::json!({"emojis": {}})),
+        raw: serde_json::json!({"cmd": 93101}),
+    };
+
+    let serialized = serde_json::to_string(&msg).unwrap();
+    let deserialized: RecordedChatMessage = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(msg, deserialized);
 }

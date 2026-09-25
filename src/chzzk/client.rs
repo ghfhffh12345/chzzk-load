@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::chzzk::models::{ChzzkResponse, LiveDetailContent, LiveStreamInfo, PlaybackJson};
+use crate::chzzk::models_chat::ChatAccessTokenResponse;
 use crate::config::ChzzkConfig;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
@@ -54,6 +55,7 @@ pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String
 pub struct ChzzkClient {
     client: reqwest::Client,
     base_url: String,
+    game_base_url: String,
     cookie_header: Option<String>,
 }
 
@@ -86,12 +88,18 @@ impl ChzzkClient {
         Self {
             client,
             base_url: "https://api.chzzk.naver.com".to_string(),
+            game_base_url: "https://comm-api.game.naver.com/nng_main".to_string(),
             cookie_header: cookie_str,
         }
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    pub fn with_game_base_url(mut self, game_base_url: impl Into<String>) -> Self {
+        self.game_base_url = game_base_url.into();
         self
     }
 
@@ -124,9 +132,31 @@ impl ChzzkClient {
                     .live_title
                     .unwrap_or_else(|| "Untitled Broadcast".to_string()),
                 hls_url,
+                chat_channel_id: content.chat_channel_id,
             }));
         }
 
         Ok(None)
+    }
+
+    pub async fn get_chat_access_token(&self, chat_channel_id: &str) -> Result<String> {
+        let url = format!(
+            "{}/v1/chats/access-token?channelId={}&chatType=STREAMING",
+            self.game_base_url, chat_channel_id
+        );
+        let resp = self.client.get(&url).send().await?.error_for_status()?;
+        let body: ChzzkResponse<ChatAccessTokenResponse> = resp.json().await?;
+
+        if body.code != 200 {
+            let msg = body
+                .message
+                .unwrap_or_else(|| "Unknown API error".to_string());
+            bail!("Chzzk API returned error code {}: {}", body.code, msg);
+        }
+
+        let content = body
+            .content
+            .ok_or_else(|| anyhow!("Chat access token response missing content"))?;
+        Ok(content.access_token)
     }
 }
