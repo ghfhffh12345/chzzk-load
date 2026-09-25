@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+use chzzk_load::config::Settings;
 use chzzk_load::tui::app::App;
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::tui::theme;
@@ -217,6 +218,7 @@ fn test_app_keyboard_navigation_and_quit() {
         is_live: false,
         is_active: false,
         title: "Title 1".to_string(),
+        chat_count: 0,
     });
     app.channels.push(chzzk_load::tui::app::ChannelItem {
         id: "c2".to_string(),
@@ -224,6 +226,7 @@ fn test_app_keyboard_navigation_and_quit() {
         is_live: true,
         is_active: false,
         title: "Title 2".to_string(),
+        chat_count: 0,
     });
     app.channels.push(chzzk_load::tui::app::ChannelItem {
         id: "c3".to_string(),
@@ -231,6 +234,7 @@ fn test_app_keyboard_navigation_and_quit() {
         is_live: false,
         is_active: false,
         title: "Title 3".to_string(),
+        chat_count: 0,
     });
 
     assert_eq!(app.selected_channel_idx, 0);
@@ -274,6 +278,7 @@ fn test_draw_ui_rendering_smoke() {
         is_live: true,
         is_active: false,
         title: "Playing Minecraft".to_string(),
+        chat_count: 0,
     });
     app.active_upload_name = Some("chunk_0001.ts".to_string());
     app.upload_progress_pct = 42;
@@ -431,6 +436,7 @@ fn test_channel_active_status_and_recording_ended() {
         is_live: true,
         is_active: false,
         title: "Test Stream".to_string(),
+        chat_count: 0,
     });
 
     assert!(!app.channels[0].is_active);
@@ -474,6 +480,7 @@ fn test_channel_synchronized_scrolling() {
             is_live: true,
             is_active: false,
             title: format!("Title {}", i),
+            chat_count: 0,
         });
     }
 
@@ -511,6 +518,7 @@ fn test_draw_ui_row_alignment_and_active_status() {
         is_live: true,
         is_active: true,
         title: "Active Game".to_string(),
+        chat_count: 0,
     });
     app.channels.push(chzzk_load::tui::app::ChannelItem {
         id: "c2".to_string(),
@@ -518,6 +526,7 @@ fn test_draw_ui_row_alignment_and_active_status() {
         is_live: false,
         is_active: false,
         title: "Offline Title".to_string(),
+        chat_count: 0,
     });
 
     app.handle_event(AppEvent::UploadProgress {
@@ -568,6 +577,7 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
         is_live: true,
         is_active: true,
         title: "Live 1".to_string(),
+        chat_count: 0,
     });
     // c2: Recording (is_active: true, but no active upload)
     app.channels.push(chzzk_load::tui::app::ChannelItem {
@@ -576,6 +586,7 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
         is_live: true,
         is_active: true,
         title: "Live 2".to_string(),
+        chat_count: 0,
     });
     // c3: Live standby (is_live: true, is_active: false)
     app.channels.push(chzzk_load::tui::app::ChannelItem {
@@ -584,6 +595,7 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
         is_live: true,
         is_active: false,
         title: "Live 3".to_string(),
+        chat_count: 0,
     });
     // c4: Offline (is_live: false, is_active: false)
     app.channels.push(chzzk_load::tui::app::ChannelItem {
@@ -592,6 +604,7 @@ fn test_draw_ui_cloud_upload_visual_badges_and_unstyled_metrics() {
         is_live: false,
         is_active: false,
         title: "Offline".to_string(),
+        chat_count: 0,
     });
 
     app.handle_event(AppEvent::UploadProgress {
@@ -914,6 +927,7 @@ fn test_l_key_toggles_logs_and_expands_body() {
             is_live: true,
             is_active: false,
             title: format!("Title {:02}", i),
+            chat_count: 0,
         });
     }
     app.logs.push_back(LogEntry::from("[INFO] Log 1"));
@@ -991,6 +1005,7 @@ fn test_no_underline_on_channels_and_direct_view_scrolling() {
             is_live: true,
             is_active: false,
             title: format!("Title {:02}", i),
+            chat_count: 0,
         });
     }
 
@@ -1102,6 +1117,7 @@ fn test_log_kind_badge_and_style_mappings() {
             " INFO   ",
             Style::default().fg(theme::MUTED_GRAY),
         ),
+        (LogKind::Chat, " CHAT   ", Style::default().fg(theme::CYAN)),
     ];
 
     for (kind, expected_badge, expected_style) in cases {
@@ -1137,6 +1153,8 @@ fn test_draw_ui_renders_all_log_kinds_without_brackets() {
         .push_back(LogEntry::new(LogKind::Poll, "Channel poll"));
     app.logs
         .push_back(LogEntry::new(LogKind::Info, "Normal info"));
+    app.logs
+        .push_back(LogEntry::new(LogKind::Chat, "Chat session active"));
 
     terminal.draw(|f| draw_ui(f, &app)).unwrap();
     let content: String = terminal
@@ -1163,6 +1181,8 @@ fn test_draw_ui_renders_all_log_kinds_without_brackets() {
     assert!(content.contains("Channel poll"));
     assert!(content.contains("INFO"));
     assert!(content.contains("Normal info"));
+    assert!(content.contains("CHAT"));
+    assert!(content.contains("Chat session active"));
 
     // Ensure zero square brackets anywhere
     assert!(!content.contains("["));
@@ -1290,6 +1310,7 @@ fn test_draw_ui_header_preset_a_metrics() {
             is_live: true,
             is_active: true,
             title: "Live Game".to_string(),
+            chat_count: 0,
         },
         chzzk_load::tui::app::ChannelItem {
             id: "ch_2".to_string(),
@@ -1297,6 +1318,7 @@ fn test_draw_ui_header_preset_a_metrics() {
             is_live: true,
             is_active: false,
             title: "Chatting".to_string(),
+            chat_count: 0,
         },
         chzzk_load::tui::app::ChannelItem {
             id: "ch_3".to_string(),
@@ -1304,6 +1326,7 @@ fn test_draw_ui_header_preset_a_metrics() {
             is_live: false,
             is_active: false,
             title: "Offline".to_string(),
+            chat_count: 0,
         },
     ];
     app.reclaimed_mb = 1450.0;
@@ -1377,4 +1400,76 @@ fn test_draw_ui_dividers_render_correctly_on_various_widths() {
             );
         }
     }
+}
+
+#[test]
+fn test_app_state_chat_stats_update() {
+    let settings = Settings::default();
+    let mut app = App::from_settings(&settings);
+
+    // Initial state
+    assert_eq!(app.channels[0].chat_count, 0);
+
+    // Dispatch ChatStats event
+    app.update(AppEvent::ChatStats {
+        channel_id: app.channels[0].id.clone(),
+        message_count: 142,
+    });
+
+    assert_eq!(app.channels[0].chat_count, 142);
+
+    // RecordingEnded resets chat_count to 0
+    app.update(AppEvent::RecordingEnded {
+        channel_id: app.channels[0].id.clone(),
+    });
+    assert_eq!(app.channels[0].chat_count, 0);
+}
+
+#[test]
+fn test_draw_ui_active_channel_displays_chat_count() {
+    let backend = TestBackend::new(140, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "ch_active".to_string(),
+        name: "StreamerChat".to_string(),
+        is_live: true,
+        is_active: true,
+        title: "Chatting Live".to_string(),
+        chat_count: 523,
+    });
+    app.channels.push(chzzk_load::tui::app::ChannelItem {
+        id: "ch_idle".to_string(),
+        name: "StreamerIdle".to_string(),
+        is_live: true,
+        is_active: false,
+        title: "Standby Stream".to_string(),
+        chat_count: 0,
+    });
+
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    let content: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+
+    assert!(content.contains("StreamerChat - Chatting Live (523 chats)"));
+    assert!(content.contains("StreamerIdle - Standby Stream"));
+    assert!(!content.contains("StreamerIdle - Standby Stream (0 chats)"));
+}
+
+#[test]
+fn test_log_entry_chat_helper() {
+    use chzzk_load::tui::event::LogKind;
+
+    let entry = LogEntry::chat("Connected to live chat");
+    assert_eq!(entry.kind, LogKind::Chat);
+    assert_eq!(entry.message, "Connected to live chat");
+    assert_eq!(entry.to_string(), "[CHAT] Connected to live chat");
+    assert_eq!(entry, "[CHAT] Connected to live chat");
+    assert_eq!(entry, "Connected to live chat");
 }

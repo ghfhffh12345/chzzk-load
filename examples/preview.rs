@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: true,
             is_active: true,
             title: "쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_lilpa.clone(),
@@ -44,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: true,
             is_active: true,
             title: "교정야호 교통정비공사 사장 황인정".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_kangqui.clone(),
@@ -51,6 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: true,
             is_active: false,
             title: "엄마한턴만더하고끌게 / 1루트 클래식 하드 3부".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_wakgood.clone(),
@@ -58,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: true,
             is_active: false,
             title: "고춘애오늘며칠차임 아무튼출근".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_gosegu.clone(),
@@ -65,6 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: true,
             is_active: false,
             title: "봉누도 정지해입니다".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_looksam.clone(),
@@ -72,6 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: false,
             is_active: false,
             title: "룩삼 닌텐도 지휘자 게임".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_poong.clone(),
@@ -79,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: false,
             is_active: false,
             title: "wow 포에버".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_calmdown.clone(),
@@ -86,6 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: false,
             is_active: false,
             title: "침착맨의 일상 토크".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_nokduro.clone(),
@@ -93,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: false,
             is_active: false,
             title: "슈퍼 마리오 메이커 2 익스트림".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_ddahyoni.clone(),
@@ -100,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: false,
             is_active: false,
             title: "하스스톤 신규 확장팩 덱 메이킹".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_okja.clone(),
@@ -107,6 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: false,
             is_active: false,
             title: "봉누도2 경찰 김억척 8일차 ".to_string(),
+            chat_count: 0,
         },
         ChannelItem {
             id: channel_cheol.clone(),
@@ -114,6 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: false,
             is_active: false,
             title: "전장 1등 도전기".to_string(),
+            chat_count: 0,
         },
     ];
 

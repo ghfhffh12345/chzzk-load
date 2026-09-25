@@ -15,6 +15,7 @@ pub fn log_kind_badge_and_style(kind: LogKind) -> (&'static str, Style) {
         LogKind::Drive => (" DRIVE  ", Style::default().fg(theme::BLUE)),
         LogKind::Poll => (" POLL   ", Style::default().fg(theme::MUTED_GRAY)),
         LogKind::Info => (" INFO   ", Style::default().fg(theme::MUTED_GRAY)),
+        LogKind::Chat => (" CHAT   ", Style::default().fg(theme::CYAN)),
     }
 }
 
@@ -143,7 +144,11 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                 let badge_len = 9;
                 let badge_style = Style::default().fg(color);
 
-                let name_and_title = format!("{} - {}", c.name, c.title);
+                let name_and_title = if c.is_active {
+                    format!("{} - {} ({} chats)", c.name, c.title, c.chat_count)
+                } else {
+                    format!("{} - {}", c.name, c.title)
+                };
                 let name_style = Style::default();
 
                 let line = if inner_width_left >= badge_len + name_and_title.chars().count() {

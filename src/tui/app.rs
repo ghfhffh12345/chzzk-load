@@ -4,13 +4,35 @@ use std::time::{Duration, Instant};
 
 use crate::tui::event::{AppEvent, LogEntry};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChannelItem {
     pub id: String,
     pub name: String,
     pub is_live: bool,
     pub is_active: bool,
     pub title: String,
+    pub chat_count: u64,
+}
+
+pub type ChannelItemState = ChannelItem;
+
+impl ChannelItem {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        is_live: bool,
+        is_active: bool,
+        title: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            is_live,
+            is_active,
+            title: title.into(),
+            chat_count: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +72,18 @@ impl Default for App {
     }
 }
 
+impl From<crate::config::Settings> for App {
+    fn from(settings: crate::config::Settings) -> Self {
+        Self::from_settings(&settings)
+    }
+}
+
+impl From<&crate::config::Settings> for App {
+    fn from(settings: &crate::config::Settings) -> Self {
+        Self::from_settings(settings)
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         Self {
@@ -71,6 +105,25 @@ impl App {
             should_quit: false,
             refresh_requested: false,
         }
+    }
+
+    pub fn from_settings(settings: &crate::config::Settings) -> Self {
+        let mut app = Self::new();
+        for ch in &settings.channels {
+            app.channels.push(ChannelItem {
+                id: ch.id.clone(),
+                name: ch.name.clone(),
+                is_live: false,
+                is_active: false,
+                title: "Checking...".to_string(),
+                chat_count: 0,
+            });
+        }
+        app
+    }
+
+    pub fn update(&mut self, event: AppEvent) {
+        self.handle_event(event);
     }
 
     pub fn scroll_channels_down(&mut self) {
@@ -183,6 +236,7 @@ impl App {
                         is_live,
                         is_active: false,
                         title,
+                        chat_count: 0,
                     });
                 }
             }
@@ -200,9 +254,18 @@ impl App {
             AppEvent::RecordingEnded { channel_id } => {
                 if let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) {
                     ch.is_active = false;
+                    ch.chat_count = 0;
                 }
                 if let Some(start) = self.active_recording_starts.remove(&channel_id) {
                     self.total_recorded_duration += start.elapsed();
+                }
+            }
+            AppEvent::ChatStats {
+                channel_id,
+                message_count,
+            } => {
+                if let Some(ch) = self.channels.iter_mut().find(|c| c.id == channel_id) {
+                    ch.chat_count = message_count;
                 }
             }
             AppEvent::UploadProgress {

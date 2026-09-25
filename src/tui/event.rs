@@ -10,6 +10,7 @@ pub enum LogKind {
     Ffmpeg,
     Drive,
     Poll,
+    Chat,
 }
 
 impl LogKind {
@@ -23,6 +24,7 @@ impl LogKind {
             LogKind::Ffmpeg => "FFMPEG",
             LogKind::Drive => "DRIVE",
             LogKind::Poll => "POLL",
+            LogKind::Chat => "CHAT",
         }
     }
 }
@@ -73,6 +75,10 @@ impl LogEntry {
         Self::new(LogKind::Poll, message)
     }
 
+    pub fn chat(message: impl Into<String>) -> Self {
+        Self::new(LogKind::Chat, message)
+    }
+
     pub fn contains(&self, pat: &str) -> bool {
         self.to_string().contains(pat)
     }
@@ -114,6 +120,7 @@ impl<T: Into<String>> From<T> for LogEntry {
                 "FFMPEG" => LogKind::Ffmpeg,
                 "DRIVE" => LogKind::Drive,
                 "POLL" => LogKind::Poll,
+                "CHAT" => LogKind::Chat,
                 _ => LogKind::Info,
             };
             return Self {
@@ -202,6 +209,10 @@ pub enum AppEvent {
         channel_id: String,
         chunk_name: String,
     },
+    ChatStats {
+        channel_id: String,
+        message_count: u64,
+    },
     Log(LogEntry),
 }
 
@@ -231,6 +242,7 @@ mod tests {
         assert_eq!(LogKind::Ffmpeg.as_str(), "FFMPEG");
         assert_eq!(LogKind::Drive.as_str(), "DRIVE");
         assert_eq!(LogKind::Poll.as_str(), "POLL");
+        assert_eq!(LogKind::Chat.as_str(), "CHAT");
     }
 
     #[test]
@@ -246,6 +258,7 @@ mod tests {
         );
         assert_eq!(LogEntry::drive("msg"), LogEntry::new(LogKind::Drive, "msg"));
         assert_eq!(LogEntry::poll("msg"), LogEntry::new(LogKind::Poll, "msg"));
+        assert_eq!(LogEntry::chat("msg"), LogEntry::new(LogKind::Chat, "msg"));
     }
 
     #[test]
@@ -277,6 +290,7 @@ mod tests {
             ("[FFMPEG] stderr output", LogKind::Ffmpeg, "stderr output"),
             ("[DRIVE] uploading", LogKind::Drive, "uploading"),
             ("[POLL] checking status", LogKind::Poll, "checking status"),
+            ("[CHAT] message received", LogKind::Chat, "message received"),
             (
                 "[UNKNOWN] fallback to info",
                 LogKind::Info,

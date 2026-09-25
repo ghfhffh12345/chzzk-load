@@ -123,16 +123,7 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new();
-    for ch in &settings.channels {
-        app.channels.push(chzzk_load::tui::app::ChannelItem {
-            id: ch.id.clone(),
-            name: ch.name.clone(),
-            is_live: false,
-            is_active: false,
-            title: "Checking...".to_string(),
-        });
-    }
+    let mut app = App::from_settings(&settings);
 
     // Main TUI render loop
     let tick_rate = Duration::from_millis(100);
