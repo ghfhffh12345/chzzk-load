@@ -7,9 +7,9 @@
 [![CI](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml/badge.svg)](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A high-performance, standalone tool for automated Naver Chzzk live stream recording and real-time Google Drive syncing, featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
+A high-performance, standalone tool for automated Naver Chzzk live stream recording, real-time live chat archiving, and Google Drive syncing, featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
 
-`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently uploads completed chunks to Google Drive, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
+`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat.jsonl`), concurrently uploads completed chunks and logs to Google Drive, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
 
 ![chzzk-load TUI Dashboard](assets/tui-preview.png)
 
@@ -18,17 +18,20 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 ## Key Features
 
 - ⚡ **Lossless Stream-Copy (`-c copy`)**: Segments live HLS video streams into `.ts` chunks with zero CPU transcoding overhead.
-- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk per active stream. Chunks are permanently deleted immediately upon verified cloud upload.
+- 💬 **Real-Time Live Chat Recording (`chat.jsonl`)**: Simultaneously captures live chat via WebSocket into structured JSON Lines format, preserving timestamps, user nicknames, badges, donations/cheeses, and message text.
+- 💽 **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD card and flash storage longevity on Single Board Computers (Raspberry Pi, ARM64) using in-memory buffering with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
+- 🏷️ **Dynamic Title Tracking & Folder Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically updates Google Drive folder names in real-time.
+- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk per active stream. Chunks and completed chat logs are permanently deleted immediately upon verified cloud upload.
 - 🛡️ **N+1 Segment Boundary Safety**: Chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
 - ☁️ **Resumable Google Drive Sync & Local Fallback**: Direct cloud upload via Google Drive API v3 with automatic PKCE OAuth2 authorization. Runs in local-only recording mode if Google Drive credentials are omitted.
-- 🖥️ **Interactive Terminal Dashboard**: Real-time channel states, live stream titles, upload progress gauges, transfer speed metrics, header statistics (active recordings, total duration, archived size), collapsible activity logs (`l` key), and native Windows UTF-8 console code page support.
+- 🖥️ **Interactive Terminal Dashboard**: Real-time channel states, live stream titles, chat message counters, upload progress gauges, transfer speed metrics, header statistics (active recordings, total duration, archived size), collapsible activity logs (`l` key), and native Windows UTF-8 console code page support.
 - 🔄 **Anti-Race Cache Protection**: Enforces post-recording cooldown and tracks broadcast session IDs to prevent duplicate recording triggers caused by CDN cache TTL delays.
 
 ---
 
 ## Prerequisites
 
-- **FFmpeg**: Must be installed and accessible on your system's `PATH`.
+- **FFmpeg**: Must be installed and accessible on your system's `PATH` (or configured via the `CHZZK_LOAD_FFMPEG_BIN` environment variable).
 
 ```bash
 ffmpeg -version
@@ -67,7 +70,9 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
     "poll_interval_seconds": 20,
     "stream_cooldown_seconds": 60,
     "recordings_dir": "recordings",
-    "min_free_disk_gb": 2.0
+    "min_free_disk_gb": 2.0,
+    "record_chat": true,
+    "chat_flush_interval_seconds": 30
   },
   "google_drive": {
     "credentials_path": "credentials.json",
@@ -94,8 +99,10 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 | `general.chunk_duration_seconds` | `600` (10m) | Duration in seconds for each video chunk. |
 | `general.poll_interval_seconds` | `20` | Interval in seconds between live broadcast status checks. |
 | `general.stream_cooldown_seconds` | `60` | Post-stream cooldown to avoid duplicate sessions from CDN caching. |
-| `general.recordings_dir` | `"recordings"` | Local folder for temporary video segments. |
+| `general.recordings_dir` | `"recordings"` | Local folder for temporary video segments and chat logs. |
 | `general.min_free_disk_gb` | `2.0` | Minimum required free disk space in GB to continue recording. |
+| `general.record_chat` | `true` | Enable concurrent real-time live chat recording into `chat.jsonl`. |
+| `general.chat_flush_interval_seconds` | `30` | Periodic timer interval in seconds to flush buffered chat messages to disk. |
 | `google_drive.credentials_path` | `"credentials.json"` | Path to Google OAuth2 Desktop client secrets file. |
 | `google_drive.token_path` | `"token.json"` | Path to saved OAuth2 authorization tokens file. |
 | `google_drive.root_folder_name` | `"Chzzk_Recordings"` | Destination folder name created in Google Drive. |
@@ -104,9 +111,18 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 
 ---
 
+## Environment Variables
+
+| Variable | Description |
+| :--- | :--- |
+| `CHZZK_LOAD_FFMPEG_BIN` | Custom path to the FFmpeg executable (defaults to `ffmpeg` on `PATH`). |
+| `CHZZK_LOAD_BIN` | Path override for the native `chzzk-load` binary when running via the npm launcher. |
+
+---
+
 ## Google Drive Setup
 
-If Google Drive credentials are not provided, `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files in `recordings_dir`.
+If Google Drive credentials are not provided, `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files and `chat.jsonl` in `recordings_dir`.
 
 To enable automatic Google Drive upload:
 1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Google Drive API**.
@@ -120,7 +136,7 @@ To enable automatic Google Drive upload:
 
 | Key | Action |
 | :--- | :--- |
-| `q` | **Quit**: Initiates graceful shutdown (stops active recordings and flushes pending uploads). Press `q` or `Ctrl+C` again to force exit immediately. |
+| `q` | **Quit**: Initiates graceful shutdown (stops active recordings, flushes chat buffer, and completes pending uploads). Press `q` or `Ctrl+C` again to force exit immediately. |
 | `l` | **Toggle Logs**: Show or hide the activity log section (expands channels and cloud upload views when hidden). |
 | `r` | **Refresh**: Immediately polls monitored channels. |
 | `↑` / `k` | **Scroll Up**: Scroll visible channels and cloud uploads upward. |

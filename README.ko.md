@@ -7,9 +7,9 @@
 [![CI](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml/badge.svg)](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-네이버 치지직(Chzzk) 라이브 방송을 자동으로 감지하여 실시간으로 녹화하고 Google Drive로 동기화하는 고성능 독립 실행형 CLI 도구입니다. [Ratatui](https://github.com/ratatui/ratatui) 기반의 대화형 터미널 사용자 인터페이스(TUI)를 제공합니다.
+네이버 치지직(Chzzk) 라이브 방송을 자동으로 감지하여 실시간 영상 및 라이브 채팅을 녹화하고 Google Drive로 동기화하는 고성능 독립 실행형 CLI 도구입니다. [Ratatui](https://github.com/ratatui/ratatui) 기반의 대화형 터미널 사용자 인터페이스(TUI)를 제공합니다.
 
-`chzzk-load`는 방송 상태를 실시간 모니터링하며, FFmpeg 스트림 복사(`-c copy`)를 통해 원본 손실 없이 영상을 MPEG-TS 세그먼트로 분할 저장합니다. 분할 완료된 세그먼트는 백그라운드에서 Google Drive로 즉시 업로드되며, 업로드 성공이 확인되는 즉시 로컬 파일을 삭제하여 디스크 사용량을 최소한으로 엄격히 유지합니다.
+`chzzk-load`는 방송 상태를 실시간 모니터링하며, FFmpeg 스트림 복사(`-c copy`)를 통해 원본 손실 없이 영상을 MPEG-TS 세그먼트로 분할 저장하고 WebSocket을 통해 실시간 라이브 채팅을 구조화된 JSON Lines(`chat.jsonl`) 형식으로 동시 수집합니다. 분할 완료된 영상 세그먼트와 채팅 로그는 백그라운드에서 Google Drive로 즉시 업로드되며, 업로드 성공이 확인되는 즉시 로컬 파일을 삭제하여 디스크 사용량을 최소한으로 엄격히 유지합니다.
 
 ![chzzk-load TUI 대시보드](assets/tui-preview.png)
 
@@ -18,17 +18,20 @@
 ## 주요 기능
 
 - ⚡ **무손실 스트림 복사 (`-c copy`)**: 라이브 HLS 비디오 스트림을 재인코딩 없이 원본 그대로 `.ts` 조각으로 분할하여 CPU 및 메모리 부하를 최소화합니다.
-- 💾 **엄격히 제한된 디스크 사용량**: 활성 스트림당 최대 1~2개의 세그먼트 파일만 로컬 디스크에 유지합니다. 클라우드 업로드 완료가 확인되는 즉시 로컬 파일은 영구 삭제됩니다.
+- 💬 **실시간 라이브 채팅 녹화 (`chat.jsonl`)**: WebSocket을 통해 실시간 방송 채팅을 동시 수집하여 타임스탬프, 사용자 닉네임, 뱃지, 후원(치즈) 내역, 메시지 내용이 포함된 구조화된 JSON Lines 형식으로 저장합니다.
+- 💽 **플래시 수명 보호 배치 I/O (SBC 최적화)**: 라즈베리 파이(Raspberry Pi), ARM64 등 단일 보드 컴퓨터(SBC)의 microSD 및 플래시 메모리 수명을 보존하기 위해 메모리 버퍼링 및 듀얼 트리거 플러시(500개 메시지 / 64KB 도달 또는 주기적 타이머)를 적용하여 디스크 I/O 빈도를 최소화합니다.
+- 🏷️ **실시간 방송 제목 추적 및 폴더 동기화**: 방송 중 변경되는 방제를 자동으로 감지하여 `title_history.txt`에 기록하고, Google Drive의 폴더 이름을 최신 방제로 실시간 자동 갱신합니다.
+- 💾 **엄격히 제한된 디스크 사용량**: 활성 스트림당 최대 1~2개의 세그먼트 파일만 로컬 디스크에 유지합니다. 클라우드 업로드 완료가 확인되는 즉시 영상 세그먼트와 채팅 로그 파일은 로컬에서 영구 삭제됩니다.
 - 🛡️ **N+1 세그먼트 경계 안전성**: $N$번째 청크는 다음 $N+1$번째 청크가 디스크에 생성(파일 크기 > 0)된 것이 확인된 후에만 업로드 큐로 전달되어, 불완전하거나 손상된 청크의 업로드를 원천 차단합니다.
 - ☁️ **Google Drive 이어올리기(Resumable) 및 로컬 폴백**: Google Drive API v3 및 자동 PKCE OAuth2 인증을 통한 클라우드 실시간 전송을 지원합니다. Google Drive 인증 설정이 없으면 자동으로 로컬 단독 녹화 모드로 동작합니다.
-- 🖥️ **대화형 터미널 대시보드 (TUI)**: 실시간 채널 상태, 방송 제목, 업로드 진행률 게이지, 전송 속도 지표뿐만 아니라 헤더 요약 통계(활성 녹화 수, 누적 녹화 시간, 아카이브 용량), 로그 토글 기능(`l` 키), Windows 콘솔 UTF-8 코드페이지 자동 설정을 지원합니다.
+- 🖥️ **대화형 터미널 대시보드 (TUI)**: 실시간 채널 상태, 방송 제목, 실시간 수집 채팅 수 카운터, 업로드 진행률 게이지, 전송 속도 지표뿐만 아니라 헤더 요약 통계(활성 녹화 수, 누적 녹화 시간, 아카이브 용량), 로그 토글 기능(`l` 키), Windows 콘솔 UTF-8 코드페이지 자동 설정을 지원합니다.
 - 🔄 **CDN 캐시 지연 중복 방지 (Anti-Race)**: 방송 종료 후 쿨다운 적용 및 방송 고유 세션 ID(`live_id`) 추적을 통해 치지직 CDN 캐시 지연(10~30초)으로 인한 중복 세션 생성을 방지합니다.
 
 ---
 
 ## 사전 요구사항
 
-- **FFmpeg**: 시스템의 `PATH` 환경 변수에 등록되어 있어야 합니다.
+- **FFmpeg**: 시스템의 `PATH` 환경 변수에 등록되어 있어야 합니다 (또는 `CHZZK_LOAD_FFMPEG_BIN` 환경 변수로 실행 파일 경로 지정 가능).
 
 ```bash
 ffmpeg -version
@@ -67,7 +70,9 @@ chzzk-load --config /path/to/my-settings.json
     "poll_interval_seconds": 20,
     "stream_cooldown_seconds": 60,
     "recordings_dir": "recordings",
-    "min_free_disk_gb": 2.0
+    "min_free_disk_gb": 2.0,
+    "record_chat": true,
+    "chat_flush_interval_seconds": 30
   },
   "google_drive": {
     "credentials_path": "credentials.json",
@@ -94,8 +99,10 @@ chzzk-load --config /path/to/my-settings.json
 | `general.chunk_duration_seconds` | `600` (10분) | 분할 녹화할 영상 세그먼트의 길이(초 단위). |
 | `general.poll_interval_seconds` | `20` | 치지직 라이브 방송 시작 여부를 확인하는 폴링 주기(초 단위). |
 | `general.stream_cooldown_seconds` | `60` | 방송 종료 후 CDN 캐시 잔여로 인한 중복 녹화를 방지하기 위한 대기 시간(초 단위). |
-| `general.recordings_dir` | `"recordings"` | 임시 세그먼트 영상 파일이 저장되는 로컬 디렉터리 경로. |
+| `general.recordings_dir` | `"recordings"` | 임시 세그먼트 영상 파일 및 채팅 로그가 저장되는 로컬 디렉터리 경로. |
 | `general.min_free_disk_gb` | `2.0` | 녹화를 계속하기 위해 필요한 최소 여유 디스크 공간(GB 단위). |
+| `general.record_chat` | `true` | `chat.jsonl` 파일로 실시간 라이브 채팅 동시 녹화 활성화 여부. |
+| `general.chat_flush_interval_seconds` | `30` | 메모리에 버퍼링된 채팅 메시지를 디스크로 플러시하는 주기(초 단위). |
 | `google_drive.credentials_path` | `"credentials.json"` | Google Cloud에서 발급받은 OAuth2 데스크톱 클라이언트 비밀번호 파일 경로. |
 | `google_drive.token_path` | `"token.json"` | 발급받은 OAuth2 인증 토큰이 자동 저장 및 갱신되는 파일 경로. |
 | `google_drive.root_folder_name` | `"Chzzk_Recordings"` | Google Drive 내에 녹화 파일들이 업로드될 루트 폴더 이름. |
@@ -104,9 +111,18 @@ chzzk-load --config /path/to/my-settings.json
 
 ---
 
+## 환경 변수 안내
+
+| 환경 변수 | 설명 |
+| :--- | :--- |
+| `CHZZK_LOAD_FFMPEG_BIN` | FFmpeg 실행 파일의 사용자 지정 경로 (미설정 시 기본적으로 `PATH`의 `ffmpeg` 사용). |
+| `CHZZK_LOAD_BIN` | npm 런처 사용 시 실행할 네이티브 `chzzk-load` 바이너리의 사용자 지정 경로. |
+
+---
+
 ## Google Drive 연동 설정
 
-Google Drive 인증 정보가 설정되지 않은 경우, `chzzk-load`는 자동으로 **로컬 전용 녹화 모드**로 전환되어 `recordings_dir`에 `.ts` 파일들을 보관합니다.
+Google Drive 인증 정보가 설정되지 않은 경우, `chzzk-load`는 자동으로 **로컬 전용 녹화 모드**로 전환되어 `recordings_dir`에 `.ts` 파일들과 `chat.jsonl` 파일을 보관합니다.
 
 Google Drive 자동 업로드를 활성화하려면:
 1. [Google Cloud Console](https://console.cloud.google.com/)에서 프로젝트를 생성하고 **Google Drive API**를 활성화합니다.
@@ -120,7 +136,7 @@ Google Drive 자동 업로드를 활성화하려면:
 
 | 키 | 동작 |
 | :--- | :--- |
-| `q` | **종료 (Quit)**: 안전한 정상 종료 절차를 시작합니다 (진행 중인 녹화 프로세스를 정상 중단하고 대기 중인 업로드를 마무리). 한 번 더 `q` 또는 `Ctrl+C`를 누르면 즉시 강제 종료됩니다. |
+| `q` | **종료 (Quit)**: 안전한 정상 종료 절차를 시작합니다 (진행 중인 녹화 프로세스를 정상 중단하고, 채팅 버퍼를 플러시하며, 대기 중인 업로드를 마무리). 한 번 더 `q` 또는 `Ctrl+C`를 누르면 즉시 강제 종료됩니다. |
 | `l` | **로그 토글 (Toggle Logs)**: 활동 로그 섹션을 표시하거나 숨깁니다 (로그를 숨기면 채널 및 클라우드 업로드 영역이 확장됩니다). |
 | `r` | **새로고침 (Refresh)**: 등록된 채널들의 방송 상태를 즉시 다시 확인합니다. |
 | `↑` / `k` | **위로 스크롤**: 모니터링 채널 및 클라우드 업로드 목록을 위로 스크롤합니다. |
