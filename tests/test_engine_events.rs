@@ -1818,3 +1818,89 @@ fn test_active_session_state_folder_name_formatting_and_sanitization() {
         "[2026-09-22_1530] Chzzk Streamer _ Channel - What's Next? Let's Play _ Ep. 1 _Final_"
     );
 }
+
+#[tokio::test]
+async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupted_stream() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "liveId": 888999,
+                    "status": "OPEN",
+                    "liveTitle": "Ongoing Stream After Interruption",
+                    "channel": { "channelId": "chan_interrupt", "channelName": "StreamerInterrupt" },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("test_orch_resume_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            stream_cooldown_seconds: 1, // 1 second cooldown
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_interrupt".to_string(),
+            name: "StreamerInterrupt".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+
+    // Simulate session interrupted in the past (liveId: 888999, finished_at: 2 seconds ago > 1s cooldown)
+    {
+        let sessions = orchestrator.finished_sessions();
+        let mut finished = sessions.lock().await;
+        finished.insert(
+            "chan_interrupt".to_string(),
+            chzzk_load::engine::FinishedSession {
+                live_id: Some(888999),
+                finished_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
+            },
+        );
+    }
+
+    // Poll channels: Since cooldown (1s) has passed and stream is still OPEN, it should resume recording!
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    // Verify recording was resumed/started!
+    let mut recording_started = false;
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await
+    {
+        if let AppEvent::RecordingStarted { channel_id, .. } = ev
+            && channel_id == "chan_interrupt"
+        {
+            recording_started = true;
+            break;
+        }
+    }
+
+    assert!(
+        recording_started,
+        "Engine must resume recording when stream is still OPEN after cooldown, even with same liveId!"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

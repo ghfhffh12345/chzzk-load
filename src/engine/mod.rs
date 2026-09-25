@@ -709,17 +709,15 @@ impl EngineOrchestrator {
                         let mut finished = self.finished_sessions.lock().await;
                         if let Some(prev) = finished.get(&channel.id) {
                             match (&info.live_id, &prev.live_id) {
-                                (Some(curr_id), Some(prev_id)) if curr_id == prev_id => {
-                                    // Same liveId as just-finished session -> definitely stale CDN cache
-                                    true
-                                }
                                 (Some(curr_id), Some(prev_id)) if curr_id != prev_id => {
                                     // liveId changed -> Genuinely new stream started!
                                     finished.remove(&channel.id);
                                     false
                                 }
                                 _ => {
-                                    // One or both live_ids are None -> Fall back to cooldown period
+                                    // Same liveId or one/both live_ids are None:
+                                    // Guard against Chzzk CDN cache TTL delays during cooldown window.
+                                    // If cooldown has elapsed and stream is still OPEN, recording was interrupted and should resume.
                                     let cooldown = Duration::from_secs(
                                         self.settings.general.stream_cooldown_seconds,
                                     );
