@@ -21,6 +21,11 @@ pub fn build_resumable_init_body(filename: &str, parent_id: Option<&str>) -> Str
     .to_string()
 }
 
+/// Streaming buffer size for resumable Google Drive uploads.
+/// Must be an exact multiple of 256 KiB (262,144 bytes) to comply with Google Drive API.
+/// 8 MiB (32 * 256 KiB) minimizes syscall, context switching, and TLS framing overhead.
+pub const RESUMABLE_UPLOAD_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+
 #[derive(Debug, Deserialize)]
 pub struct DriveFileList {
     pub files: Vec<DriveFileItem>,
@@ -290,7 +295,9 @@ impl DriveClient {
                 Err(e) => return Err(anyhow!("Failed to open file for upload: {}", e)),
             };
 
-            let stream = FramedRead::with_capacity(file, BytesCodec::new(), 256 * 1024);
+            // 2. Stream chunk with progress using 8MB buffer, retrying transient errors
+            let stream =
+                FramedRead::with_capacity(file, BytesCodec::new(), RESUMABLE_UPLOAD_BUFFER_SIZE);
             let mut uploaded = 0u64;
             let cb = Arc::clone(&progress_cb);
 

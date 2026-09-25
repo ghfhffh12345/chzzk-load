@@ -56,6 +56,15 @@ fn test_resumable_metadata_payload() {
 }
 
 #[test]
+fn test_resumable_upload_buffer_size() {
+    use chzzk_load::drive::client::RESUMABLE_UPLOAD_BUFFER_SIZE;
+    const {
+        assert!(RESUMABLE_UPLOAD_BUFFER_SIZE >= 8 * 1024 * 1024);
+        assert!(RESUMABLE_UPLOAD_BUFFER_SIZE.is_multiple_of(256 * 1024));
+    }
+}
+
+#[test]
 fn test_resumable_metadata_payload_no_parent() {
     let json = build_resumable_init_body("chunk_0001.ts", None);
     let val: serde_json::Value = serde_json::from_str(&json).unwrap();
