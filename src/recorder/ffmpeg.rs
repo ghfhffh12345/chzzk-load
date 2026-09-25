@@ -19,7 +19,9 @@ pub fn build_ffmpeg_command(
     chunk_duration_seconds: u64,
     cookie_header: Option<&str>,
 ) -> Command {
-    let mut cmd = Command::new("ffmpeg");
+    let ffmpeg_bin =
+        std::env::var("CHZZK_LOAD_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
+    let mut cmd = Command::new(ffmpeg_bin);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::piped());
@@ -128,5 +130,15 @@ mod tests {
         assert_eq!(args[25], "mpegts");
         assert_eq!(args[26], "-reset_timestamps");
         assert_eq!(args[27], "1");
+    }
+
+    #[test]
+    fn test_build_ffmpeg_command_default_program() {
+        let path = Path::new("recordings/test/%04d.ts");
+        let cmd = build_ffmpeg_command("http://example.com/live.m3u8", path, 10, None);
+        let std_cmd = cmd.as_std();
+        let expected_bin =
+            std::env::var("CHZZK_LOAD_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
+        assert_eq!(std_cmd.get_program(), expected_bin.as_str());
     }
 }

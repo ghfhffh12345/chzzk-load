@@ -307,24 +307,31 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
     orchestrator.spawn_recording_session("chan_local_chat".to_string(), info, upload_tx);
 
-    // Wait a brief moment, then create a mock chat.jsonl in the session dir to simulate captured chat
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for the session dir to be created, then create a mock chat.jsonl to simulate captured chat
     let mut session_dir_opt = None;
-    if let Ok(mut entries) = tokio::fs::read_dir(&temp_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if entry
-                .file_type()
-                .await
-                .map(|ft| ft.is_dir())
-                .unwrap_or(false)
-            {
-                let p = entry.path();
-                let _ = fs::write(p.join("chat.jsonl"), b"{\"content\":\"hello\"}\n");
-                session_dir_opt = Some(p);
-                break;
+    for _ in 0..20 {
+        if let Ok(mut entries) = tokio::fs::read_dir(&temp_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry
+                    .file_type()
+                    .await
+                    .map(|ft| ft.is_dir())
+                    .unwrap_or(false)
+                {
+                    let p = entry.path();
+                    let _ = fs::write(p.join("chat.jsonl"), b"{\"content\":\"hello\"}\n");
+                    session_dir_opt = Some(p);
+                    break;
+                }
             }
         }
+        if session_dir_opt.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
+
+    let session_dir = session_dir_opt.expect("Session directory must be created");
 
     // Cancel session
     cancel_token.cancel();
@@ -335,16 +342,14 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
         }
     }
 
-    if let Some(session_dir) = session_dir_opt {
-        assert!(
-            session_dir.join("chat.jsonl").exists(),
-            "chat.jsonl must remain saved locally when Google Drive is disabled"
-        );
-        assert!(
-            session_dir.exists(),
-            "Session directory containing chat.jsonl must not be cleaned up as empty"
-        );
-    }
+    assert!(
+        session_dir.join("chat.jsonl").exists(),
+        "chat.jsonl must remain saved locally when Google Drive is disabled"
+    );
+    assert!(
+        session_dir.exists(),
+        "Session directory containing chat.jsonl must not be cleaned up as empty"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
