@@ -6,13 +6,16 @@ Welcome to `chzzk-load`. This document serves as the primary technical specifica
 
 ## 1. Project Overview
 
-`chzzk-load` is a high-performance, standalone Rust application equipped with a modern Ratatui Terminal User Interface (TUI). It monitors Naver Chzzk live broadcasts, losslessly segments live video into MPEG-TS chunks via stream-copied FFmpeg (`-c copy`), concurrently uploads completed chunks to Google Drive using resumable chunked uploads, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
+`chzzk-load` is a high-performance, standalone Rust application equipped with a modern Ratatui Terminal User Interface (TUI). It monitors Naver Chzzk live broadcasts, losslessly segments live video into MPEG-TS chunks via stream-copied FFmpeg (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat.jsonl`), concurrently uploads completed chunks and logs to Google Drive using resumable chunked uploads, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
 
 ### Key System Characteristics
-- **Standalone Binary**: Compiles directly into an independent executable (`chzzk-load.exe`) runnable without Cargo or external runtime environments (FFmpeg must be installed and available on `PATH`).
+- **Standalone Binary**: Compiles directly into an independent executable (`chzzk-load.exe`) runnable without Cargo or external runtime environments (FFmpeg must be installed and available on `PATH`, or configured via `CHZZK_LOAD_FFMPEG_BIN`).
 - **Zero CPU Transcoding**: Uses FFmpeg stream-copy (`-c copy`) to segment raw HLS video streams into `.ts` files with near-zero CPU and RAM overhead.
-- **Strictly Bounded Disk Footprint**: Only 1–2 segments reside on disk simultaneously per active stream. A chunk is deleted immediately upon receiving an HTTP 200/201 upload confirmation.
+- **Real-Time Live Chat Archiving**: Concurrently connects to Chzzk chat WebSockets, capturing structured JSON Lines logs (`chat.jsonl`) with message timestamps, user badges, donation details, and raw payload.
+- **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD and flash memory longevity on Single Board Computers (Raspberry Pi/ARM64) using an in-memory buffer (`ChatWriter`) with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
+- **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk simultaneously per active stream. Chunks and completed chat logs are deleted immediately upon receiving an HTTP 200/201 upload confirmation.
 - **N+1 Segment Boundary Safety**: Chunk $N$ is only sealed and queued for upload after chunk $N+1$ exists on disk with file size $> 0$ bytes (or upon final stream termination), guaranteeing no partial chunks are uploaded.
+- **Dynamic Title Tracking & Folder Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically synchronizes Google Drive folder names in real time.
 - **Anti-Race Cache Deduplication**: Protects against Chzzk CDN cache TTL delays (10–30s) by tracking finished broadcast `live_id`s and enforcing a post-recording cooldown to prevent duplicate sessions.
 
 ---
@@ -23,7 +26,7 @@ Welcome to `chzzk-load`. This document serves as the primary technical specifica
 chzzk-load/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml            # CI validation (fmt, clippy, multi-OS tests, npm tests)
+│       ├── ci.yml            # CI validation (fmt, clippy, multi-OS tests with setup-ffmpeg, npm tests)
 │       └── release.yml       # Release pipeline (multi-platform builds, GitHub Release, npm publish)
 ├── Cargo.toml                # Dependencies and binary target definitions
 ├── README.md                 # Primary documentation (English)
@@ -42,37 +45,44 @@ chzzk-load/
 │   ├── main.rs               # CLI entrypoint, signals, panic hooks, TUI event loop
 │   ├── lib.rs                # Module root and library exports
 │   ├── app_path.rs           # Portable executable-relative path resolution
-│   ├── config.rs             # Settings structs, defaults, and serde loaders
+│   ├── config.rs             # Settings structs, defaults, and serde loaders (record_chat, chat_flush_interval_seconds)
 │   ├── chzzk/                # Chzzk API integration
 │   │   ├── mod.rs
-│   │   ├── client.rs         # ChzzkClient: live detail polling, HLS URL extraction
-│   │   └── models.rs         # Data structures: LiveDetailContent, LiveStreamInfo, etc.
-│   ├── recorder/             # FFmpeg process management & chunk detection
+│   │   ├── client.rs         # ChzzkClient: live detail polling, HLS URL extraction, chat access token API
+│   │   ├── chat.rs           # ChzzkChatClient: WebSocket handshake (cmd: 100), ping-pong, auto-reconnect backoff
+│   │   ├── models.rs         # Data structures: LiveDetailContent, LiveStreamInfo, etc.
+│   │   └── models_chat.rs    # Chat models: ChatAccessTokenResponse, RecordedChatMessage, WebSocket packet envelopes
+│   ├── recorder/             # FFmpeg process management, watcher & chat writer
 │   │   ├── mod.rs
-│   │   ├── ffmpeg.rs         # Command builder, arguments (-extension_picky 0, piped stderr)
-│   │   └── watcher.rs        # SegmentWatcher, N+1 chunk sealing logic
+│   │   ├── ffmpeg.rs         # Command builder (-extension_picky 0, piped stderr, CHZZK_LOAD_FFMPEG_BIN)
+│   │   ├── watcher.rs        # SegmentWatcher, N+1 chunk sealing logic
+│   │   └── chat_writer.rs    # ChatWriter: in-memory batched writer with dual-trigger flush
 │   ├── drive/                # Google Drive API v3 client & OAuth2
 │   │   ├── mod.rs
 │   │   ├── auth.rs           # DriveAuth: PKCE authorization flow, token refresh
-│   │   └── client.rs         # DriveClient: folder search/creation, resumable uploads
+│   │   └── client.rs         # DriveClient: folder search/creation, resumable uploads, rename
 │   ├── uploader/             # Upload pipeline
 │   │   ├── mod.rs            # UploadTask, UploadWorker (upload-and-delete pipeline)
 │   ├── engine/               # Central orchestrator
-│   │   └── mod.rs            # EngineOrchestrator: channel polling, sessions, upload consumer
+│   │   └── mod.rs            # EngineOrchestrator: channel polling, sessions, chat task, title history, upload consumer
 │   └── tui/                  # Ratatui Dashboard
 │       ├── mod.rs
-│       ├── app.rs            # App state, key event handling, channel list state
-│       ├── event.rs          # Central AppEvent enum
-│       └── ui.rs             # draw_ui: Layout constraints, strictly bounded logs view
+│       ├── app.rs            # App state, key event handling, channel list state, chat_count telemetry
+│       ├── event.rs          # Central AppEvent enum (ChatStats, LogEntry::chat)
+│       └── ui.rs             # draw_ui: Layout constraints, strictly bounded logs view, chat badges
 └── tests/                    # Integration and smoke tests
     ├── test_app_path.rs
+    ├── test_chat_client.rs
+    ├── test_chat_writer.rs
     ├── test_chzzk_client.rs
     ├── test_cli_smoke.rs
     ├── test_config.rs
     ├── test_drive_auth.rs
     ├── test_drive_uploader.rs
+    ├── test_engine_chat.rs
     ├── test_engine_events.rs
     ├── test_recorder_watcher.rs
+    ├── test_tui_console.rs
     └── test_tui_state.rs
 ```
 
@@ -92,6 +102,7 @@ chzzk-load/
 
 ### 3.2. FFmpeg Recording & N+1 Watcher (`src/recorder/`)
 - `build_ffmpeg_command` spawns an independent FFmpeg child process with:
+  - Binary resolution: checks `CHZZK_LOAD_FFMPEG_BIN` environment variable before defaulting to `"ffmpeg"`.
   - `-extension_picky 0`: Required for modern FFmpeg builds to demux Naver CDN `.m4v` video segments containing query tokens.
   - `-c copy`: Zero re-encoding overhead.
   - `stdin(Stdio::piped())`: Enables graceful termination via `"q\n"`.
@@ -101,20 +112,33 @@ chzzk-load/
   - Emits chunk $N$ as sealed only when chunk $N+1$ exists with size $> 0$.
   - When the child process exits (`is_stream_finished = true`), seals the final lingering chunk.
 
-### 3.3. Google Drive Upload Pipeline (`src/drive/` & `src/uploader/`)
+### 3.3. Real-Time Chat Recording & Flash Longevity Buffer (`src/chzzk/chat.rs` & `src/recorder/chat_writer.rs`)
+- When `settings.general.record_chat` is enabled and `info.chat_channel_id` is present:
+  1. Requests chat access token from `https://comm-api.game.naver.com/nng_main/v1/chats/access-token`.
+  2. Spawns `ChzzkChatClient` connecting via WebSocket to `wss://kr-ss{n}.chat.naver.com/chat`.
+  3. Sends `cmd: 100` (`CONNECT`) handshake with 10-second read timeout. Automatically handles server ping (`cmd: 0` $\to$ pong `cmd: 10000`) and 20-second client heartbeat pings.
+  4. Parses chat messages (`cmd: 93101`, `93102`), extracting timestamp, user info, message text, donations (cheese), and raw payload.
+  5. Telemetry counts are relayed non-blockingly (`try_send`) to `AppEvent::ChatStats`.
+  6. **Flash Longevity Buffer (`ChatWriter`)**: Messages are queued in memory and written to `<session_dir>/chat.jsonl` using dual-trigger flushing (500 messages or 64 KB capacity, or periodic timer interval `chat_flush_interval_seconds`). No per-message `fsync` is performed during streaming.
+  7. On session cancellation or stream termination, flushes all remaining records, guaranteeing zero lost messages.
+
+### 3.4. Google Drive Upload Pipeline & Title History Sync (`src/drive/` & `src/uploader/`)
 - Sealed chunks are sent over an unbounded or bounded `mpsc::Sender<UploadTask>` channel to `spawn_upload_consumer`.
 - Drive subfolders are created lazily by `process_sealed_chunk` only when the first valid chunk is confirmed sealed.
+- **Stream Title History**: If the broadcast title changes during a session, the engine appends the timestamped change to `title_history.txt`, and asynchronously renames the Google Drive folder via `drive.rename_folder`.
 - Resumable upload initiates with a `POST /upload/drive/v3/files?uploadType=resumable` metadata request, obtaining a session URI.
 - The chunk byte stream is transmitted with progress tracking callbacks updating `AppEvent::UploadProgress`.
 - On HTTP 200/201 response, `tokio::fs::remove_file(&chunk_path)` executes immediately.
+- Upon recording session end, `chat.jsonl` is uploaded to the broadcast's Google Drive folder and deleted locally. If Drive is disabled, `chat.jsonl` is preserved on local disk.
 
-### 3.4. Ratatui TUI Dashboard (`src/tui/`)
+### 3.5. Ratatui TUI Dashboard (`src/tui/`)
 - Uses strict vertical layout constraints:
   - Header & Divider: `Constraint::Length(1)` each
   - Body: `Constraint::Length(10)` (or `Constraint::Fill(1)` when logs are hidden via 'l' key; horizontal split: Monitored Channels on left, Cloud Upload progress/status on right)
   - Logs Title Divider: `Constraint::Length(1)` & Logs Content: `Constraint::Fill(1)` (omitted when logs are toggled off via 'l' key)
   - Footer Divider & Keybind Footer: `Constraint::Length(1)` each
-- **Log Slicing & Clipping**: Logs are flattened by `\n` to support multi-line error traces, and sliced to exactly `inner_height = log_area.height`. Lines exceeding `inner_width` are horizontally truncated with `…` to guarantee zero word-wrap overflow or terminal buffer scrolling.
+- **Channel Row Telemetry**: Active recordings display segment count, elapsed duration, and live chat message count (`CHAT: {count}`).
+- **Log Slicing & Clipping**: Logs are flattened by `\n` to support multi-line error traces, and sliced to exactly `inner_height = log_area.height`. Lines exceeding `inner_width` are horizontally truncated with `…` to guarantee zero word-wrap overflow or terminal buffer scrolling. `[CHAT]` logs are rendered with a distinct cyan badge.
 - **Log Scrolling**: Tail auto-scroll is maintained by default (`log_scroll = 0`). Users can navigate history using `PageUp`, `PageDown`, `Home`, and `End`.
 - **View Scrolling**: Channels and Cloud Upload scroll in synchronized lockstep using `Up`, `Down`, `k`, and `j`.
 
@@ -128,7 +152,7 @@ The repository uses GitHub Actions for continuous integration and automated mult
 1. **Continuous Integration (`.github/workflows/ci.yml`)**:
    - Triggers automatically on pushes and pull requests targeting the `main` branch.
    - **`lint` job**: Runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on `ubuntu-latest`.
-   - **`test` job**: Matrix build running `cargo test --all-targets` across `ubuntu-latest` and `windows-latest`.
+   - **`test` job**: Matrix build running `cargo test --all-targets` across `ubuntu-latest` and `windows-latest`. Installs FFmpeg via `FedericoCarboni/setup-ffmpeg@v3` with `github-token: ${{ secrets.GITHUB_TOKEN }}` to guarantee FFmpeg availability across all runner OSes.
    - **`npm-test` job**: Sets up Node.js 20 on `ubuntu-latest` and executes `node scripts/test-npm-packages.js` to verify npm package generation, platform resolution, and launcher mechanics.
 
 2. **Automated Multi-Platform Release Pipeline (`.github/workflows/release.yml`)**:
@@ -189,7 +213,10 @@ cargo check --all-targets
 # Run the full test suite
 cargo test
 
-# Run a specific test suite or test case
+# Run specific test suites
+cargo test --test test_engine_chat
+cargo test --test test_chat_client
+cargo test --test test_chat_writer
 cargo test --test test_engine_events
 cargo test --test test_engine_events test_engine_orchestrator_prevents_duplicate_session_race_condition
 
@@ -218,6 +245,9 @@ When implementing changes, AI agents must strictly preserve the following rules:
 1. **No Direct Terminal Pollution**: Never use `println!`, `eprintln!`, or unredirected subprocess outputs while the TUI is active. All diagnostic output must be routed through `AppEvent::Log(...)`.
 2. **Terminal Panic Recovery**: Maintain the panic hook in `src/main.rs` that calls `disable_raw_mode()` and `execute!(stdout, LeaveAlternateScreen, Show)` before invoking the default panic handler.
 3. **MPEG-TS Stream Copy**: Never introduce re-encoding flags (`-c:v libx264`, etc.) into `build_ffmpeg_command`. Recording must remain strictly lossless stream-copy (`-c copy`).
-4. **Resilient HTTP Mocking**: In unit tests, avoid binding fixed ports or connecting to external network endpoints. Use `tiny_http::Server::http("127.0.0.1:0")` to allocate dynamic local test ports.
+4. **Resilient HTTP & WebSocket Mocking**: In unit tests, avoid binding fixed ports or connecting to external network endpoints. Use `tiny_http::Server::http("127.0.0.1:0")` or ephemeral `tokio::net::TcpListener::bind("127.0.0.1:0")` to allocate dynamic local test ports.
 5. **Safe File Operations**: All tests performing filesystem mutations must operate strictly within `std::env::temp_dir()`.
 6. **Path Portability & Resolution**: Always resolve relative file and directory paths using `app_path::resolve_path(...)`. Resolution prioritizes the current working directory (`CWD`), falls back to the executable directory when present in portable non-npm deployments, and avoids writing/resolving configuration inside `node_modules` when installed globally via npm.
+7. **Flash Memory & Disk Wear Longevity**: Chat messages MUST NOT be synchronously flushed or fsynced to disk per message. All streaming chat writes must pass through `ChatWriter` with batching thresholds (500 msgs or 64 KB capacity, or periodic timer interval).
+8. **Non-Blocking Telemetry Backpressure**: Never block internal WebSocket reading or recording loops on TUI event channels (`try_send` should always be used for telemetry and stats reporting).
+9. **FFmpeg Binary Resolution**: `build_ffmpeg_command` must respect the `CHZZK_LOAD_FFMPEG_BIN` environment variable override before defaulting to `"ffmpeg"`.
