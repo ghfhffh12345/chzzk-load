@@ -2327,3 +2327,161 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_engine_orchestrator_serializes_uploads_per_channel() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_serial_chan_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    let (task2_unexpected_started_tx, mut task2_unexpected_started_rx) = mpsc::channel::<()>(1);
+    let (allow_task1_finish_tx, mut allow_task1_finish_rx) = mpsc::channel::<()>(1);
+
+    let put_task1_slot: Arc<std::sync::Mutex<Option<tiny_http::Request>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let put_task1_slot_clone = put_task1_slot.clone();
+
+    std::thread::spawn(move || {
+        let _ = allow_task1_finish_rx.blocking_recv();
+        for _ in 0..100 {
+            let maybe_req = put_task1_slot_clone.lock().unwrap().take();
+            if let Some(r) = maybe_req {
+                let mock_body = serde_json::json!({
+                    "id": "file_task1",
+                    "name": "chunk_0000.ts"
+                });
+                let response = Response::from_string(mock_body.to_string()).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = r.respond(response);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+
+    std::thread::spawn(move || {
+        // Process requests from client
+        while let Ok(mut req) = server.recv() {
+            if req.method().as_str() == "POST" {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                let is_task2 = body.contains("chunk_0001.ts");
+                if is_task2 {
+                    // Task 2 started while Task 1 is still in flight!
+                    let _ = task2_unexpected_started_tx.try_send(());
+                }
+
+                let chunk_id = if is_task2 { "2" } else { "1" };
+                let session_url = format!("http://127.0.0.1:{}/serial_session_{}", port, chunk_id);
+                let response = Response::empty(200).with_header(
+                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "PUT" {
+                if req.url().contains("serial_session_1") {
+                    // Task 1 PUT arrived; hold it in slot without blocking the server loop
+                    *put_task1_slot.lock().unwrap() = Some(req);
+                } else if req.url().contains("serial_session_2") {
+                    let mock_body = serde_json::json!({
+                        "id": "file_task2",
+                        "name": "chunk_0001.ts"
+                    });
+                    let response = Response::from_string(mock_body.to_string()).with_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                    );
+                    let _ = req.respond(response);
+                    break;
+                }
+            }
+        }
+    });
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    // Concurrency is set to 3, but both tasks belong to the SAME channel
+    let _consumer_handle = EngineOrchestrator::spawn_upload_consumer_with_concurrency(
+        Some(client),
+        event_tx,
+        upload_rx,
+        3,
+    );
+
+    let chunk_path1 = temp_dir.join("chunk_0000.ts");
+    let chunk_path2 = temp_dir.join("chunk_0001.ts");
+    fs::write(&chunk_path1, b"chunk0_video_data").unwrap();
+    fs::write(&chunk_path2, b"chunk1_video_data").unwrap();
+
+    upload_tx
+        .send(UploadTask {
+            channel_id: "chan_same".to_string(),
+            session_folder_id: "folder_same".to_string(),
+            chunk_path: chunk_path1.clone(),
+            chunk_name: "chunk_0000.ts".to_string(),
+            streamer_name: "SameStreamer".to_string(),
+        })
+        .await
+        .unwrap();
+
+    upload_tx
+        .send(UploadTask {
+            channel_id: "chan_same".to_string(),
+            session_folder_id: "folder_same".to_string(),
+            chunk_path: chunk_path2.clone(),
+            chunk_name: "chunk_0001.ts".to_string(),
+            streamer_name: "SameStreamer".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Check if task 2 was prematurely started while task 1 is in-flight.
+    // If it started, task2_unexpected_started_rx will receive a signal within 500ms.
+    let task2_started_prematurely = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        task2_unexpected_started_rx.recv(),
+    )
+    .await;
+
+    assert!(
+        task2_started_prematurely.is_err(),
+        "Task 2 for the same channel must NOT be uploaded concurrently while Task 1 is still in flight! Chunks of the same stream must be serialized to prevent upload speed slowdown and disk accumulation."
+    );
+
+    // Allow task 1 to finish
+    let _ = allow_task1_finish_tx.send(()).await;
+
+    // Both chunks should eventually complete in sequential order
+    let mut completed_chunks = Vec::new();
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv()).await
+    {
+        if let AppEvent::UploadCompleted { chunk_name, .. } = ev {
+            completed_chunks.push(chunk_name);
+            if completed_chunks.len() == 2 {
+                break;
+            }
+        }
+    }
+
+    assert_eq!(completed_chunks, vec!["chunk_0000.ts", "chunk_0001.ts"]);
+    assert!(
+        !chunk_path1.exists(),
+        "chunk 0 must be deleted after upload"
+    );
+    assert!(
+        !chunk_path2.exists(),
+        "chunk 1 must be deleted after upload"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

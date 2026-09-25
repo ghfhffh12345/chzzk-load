@@ -9,7 +9,8 @@ use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{UploadTask, UploadWorker};
 use chrono::Local;
-use std::collections::{HashMap, HashSet};
+use futures_util::FutureExt;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,86 +164,185 @@ impl EngineOrchestrator {
     ) -> tokio::task::JoinHandle<()> {
         let concurrency = concurrency.max(1);
         tokio::spawn(async move {
-            let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
-            let mut join_set = tokio::task::JoinSet::new();
+            let mut active_channels: HashSet<String> = HashSet::new();
+            let mut channel_queues: HashMap<String, VecDeque<UploadTask>> = HashMap::new();
+            let mut channel_order: VecDeque<String> = VecDeque::new();
+            let mut join_set: tokio::task::JoinSet<String> = tokio::task::JoinSet::new();
+            let mut rx_closed = false;
 
-            while let Some(task) = upload_rx.recv().await {
-                // Periodically reap completed tasks to keep memory bounded
-                while join_set.try_join_next().is_some() {}
+            loop {
+                // Periodically reap completed tasks
+                while let Some(res) = join_set.try_join_next() {
+                    if let Ok(finished_cid) = res {
+                        active_channels.remove(&finished_cid);
+                        if let Some(queue) = channel_queues.get(&finished_cid)
+                            && !queue.is_empty()
+                            && !channel_order.contains(&finished_cid)
+                        {
+                            channel_order.push_back(finished_cid);
+                        }
+                    }
+                }
 
-                let permit = match Arc::clone(&semaphore).acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => break,
-                };
+                if join_set.is_empty() {
+                    active_channels.clear();
+                }
 
-                let drive = drive_opt.clone();
-                let event_tx = event_tx.clone();
+                // Restore any pending channel into channel_order if missing
+                if channel_order.is_empty() && !channel_queues.is_empty() {
+                    for cid in channel_queues.keys() {
+                        channel_order.push_back(cid.clone());
+                    }
+                }
 
-                join_set.spawn(async move {
-                    let _permit = permit;
-                    if let Some(ref drive) = drive {
-                        let tx = event_tx.clone();
-                        let cid = task.channel_id.clone();
-                        let streamer = task.streamer_name.clone();
-                        let name = task.chunk_name.clone();
-                        let n = name.clone();
-                        let c = cid.clone();
-                        let s = streamer.clone();
-                        let chunk_start_time = std::time::Instant::now();
+                // Dispatch pending tasks for idle channels up to concurrency limit
+                while join_set.len() < concurrency && !channel_order.is_empty() {
+                    let mut dispatched = false;
+                    let len = channel_order.len();
+                    for _ in 0..len {
+                        let ch_id = channel_order.pop_front().unwrap();
+                        if !active_channels.contains(&ch_id) {
+                            if let Some(queue) = channel_queues.get_mut(&ch_id)
+                                && let Some(task) = queue.pop_front()
+                            {
+                                active_channels.insert(ch_id.clone());
+                                if !queue.is_empty() {
+                                    channel_order.push_back(ch_id.clone());
+                                } else {
+                                    channel_queues.remove(&ch_id);
+                                }
 
-                        let upload_res =
-                            UploadWorker::upload_and_delete(drive, task, move |uploaded, total| {
-                                let mb_s = (uploaded as f64 / 1_048_576.0)
-                                    / chunk_start_time.elapsed().as_secs_f64().max(0.1);
-                                let _ = tx.try_send(AppEvent::UploadProgress {
-                                    channel_id: c.clone(),
-                                    chunk_name: n.clone(),
-                                    streamer_name: s.clone(),
-                                    uploaded_bytes: uploaded,
-                                    total_bytes: total,
-                                    speed_mb_s: mb_s,
-                                });
-                            })
-                            .await;
+                                let drive = drive_opt.clone();
+                                let event_tx = event_tx.clone();
+                                let task_cid = ch_id.clone();
 
-                        match upload_res {
-                            Ok(reclaimed) => {
-                                let _ = event_tx
-                                    .send(AppEvent::UploadCompleted {
-                                        channel_id: cid.clone(),
-                                        chunk_name: name.clone(),
-                                        reclaimed_bytes: reclaimed,
-                                    })
-                                    .await;
-                                let _ = event_tx
-                                    .send(AppEvent::Log(LogEntry::clean(format!(
-                                        "Uploaded & deleted {} (reclaimed {:.1} MB)",
-                                        name,
-                                        reclaimed as f64 / 1_048_576.0
-                                    ))))
-                                    .await;
+                                join_set.spawn(async move {
+                                        let _ = std::panic::AssertUnwindSafe(async move {
+                                                if let Some(ref drive) = drive {
+                                                    let tx = event_tx.clone();
+                                                    let cid = task.channel_id.clone();
+                                                    let streamer = task.streamer_name.clone();
+                                                    let name = task.chunk_name.clone();
+                                                    let n = name.clone();
+                                                    let c = cid.clone();
+                                                    let s = streamer.clone();
+                                                    let chunk_start_time =
+                                                        std::time::Instant::now();
+
+                                                    let upload_res =
+                                                        UploadWorker::upload_and_delete(
+                                                            drive,
+                                                            task,
+                                                            move |uploaded, total| {
+                                                                let mb_s = (uploaded as f64
+                                                                    / 1_048_576.0)
+                                                                    / chunk_start_time
+                                                                        .elapsed()
+                                                                        .as_secs_f64()
+                                                                        .max(0.1);
+                                                                let _ = tx.try_send(
+                                                                    AppEvent::UploadProgress {
+                                                                        channel_id: c.clone(),
+                                                                        chunk_name: n.clone(),
+                                                                        streamer_name: s.clone(),
+                                                                        uploaded_bytes: uploaded,
+                                                                        total_bytes: total,
+                                                                        speed_mb_s: mb_s,
+                                                                    },
+                                                                );
+                                                            },
+                                                        )
+                                                        .await;
+
+                                                    match upload_res {
+                                                        Ok(reclaimed) => {
+                                                            let _ = event_tx
+                                                                .send(AppEvent::UploadCompleted {
+                                                                    channel_id: cid.clone(),
+                                                                    chunk_name: name.clone(),
+                                                                    reclaimed_bytes: reclaimed,
+                                                                })
+                                                                .await;
+                                                            let _ = event_tx
+                                                                .send(AppEvent::Log(
+                                                                    LogEntry::clean(format!(
+                                                                        "Uploaded & deleted {} (reclaimed {:.1} MB)",
+                                                                        name,
+                                                                        reclaimed as f64 / 1_048_576.0
+                                                                    )),
+                                                                ))
+                                                                .await;
+                                                        }
+                                                        Err(e) => {
+                                                            let _ = event_tx
+                                                                .send(AppEvent::UploadFailed {
+                                                                    channel_id: cid.clone(),
+                                                                    chunk_name: name.clone(),
+                                                                })
+                                                                .await;
+                                                            let _ = event_tx
+                                                                .send(AppEvent::Log(
+                                                                    LogEntry::error(format!(
+                                                                        "Upload failed for {}: {}",
+                                                                        name, e
+                                                                    )),
+                                                                ))
+                                                                .await;
+                                                        }
+                                                    }
+                                                }
+                                            })
+                                            .catch_unwind()
+                                            .await;
+                                        task_cid
+                                    });
+
+                                dispatched = true;
+                                break;
                             }
-                            Err(e) => {
-                                let _ = event_tx
-                                    .send(AppEvent::UploadFailed {
-                                        channel_id: cid.clone(),
-                                        chunk_name: name.clone(),
-                                    })
-                                    .await;
-                                let _ = event_tx
-                                    .send(AppEvent::Log(LogEntry::error(format!(
-                                        "Upload failed for {}: {}",
-                                        name, e
-                                    ))))
-                                    .await;
+                        } else {
+                            channel_order.push_back(ch_id);
+                        }
+                    }
+                    if !dispatched {
+                        break;
+                    }
+                }
+
+                // If upload receiver is closed and no uploads remain in-flight or queued, exit
+                if rx_closed && join_set.is_empty() && channel_queues.is_empty() {
+                    break;
+                }
+
+                tokio::select! {
+                    task_opt = upload_rx.recv(), if !rx_closed => {
+                        match task_opt {
+                            Some(task) => {
+                                let cid = task.channel_id.clone();
+                                let queue = channel_queues.entry(cid.clone()).or_default();
+                                queue.push_back(task);
+                                if !channel_order.contains(&cid) {
+                                    channel_order.push_back(cid);
+                                }
+                            }
+                            None => {
+                                rx_closed = true;
                             }
                         }
                     }
-                });
+                    res = join_set.join_next(), if !join_set.is_empty() => {
+                        if let Some(Ok(finished_cid)) = res {
+                            active_channels.remove(&finished_cid);
+                            if let Some(queue) = channel_queues.get(&finished_cid)
+                                && !queue.is_empty()
+                                && !channel_order.contains(&finished_cid)
+                            {
+                                channel_order.push_back(finished_cid);
+                            }
+                        }
+                    }
+                }
             }
-
-            // Drain remaining uploads on shutdown
-            while join_set.join_next().await.is_some() {}
         })
     }
 
