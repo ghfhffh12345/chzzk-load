@@ -134,6 +134,19 @@ fn test_build_ffmpeg_command() {
         .position(|a| a == "-headers")
         .expect("missing -headers");
     assert!(args[headers_idx + 1].contains("Cookie: NID_AUT=abc; NID_SES=xyz"));
+
+    let reconnect_idx = args
+        .iter()
+        .position(|a| a == "-reconnect")
+        .expect("missing -reconnect flag");
+    let i_idx = args.iter().position(|a| a == "-i").expect("missing -i");
+    assert!(
+        reconnect_idx < i_idx,
+        "-reconnect must precede -i for FFmpeg input options"
+    );
+    assert!(args.contains(&"-reconnect_at_eof".to_string()));
+    assert!(args.contains(&"-reconnect_streamed".to_string()));
+    assert!(args.contains(&"-reconnect_delay_max".to_string()));
 }
 
 #[test]
