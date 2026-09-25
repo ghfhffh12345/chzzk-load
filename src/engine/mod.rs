@@ -1,4 +1,5 @@
 use crate::app_path::resolve_path;
+use crate::chzzk::chat::ChzzkChatClient;
 use crate::chzzk::client::ChzzkClient;
 use crate::chzzk::models::LiveStreamInfo;
 use crate::config::Settings;
@@ -485,6 +486,102 @@ impl EngineOrchestrator {
 
             // Drive folder is created lazily in process_sealed_chunk when the first valid chunk is sealed
             let mut session_folder_id: Option<String> = None;
+            let session_cancel = cancel_token.child_token();
+
+            let chat_session_cancel = session_cancel.clone();
+            let chat_task = if settings.general.record_chat {
+                if let Some(chat_cid) = info.chat_channel_id.clone() {
+                    let chzzk_chat = chzzk.clone();
+                    let event_tx_chat = event_tx.clone();
+                    let chat_cid_id = channel_id.clone();
+                    let chat_target_path = session_dir.join("chat.jsonl");
+                    let flush_sec = settings.general.chat_flush_interval_seconds;
+
+                    Some(tokio::spawn(async move {
+                        let access_token = tokio::select! {
+                            _ = chat_session_cancel.cancelled() => return,
+                            res = chzzk_chat.get_chat_access_token(&chat_cid) => match res {
+                                Ok(t) => {
+                                    let _ = event_tx_chat
+                                        .send(AppEvent::Log(LogEntry::chat(format!(
+                                            "Retrieved chat access token for channel {}",
+                                            chat_cid_id
+                                        ))))
+                                        .await;
+                                    t
+                                }
+                                Err(e) => {
+                                    let _ = event_tx_chat
+                                        .send(AppEvent::Log(LogEntry::warn(format!(
+                                            "Failed to retrieve chat access token for channel {}: {}",
+                                            chat_cid_id, e
+                                        ))))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        };
+
+                        if chat_session_cancel.is_cancelled() {
+                            return;
+                        }
+
+                        let (stats_tx, mut stats_rx) = tokio::sync::mpsc::channel::<u64>(50);
+                        let forward_cid = chat_cid_id.clone();
+                        let forward_tx = event_tx_chat.clone();
+                        let forward_handle = tokio::spawn(async move {
+                            while let Some(count) = stats_rx.recv().await {
+                                let _ = forward_tx
+                                    .send(AppEvent::ChatStats {
+                                        channel_id: forward_cid.clone(),
+                                        message_count: count,
+                                    })
+                                    .await;
+                            }
+                        });
+
+                        let client = ChzzkChatClient::new(
+                            chat_cid,
+                            access_token,
+                            chat_target_path,
+                            Duration::from_secs(flush_sec),
+                            chat_session_cancel,
+                        );
+
+                        let _ = event_tx_chat
+                            .send(AppEvent::Log(LogEntry::chat(format!(
+                                "Started real-time chat recording for channel {}",
+                                chat_cid_id
+                            ))))
+                            .await;
+
+                        match client.run(Some(stats_tx)).await {
+                            Ok(total_msgs) => {
+                                let _ = event_tx_chat
+                                    .send(AppEvent::Log(LogEntry::chat(format!(
+                                        "Chat recording finished for channel {} ({} messages)",
+                                        chat_cid_id, total_msgs
+                                    ))))
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = event_tx_chat
+                                    .send(AppEvent::Log(LogEntry::warn(format!(
+                                        "Chat recording error for channel {}: {}",
+                                        chat_cid_id, e
+                                    ))))
+                                    .await;
+                            }
+                        }
+
+                        let _ = forward_handle.await;
+                    }))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let output_pattern = session_dir.join("chunk_%04d.ts");
             let chunk_dur = settings.general.chunk_duration_seconds;
@@ -524,6 +621,10 @@ impl EngineOrchestrator {
                             e
                         ))))
                         .await;
+                    session_cancel.cancel();
+                    if let Some(chat_handle) = chat_task {
+                        let _ = tokio::time::timeout(Duration::from_secs(5), chat_handle).await;
+                    }
                     let mut active = active_recordings.lock().await;
                     active.remove(&channel_id);
                     let mut sessions = active_sessions.lock().await;
@@ -724,6 +825,90 @@ impl EngineOrchestrator {
 
                         if is_finished {
                             break;
+                        }
+                    }
+                }
+            }
+
+            session_cancel.cancel();
+            if let Some(chat_handle) = chat_task {
+                let _ = tokio::time::timeout(Duration::from_secs(5), chat_handle).await;
+            }
+
+            let chat_path = session_dir.join("chat.jsonl");
+            if chat_path.exists()
+                && let Some(ref drive) = drive_opt
+            {
+                if session_folder_id.is_none() {
+                    let current_subfolder_name = {
+                        let sessions = active_sessions.lock().await;
+                        sessions
+                            .get(&channel_id)
+                            .map(|s| s.folder_name())
+                            .unwrap_or_else(|| {
+                                ActiveSessionState {
+                                    start_timestamp: start_timestamp.clone(),
+                                    streamer_name: info.streamer_name.clone(),
+                                    current_title: info.title.clone(),
+                                    session_folder_id: None,
+                                    title_history: vec![],
+                                    title_history_file_id: None,
+                                }
+                                .folder_name()
+                            })
+                    };
+                    session_folder_id = Self::ensure_session_folder(
+                        drive,
+                        &root_name,
+                        &current_subfolder_name,
+                        &event_tx,
+                    )
+                    .await;
+                }
+
+                if let Some(ref fid) = session_folder_id {
+                    {
+                        let mut sessions = active_sessions.lock().await;
+                        if let Some(s) = sessions.get_mut(&channel_id) {
+                            s.session_folder_id = session_folder_id.clone();
+                            if s.title_history_file_id.is_none() {
+                                let history_text = s.format_title_history();
+                                if let Ok(file_id) = drive
+                                    .upload_text_file(fid, "title_history.txt", &history_text, None)
+                                    .await
+                                {
+                                    s.title_history_file_id = Some(file_id);
+                                    let _ = event_tx
+                                            .send(AppEvent::Log(LogEntry::drive(format!(
+                                                "Initialized 'title_history.txt' in Drive folder for {}",
+                                                channel_id
+                                            ))))
+                                            .await;
+                                }
+                            }
+                        }
+                    }
+
+                    match drive
+                        .upload_file_resumable(&chat_path, fid, |_, _| {})
+                        .await
+                    {
+                        Ok(_) => {
+                            let _ = tokio::fs::remove_file(&chat_path).await;
+                            let _ = event_tx
+                                .send(AppEvent::Log(LogEntry::drive(format!(
+                                    "Uploaded 'chat.jsonl' for {}",
+                                    channel_id
+                                ))))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(AppEvent::Log(LogEntry::warn(format!(
+                                    "Failed to upload 'chat.jsonl' for {}: {}",
+                                    channel_id, e
+                                ))))
+                                .await;
                         }
                     }
                 }
