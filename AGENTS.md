@@ -154,7 +154,7 @@ The repository uses GitHub Actions for continuous integration and automated mult
 1. **Continuous Integration (`.github/workflows/ci.yml`)**:
    - Triggers automatically on pushes and pull requests targeting the `main` branch.
    - **`lint` job**: Runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on `ubuntu-latest`.
-   - **`test` job**: Matrix build running `cargo test --all-targets` across `ubuntu-latest` and `windows-latest`. Installs FFmpeg via `FedericoCarboni/setup-ffmpeg@v3` with `github-token: ${{ secrets.GITHUB_TOKEN }}` to guarantee FFmpeg availability across all runner OSes.
+   - **`test` job**: Matrix build running `cargo test --all-targets` across `ubuntu-latest` and `windows-latest`. Installs FFmpeg via apt (`ubuntu-latest`) and `FedericoCarboni/setup-ffmpeg@v3` (`windows-latest`) to guarantee reliable FFmpeg availability across all runner OSes.
    - **`npm-test` job**: Sets up Node.js 20 on `ubuntu-latest` and executes `node scripts/test-npm-packages.js` to verify npm package generation, platform resolution, and launcher mechanics.
 
 2. **Automated Multi-Platform Release Pipeline (`.github/workflows/release.yml`)**:

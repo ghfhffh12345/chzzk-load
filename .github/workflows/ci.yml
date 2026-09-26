@@ -39,7 +39,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up FFmpeg
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Set up FFmpeg (Windows)
+        if: runner.os == 'Windows'
         uses: FedericoCarboni/setup-ffmpeg@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
