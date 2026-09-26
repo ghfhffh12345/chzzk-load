@@ -7,6 +7,100 @@ use crate::config::ChzzkConfig;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+
+use crate::chzzk::models::EncodingTrack;
+
+fn percent_decode(input: &str) -> String {
+    let mut bytes = Vec::with_capacity(input.len());
+    let input_bytes = input.as_bytes();
+    let mut i = 0;
+    while i < input_bytes.len() {
+        if input_bytes[i] == b'%'
+            && i + 2 < input_bytes.len()
+            && let Ok(val) = u8::from_str_radix(
+                std::str::from_utf8(&input_bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            )
+        {
+            bytes.push(val);
+            i += 3;
+            continue;
+        }
+        bytes.push(input_bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| input.to_string())
+}
+
+fn decode_base64_url(encoded: &str) -> Option<String> {
+    let trimmed = encoded.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let decoded_bytes = STANDARD
+        .decode(trimmed)
+        .or_else(|_| STANDARD_NO_PAD.decode(trimmed))
+        .or_else(|_| URL_SAFE.decode(trimmed))
+        .or_else(|_| URL_SAFE_NO_PAD.decode(trimmed))
+        .ok()?;
+
+    let decoded_str = String::from_utf8(decoded_bytes).ok()?;
+    let url = decoded_str.trim();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+pub fn extract_cdn_url(s: &str) -> Option<String> {
+    let lower = s.to_ascii_lowercase();
+    let val_start = if let Some(idx) = lower.find("cdn_url=") {
+        idx + "cdn_url=".len()
+    } else {
+        let idx = lower.find("cdn_url%3d")?;
+        idx + "cdn_url%3d".len()
+    };
+
+    let remainder = &s[val_start..];
+    let raw_val = if let Some(end) = remainder.find('&') {
+        &remainder[..end]
+    } else if let Some(end) = remainder.to_ascii_lowercase().find("%26") {
+        &remainder[..end]
+    } else {
+        remainder
+    };
+
+    let unescaped = percent_decode(raw_val);
+    decode_base64_url(&unescaped)
+}
+
+fn extract_track_url(track: &EncodingTrack) -> Option<String> {
+    if let Some(p) = &track.path {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(p2p) = &track.p2p_path
+        && let Some(url) = extract_cdn_url(p2p)
+    {
+        return Some(url);
+    }
+
+    if let Some(p2p_enc) = &track.p2p_path_url_encoding
+        && let Some(url) = extract_cdn_url(p2p_enc)
+    {
+        return Some(url);
+    }
+
+    None
+}
+
 pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String> {
     let json_str = playback_json_str
         .as_ref()
@@ -25,15 +119,14 @@ pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String
     let mut best_other_video = None;
 
     for track in &hls_media.encoding_track {
-        if let Some(path) = &track.path {
-            if track.encoding_track_id.contains("1080") && best_1080.is_none() {
-                best_1080 = Some(path.clone());
-            } else if track.encoding_track_id.contains("720") && best_720.is_none() {
-                best_720 = Some(path.clone());
-            } else if !track.encoding_track_id.eq_ignore_ascii_case("audioOnly")
-                && best_other_video.is_none()
-            {
-                best_other_video = Some(path.clone());
+        if let Some(track_url) = extract_track_url(track) {
+            let id = &track.encoding_track_id;
+            if id.contains("1080") && best_1080.is_none() {
+                best_1080 = Some(track_url);
+            } else if id.contains("720") && best_720.is_none() {
+                best_720 = Some(track_url);
+            } else if !id.eq_ignore_ascii_case("audioOnly") && best_other_video.is_none() {
+                best_other_video = Some(track_url);
             }
         }
     }
@@ -46,6 +139,17 @@ pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String
     }
     if let Some(path) = best_other_video {
         return Ok(path);
+    }
+
+    if let Some(p2p) = &hls_media.p2p_path
+        && let Some(url) = extract_cdn_url(p2p)
+    {
+        return Ok(url);
+    }
+    if let Some(p2p_enc) = &hls_media.p2p_path_url_encoding
+        && let Some(url) = extract_cdn_url(p2p_enc)
+    {
+        return Ok(url);
     }
 
     Ok(hls_media.path.clone())

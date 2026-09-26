@@ -70,6 +70,10 @@ pub struct MediaEntry {
     pub media_id: String,
     pub path: String,
     #[serde(default)]
+    pub p2p_path: Option<String>,
+    #[serde(default)]
+    pub p2p_path_url_encoding: Option<String>,
+    #[serde(default)]
     pub encoding_track: Vec<EncodingTrack>,
 }
 
@@ -79,6 +83,10 @@ pub struct EncodingTrack {
     pub encoding_track_id: String,
     #[serde(default)]
     pub path: Option<String>,
+    #[serde(default)]
+    pub p2p_path: Option<String>,
+    #[serde(default)]
+    pub p2p_path_url_encoding: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
