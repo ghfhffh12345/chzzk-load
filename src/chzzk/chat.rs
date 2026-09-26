@@ -17,6 +17,9 @@ pub const CMD_DONATION: u32 = 93102;
 pub const CMD_SUBSCRIPTION: u32 = 93103;
 pub const CMD_BLIND: u32 = 94008;
 
+pub const PING_PAYLOAD: &str = r#"{"cmd":0,"ver":"2"}"#;
+pub const PONG_PAYLOAD: &str = r#"{"cmd":10000,"ver":"2"}"#;
+
 /// Computes the Chzzk WebSocket server ID (1..=9) from the chat channel ID.
 ///
 /// Uses the sum of byte values mod 9 + 1.
@@ -34,24 +37,30 @@ pub fn build_ws_url(server_id: u32) -> String {
 ///
 /// Extracts timestamps, user nicknames, badges, donation amounts, and raw payloads.
 pub fn parse_chat_packet(json: &serde_json::Value) -> Vec<RecordedChatMessage> {
-    let cmd = extract_cmd(json).unwrap_or(0);
-    let items: &[serde_json::Value] = match json.get("bdy") {
-        Some(serde_json::Value::Array(arr)) => arr.as_slice(),
+    parse_chat_packet_owned(json.clone())
+}
+
+/// Parses an owned Chzzk chat packet into a list of `RecordedChatMessage` entries,
+/// moving raw message JSON directly into each `RecordedChatMessage` to eliminate heap cloning.
+pub fn parse_chat_packet_owned(mut json: serde_json::Value) -> Vec<RecordedChatMessage> {
+    let cmd = extract_cmd(&json).unwrap_or(0);
+    let items: Vec<serde_json::Value> = match json.get_mut("bdy").map(serde_json::Value::take) {
+        Some(serde_json::Value::Array(arr)) => arr,
         _ => {
-            if let Some(arr) = json.as_array() {
-                arr.as_slice()
+            if let serde_json::Value::Array(arr) = json {
+                arr
             } else if json.is_object()
                 && (json.get("msg").is_some() || json.get("msgTime").is_some())
             {
-                std::slice::from_ref(json)
+                vec![json]
             } else {
-                &[]
+                Vec::new()
             }
         }
     };
 
     let mut results = Vec::with_capacity(items.len());
-    for item in items {
+    for mut item in items {
         let time_ms = item
             .get("msgTime")
             .and_then(|v| v.as_u64())
@@ -105,15 +114,13 @@ pub fn parse_chat_packet(json: &serde_json::Value) -> Vec<RecordedChatMessage> {
             user_id_hash = Some(hash.to_string());
         }
 
-        let extras = item.get("extras").and_then(|ext| {
-            if let Some(s) = ext.as_str() {
-                serde_json::from_str::<serde_json::Value>(s).ok()
-            } else if ext.is_object() || ext.is_array() {
-                Some(ext.clone())
-            } else {
-                None
+        let extras = match item.get_mut("extras").map(serde_json::Value::take) {
+            Some(serde_json::Value::String(s)) => {
+                serde_json::from_str::<serde_json::Value>(&s).ok()
             }
-        });
+            Some(val @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => Some(val),
+            _ => None,
+        };
 
         let donation_amount = item
             .get("payAmount")
@@ -157,7 +164,7 @@ pub fn parse_chat_packet(json: &serde_json::Value) -> Vec<RecordedChatMessage> {
             content,
             donation_amount,
             extras,
-            raw: item.clone(),
+            raw: item,
         });
     }
 
@@ -376,11 +383,7 @@ impl ChzzkChatClient {
                         break 'outer;
                     }
                     _ = ping_interval.tick() => {
-                        let ping_msg = serde_json::json!({
-                            "cmd": CMD_PING,
-                            "ver": "2",
-                        });
-                        if ws_sink.send(Message::Text(ping_msg.to_string().into())).await.is_err() {
+                        if ws_sink.send(Message::Text(PING_PAYLOAD.into())).await.is_err() {
                             break 'session;
                         }
                     }
@@ -394,16 +397,12 @@ impl ChzzkChatClient {
                                     let cmd = extract_cmd(&val).unwrap_or(0);
                                     match cmd {
                                         CMD_PING => {
-                                            let pong_msg = serde_json::json!({
-                                                "cmd": CMD_PONG,
-                                                "ver": "2",
-                                            });
-                                            if ws_sink.send(Message::Text(pong_msg.to_string().into())).await.is_err() {
+                                            if ws_sink.send(Message::Text(PONG_PAYLOAD.into())).await.is_err() {
                                                 break 'session;
                                             }
                                         }
                                         CMD_CHAT | CMD_DONATION | CMD_SUBSCRIPTION => {
-                                            let msgs = parse_chat_packet(&val);
+                                            let msgs = parse_chat_packet_owned(val);
                                             if !msgs.is_empty() {
                                                 for m in msgs {
                                                     writer.push(m).await.context("Failed to write chat message")?;
