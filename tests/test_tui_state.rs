@@ -119,7 +119,7 @@ fn test_app_log_fifo_cap() {
     let mut app = App::new();
 
     for i in 0..250 {
-        app.handle_event(AppEvent::Log(LogEntry::info(format!("Log message {}", i))));
+        app.handle_event(AppEvent::Log(LogEntry::info(format!("Log message {i}"))));
     }
 
     assert_eq!(app.logs.len(), 200);
@@ -313,8 +313,7 @@ fn test_logs_strictly_bounded_and_clipping() {
         for i in 0..100 {
             if i % 10 == 0 {
                 app.logs.push_back(LogEntry::from(format!(
-                    "[ERROR] Line {} with\nnewline 1\nnewline 2\nnewline 3",
-                    i
+                    "[ERROR] Line {i} with\nnewline 1\nnewline 2\nnewline 3"
                 )));
             } else if i % 5 == 0 {
                 app.logs.push_back(LogEntry::from(format!(
@@ -324,7 +323,7 @@ fn test_logs_strictly_bounded_and_clipping() {
                 )));
             } else {
                 app.logs
-                    .push_back(LogEntry::from(format!("[INFO] Regular log {}", i)));
+                    .push_back(LogEntry::from(format!("[INFO] Regular log {i}")));
             }
         }
 
@@ -341,9 +340,7 @@ fn test_logs_strictly_bounded_and_clipping() {
             .collect();
         assert!(
             last_line.contains("q Quit"),
-            "Footer missing on {}x{}",
-            width,
-            height
+            "Footer missing on {width}x{height}"
         );
         assert!(!last_line.contains("[q]"));
 
@@ -351,17 +348,13 @@ fn test_logs_strictly_bounded_and_clipping() {
         let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
         assert!(
             content.contains("Live Activity Logs"),
-            "Logs title missing on {}x{}",
-            width,
-            height
+            "Logs title missing on {width}x{height}"
         );
 
         // Verify that latest log (e.g. 99) is visible in tail mode
         assert!(
             content.contains("Regular log 99"),
-            "Latest log not visible on {}x{}",
-            width,
-            height
+            "Latest log not visible on {width}x{height}"
         );
     }
 }
@@ -371,7 +364,7 @@ fn test_logs_autoscroll_and_pageup_down() {
     let mut app = App::new();
     for i in 0..50 {
         app.logs
-            .push_back(LogEntry::from(format!("[INFO] Entry {}", i)));
+            .push_back(LogEntry::from(format!("[INFO] Entry {i}")));
     }
     assert_eq!(app.log_scroll, 0);
 
@@ -475,11 +468,11 @@ fn test_channel_synchronized_scrolling() {
     let mut app = App::new();
     for i in 0..12 {
         app.channels.push(chzzk_load::tui::app::ChannelItem {
-            id: format!("ch_{}", i),
-            name: format!("Streamer {}", i),
+            id: format!("ch_{i}"),
+            name: format!("Streamer {i}"),
             is_live: true,
             is_active: false,
-            title: format!("Title {}", i),
+            title: format!("Title {i}"),
             chat_count: 0,
         });
     }
@@ -922,11 +915,11 @@ fn test_l_key_toggles_logs_and_expands_body() {
     let mut app = App::new();
     for i in 0..15 {
         app.channels.push(chzzk_load::tui::app::ChannelItem {
-            id: format!("c{}", i),
-            name: format!("Streamer{:02}", i),
+            id: format!("c{i}"),
+            name: format!("Streamer{i:02}"),
             is_live: true,
             is_active: false,
-            title: format!("Title {:02}", i),
+            title: format!("Title {i:02}"),
             chat_count: 0,
         });
     }
@@ -1000,11 +993,11 @@ fn test_no_underline_on_channels_and_direct_view_scrolling() {
     let mut app = App::new();
     for i in 0..10 {
         app.channels.push(chzzk_load::tui::app::ChannelItem {
-            id: format!("c{}", i),
-            name: format!("Streamer{:02}", i),
+            id: format!("c{i}"),
+            name: format!("Streamer{i:02}"),
             is_live: true,
             is_active: false,
-            title: format!("Title {:02}", i),
+            title: format!("Title {i:02}"),
             chat_count: 0,
         });
     }
@@ -1018,9 +1011,7 @@ fn test_no_underline_on_channels_and_direct_view_scrolling() {
             let cell = buffer.cell((x, y)).unwrap();
             assert!(
                 !cell.modifier.contains(Modifier::UNDERLINED),
-                "No cell should be UNDERLINED (found at ({}, {}))",
-                x,
-                y
+                "No cell should be UNDERLINED (found at ({x}, {y}))"
             );
         }
     }
@@ -1122,8 +1113,8 @@ fn test_log_kind_badge_and_style_mappings() {
 
     for (kind, expected_badge, expected_style) in cases {
         let (badge, style) = log_kind_badge_and_style(kind);
-        assert_eq!(badge, expected_badge, "Badge mismatch for {:?}", kind);
-        assert_eq!(style, expected_style, "Style mismatch for {:?}", kind);
+        assert_eq!(badge, expected_badge, "Badge mismatch for {kind:?}");
+        assert_eq!(style, expected_style, "Style mismatch for {kind:?}");
     }
 }
 
@@ -1385,9 +1376,7 @@ fn test_draw_ui_dividers_render_correctly_on_various_widths() {
             assert_eq!(
                 cell.symbol(),
                 "─",
-                "Header divider at x={} on width={} should be '─'",
-                x,
-                width
+                "Header divider at x={x} on width={width} should be '─'"
             );
             assert_eq!(
                 cell.fg,

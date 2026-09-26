@@ -57,8 +57,7 @@ fn test_cli_version_flag() {
     let expected = format!("chzzk-load {}", env!("CARGO_PKG_VERSION"));
     assert!(
         stdout.contains(&expected),
-        "Version output should match package version: {}",
-        stdout
+        "Version output should match package version: {stdout}"
     );
 }
 
@@ -75,8 +74,7 @@ fn test_cli_short_version_flag() {
     let expected = format!("chzzk-load {}", env!("CARGO_PKG_VERSION"));
     assert!(
         stdout.contains(&expected),
-        "Short version output should match package version: {}",
-        stdout
+        "Short version output should match package version: {stdout}"
     );
 }
 
@@ -95,7 +93,6 @@ fn test_cli_invalid_argument() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("unexpected argument") || stderr.contains("error:"),
-        "Stderr should indicate unrecognized argument: {}",
-        stderr
+        "Stderr should indicate unrecognized argument: {stderr}"
     );
 }

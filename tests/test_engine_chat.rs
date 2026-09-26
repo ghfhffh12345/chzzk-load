@@ -57,7 +57,7 @@ async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
 async fn spawn_mock_chat_ws_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let ws_url = format!("ws://{}", addr);
+    let ws_url = format!("ws://{addr}");
 
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
@@ -133,7 +133,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     }];
 
     let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_game_base_url(format!("http://127.0.0.1:{}", port))
+        .with_game_base_url(format!("http://127.0.0.1:{port}"))
         .with_chat_ws_url(ws_url);
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
@@ -247,7 +247,7 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
     }];
 
     let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_game_base_url(format!("http://127.0.0.1:{}", port));
+        ChzzkClient::new(&settings.chzzk).with_game_base_url(format!("http://127.0.0.1:{port}"));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -326,7 +326,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
     settings.general.record_chat = true;
 
     let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_game_base_url(format!("http://127.0.0.1:{}", port))
+        .with_game_base_url(format!("http://127.0.0.1:{port}"))
         .with_chat_ws_url(ws_url);
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
@@ -452,7 +452,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
                 // Resumable upload init for chat.jsonl
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
-                let session_url = format!("http://127.0.0.1:{}/resumable_chat_session", drive_port);
+                let session_url = format!("http://127.0.0.1:{drive_port}/resumable_chat_session");
                 let resp = Response::empty(200).with_header(
                     Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
                 );
@@ -491,8 +491,8 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", drive_port),
-        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{drive_port}"),
+        format!("http://127.0.0.1:{drive_port}"),
     );
 
     let mut settings = Settings::default();
@@ -501,7 +501,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
     settings.google_drive.root_folder_name = "chzzk_records".to_string();
 
     let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_game_base_url(format!("http://127.0.0.1:{}", chzzk_port))
+        .with_game_base_url(format!("http://127.0.0.1:{chzzk_port}"))
         .with_chat_ws_url(ws_url);
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);

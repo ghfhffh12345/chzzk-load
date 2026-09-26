@@ -131,20 +131,18 @@ async fn test_get_live_detail_api_error_envelope() {
 
     let config = chzzk_load::config::ChzzkConfig::default();
     let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
-        .with_base_url(format!("http://127.0.0.1:{}", port));
+        .with_base_url(format!("http://127.0.0.1:{port}"));
 
     let result = client.get_live_detail("test_chan").await;
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("404"),
-        "error message should contain code 404: {}",
-        err_msg
+        "error message should contain code 404: {err_msg}"
     );
     assert!(
         err_msg.contains("Channel not found"),
-        "error message should contain API message: {}",
-        err_msg
+        "error message should contain API message: {err_msg}"
     );
 }
 
@@ -178,7 +176,7 @@ async fn test_get_live_detail_success() {
 
     let config = chzzk_load::config::ChzzkConfig::default();
     let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
-        .with_base_url(format!("http://127.0.0.1:{}", port));
+        .with_base_url(format!("http://127.0.0.1:{port}"));
 
     let stream_info = client
         .get_live_detail("chan123")
@@ -263,7 +261,7 @@ fn test_parse_live_detail_with_numeric_and_string_live_id() {
 async fn test_get_chat_access_token_success() {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
-    let base_url = format!("http://127.0.0.1:{}", port);
+    let base_url = format!("http://127.0.0.1:{port}");
 
     let server_handle = tokio::task::spawn_blocking(move || {
         let req = server.recv().unwrap();
@@ -346,7 +344,7 @@ async fn test_get_live_detail_with_chat_channel_id() {
     });
 
     let config = ChzzkConfig::default();
-    let client = ChzzkClient::new(&config).with_base_url(format!("http://127.0.0.1:{}", port));
+    let client = ChzzkClient::new(&config).with_base_url(format!("http://127.0.0.1:{port}"));
 
     let stream_info = client
         .get_live_detail("chan123")
@@ -360,7 +358,7 @@ async fn test_get_live_detail_with_chat_channel_id() {
 async fn test_get_chat_access_token_api_error() {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
-    let base_url = format!("http://127.0.0.1:{}", port);
+    let base_url = format!("http://127.0.0.1:{port}");
 
     let server_handle = tokio::task::spawn_blocking(move || {
         let req = server.recv().unwrap();
@@ -418,22 +416,17 @@ fn test_extract_best_hls_url_from_p2p_path_cdn_url() {
     let b64_1080 = STANDARD.encode(raw_1080_url);
     let b64_720 = STANDARD.encode(raw_720_url);
 
-    let p2p_1080 = format!(
-        "/chzzk/live_1080p.m3u8?channel_id=123_1080p&cdn_url={}&timemachine=false",
-        b64_1080
-    );
-    let p2p_720 = format!(
-        "/chzzk/live_720p.m3u8?channel_id=123_720p&cdn_url={}&timemachine=false",
-        b64_720
-    );
+    let p2p_1080 =
+        format!("/chzzk/live_1080p.m3u8?channel_id=123_1080p&cdn_url={b64_1080}&timemachine=false");
+    let p2p_720 =
+        format!("/chzzk/live_720p.m3u8?channel_id=123_720p&cdn_url={b64_720}&timemachine=false");
 
     let json = format!(
         r#"{{"media":[{{"mediaId":"HLS","path":"https://live.chzzk.naver.com/master.m3u8","encodingTrack":[
-            {{"encodingTrackId":"720p","path":null,"p2pPath":"{}"}},
-            {{"encodingTrackId":"1080p","path":null,"p2pPath":"{}"}},
+            {{"encodingTrackId":"720p","path":null,"p2pPath":"{p2p_720}"}},
+            {{"encodingTrackId":"1080p","path":null,"p2pPath":"{p2p_1080}"}},
             {{"encodingTrackId":"audioOnly","path":"https://live.chzzk.naver.com/audio.m3u8"}}
-        ]}}]}}"#,
-        p2p_720, p2p_1080
+        ]}}]}}"#
     );
 
     let hls_url = extract_best_hls_url(&Some(json)).unwrap();
@@ -455,9 +448,8 @@ fn test_extract_best_hls_url_from_p2p_path_url_encoding() {
 
     let json = format!(
         r#"{{"media":[{{"mediaId":"HLS","path":"https://live.chzzk.naver.com/master.m3u8","encodingTrack":[
-            {{"encodingTrackId":"1080p","path":null,"p2pPathUrlEncoding":"{}"}}
-        ]}}]}}"#,
-        p2p_enc
+            {{"encodingTrackId":"1080p","path":null,"p2pPathUrlEncoding":"{p2p_enc}"}}
+        ]}}]}}"#
     );
 
     let hls_url = extract_best_hls_url(&Some(json)).unwrap();
@@ -472,17 +464,14 @@ fn test_extract_best_hls_url_prefers_p2p_720p_when_1080p_absent() {
     let raw_720_url =
         "https://nvelop-livecloud.pstatic.net/chzzk/720p_playlist.m3u8?hdnts=token720";
     let b64_720 = STANDARD.encode(raw_720_url);
-    let p2p_720 = format!(
-        "/chzzk/live_720p.m3u8?channel_id=123_720p&cdn_url={}&timemachine=false",
-        b64_720
-    );
+    let p2p_720 =
+        format!("/chzzk/live_720p.m3u8?channel_id=123_720p&cdn_url={b64_720}&timemachine=false");
 
     let json = format!(
         r#"{{"media":[{{"mediaId":"HLS","path":"https://live.chzzk.naver.com/master.m3u8","encodingTrack":[
             {{"encodingTrackId":"480p","path":null}},
-            {{"encodingTrackId":"720p","path":null,"p2pPath":"{}"}}
-        ]}}]}}"#,
-        p2p_720
+            {{"encodingTrackId":"720p","path":null,"p2pPath":"{p2p_720}"}}
+        ]}}]}}"#
     );
 
     let hls_url = extract_best_hls_url(&Some(json)).unwrap();

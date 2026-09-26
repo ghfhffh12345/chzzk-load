@@ -83,8 +83,8 @@ async fn test_get_or_create_folder_existing() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -138,8 +138,8 @@ async fn test_get_or_create_folder_with_quotes() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -155,8 +155,7 @@ async fn test_get_or_create_folder_with_quotes() {
             let q = q_param.unwrap();
             assert!(
                 q.contains("name = 'Streamer\\'s Stream'"),
-                "Query q should contain escaped single quote: {}",
-                q
+                "Query q should contain escaped single quote: {q}"
             );
 
             let mock_response = serde_json::json!({
@@ -193,8 +192,8 @@ async fn test_get_or_create_folder_creates_new() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -249,8 +248,8 @@ async fn test_rename_folder_success() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -311,8 +310,8 @@ async fn test_rename_folder_error() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -348,8 +347,8 @@ async fn test_upload_file_resumable_success() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -380,7 +379,7 @@ async fn test_upload_file_resumable_success() {
             assert_eq!(parsed["name"], "chunk_0000.ts");
             assert_eq!(parsed["parents"][0], "folder_target_55");
 
-            let upload_url = format!("http://127.0.0.1:{}/resumable_upload_target_session", port);
+            let upload_url = format!("http://127.0.0.1:{port}/resumable_upload_target_session");
             let response = Response::empty(200)
                 .with_header(Header::from_bytes(&b"Location"[..], upload_url.as_bytes()).unwrap());
             let _ = request.respond(response);
@@ -469,14 +468,14 @@ async fn test_upload_file_resumable_retries_transient_error_and_succeeds() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
         // 1. Resumable Init POST
         if let Ok(request) = server.recv() {
-            let upload_url = format!("http://127.0.0.1:{}/retry_session", port);
+            let upload_url = format!("http://127.0.0.1:{port}/retry_session");
             let response = Response::empty(200)
                 .with_header(Header::from_bytes(&b"Location"[..], upload_url.as_bytes()).unwrap());
             let _ = request.respond(response);
@@ -531,14 +530,14 @@ async fn test_upload_worker_upload_and_delete_success() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
         // Init
         if let Ok(request) = server.recv() {
-            let upload_url = format!("http://127.0.0.1:{}/session_delete", port);
+            let upload_url = format!("http://127.0.0.1:{port}/session_delete");
             let response = Response::empty(200)
                 .with_header(Header::from_bytes(&b"Location"[..], upload_url.as_bytes()).unwrap());
             let _ = request.respond(response);
@@ -595,8 +594,8 @@ async fn test_upload_worker_preserves_file_on_upload_failure() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -644,8 +643,8 @@ async fn test_upload_text_file_create_new() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -733,8 +732,8 @@ async fn test_upload_text_file_update_existing() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -800,8 +799,8 @@ async fn test_drive_client_root_folder_cached_concurrent() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     let get_requests_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -853,8 +852,7 @@ async fn test_drive_client_root_folder_cached_concurrent() {
     let calls = get_requests_count.load(Ordering::SeqCst);
     assert!(
         calls < 4,
-        "Root folder queries must be cached to prevent redundant API calls: expected < 4, got {}",
-        calls
+        "Root folder queries must be cached to prevent redundant API calls: expected < 4, got {calls}"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -871,8 +869,8 @@ async fn test_drive_client_retries_on_429_too_many_requests() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {

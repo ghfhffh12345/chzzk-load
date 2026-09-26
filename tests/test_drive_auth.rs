@@ -126,7 +126,7 @@ async fn test_refresh_expired_token() {
 
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
-    let token_uri = format!("http://127.0.0.1:{}/token", port);
+    let token_uri = format!("http://127.0.0.1:{port}/token");
 
     let cred_path = temp_dir.join("mock_credentials.json");
     let token_path = temp_dir.join("mock_token.json");
@@ -136,11 +136,10 @@ async fn test_refresh_expired_token() {
             "web": {{
                 "client_id": "mock_id",
                 "client_secret": "mock_secret",
-                "auth_uri": "http://127.0.0.1:{}/auth",
-                "token_uri": "{}"
+                "auth_uri": "http://127.0.0.1:{port}/auth",
+                "token_uri": "{token_uri}"
             }}
-        }}"#,
-        port, token_uri
+        }}"#
     );
     fs::write(&cred_path, cred_json).unwrap();
 

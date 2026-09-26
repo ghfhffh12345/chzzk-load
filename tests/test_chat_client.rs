@@ -17,7 +17,7 @@ fn test_compute_server_id() {
 async fn test_mock_websocket_handshake_and_chat_receiving() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let ws_url = format!("ws://{}", addr);
+    let ws_url = format!("ws://{addr}");
 
     let server_task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -126,7 +126,7 @@ fn test_parse_chat_packet_types_and_donations() {
 async fn test_handshake_failure_reconnects_with_backoff() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let ws_url = format!("ws://{}", addr);
+    let ws_url = format!("ws://{addr}");
 
     let connection_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let conn_count_clone = connection_count.clone();
@@ -209,7 +209,7 @@ async fn test_handshake_failure_reconnects_with_backoff() {
 async fn test_chat_telemetry_non_blocking_when_receiver_full() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let ws_url = format!("ws://{}", addr);
+    let ws_url = format!("ws://{addr}");
 
     let server_task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();

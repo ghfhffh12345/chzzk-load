@@ -164,8 +164,7 @@ async fn test_engine_orchestrator_poll_channel_offline() {
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(10);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -186,7 +185,7 @@ async fn test_engine_orchestrator_poll_channel_offline() {
             assert!(!is_live);
             assert_eq!(title, "Offline");
         }
-        other => panic!("Expected ChannelUpdate event, got: {:?}", other),
+        other => panic!("Expected ChannelUpdate event, got: {other:?}"),
     }
 }
 
@@ -211,8 +210,7 @@ async fn test_engine_orchestrator_poll_channel_error() {
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(10);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -225,7 +223,7 @@ async fn test_engine_orchestrator_poll_channel_error() {
         AppEvent::Log(msg) => {
             assert!(msg.starts_with("[WARN] Polling failed for chan_err"));
         }
-        other => panic!("Expected Log event, got: {:?}", other),
+        other => panic!("Expected Log event, got: {other:?}"),
     }
 }
 
@@ -293,8 +291,7 @@ async fn test_engine_orchestrator_poll_channel_live() {
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -318,7 +315,7 @@ async fn test_engine_orchestrator_poll_channel_live() {
             assert!(is_live);
             assert_eq!(title, "Playing Games");
         }
-        other => panic!("Expected ChannelUpdate event, got: {:?}", other),
+        other => panic!("Expected ChannelUpdate event, got: {other:?}"),
     }
 
     // RecordingStarted event received from the spawned session
@@ -331,7 +328,7 @@ async fn test_engine_orchestrator_poll_channel_live() {
             assert_eq!(channel_id, "chan_live");
             assert_eq!(session_title, "Playing Games");
         }
-        other => panic!("Expected RecordingStarted event, got: {:?}", other),
+        other => panic!("Expected RecordingStarted event, got: {other:?}"),
     }
 
     // Channel is marked active
@@ -459,8 +456,7 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -560,11 +556,11 @@ async fn test_engine_orchestrator_upload_consumer() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
-    let upload_session_url = format!("http://127.0.0.1:{}/resumable_upload_session", port);
+    let upload_session_url = format!("http://127.0.0.1:{port}/resumable_upload_session");
     let session_url_clone = upload_session_url.clone();
 
     std::thread::spawn(move || {
@@ -668,8 +664,8 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     std::thread::spawn(move || {
@@ -814,8 +810,8 @@ async fn test_process_sealed_chunk_retry_drive_success() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     let chunk_path = temp_dir.join("chunk_0001.ts");
@@ -884,8 +880,8 @@ async fn test_process_sealed_chunk_retry_drive_failure() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     let chunk_path = temp_dir.join("chunk_0002.ts");
@@ -1074,8 +1070,7 @@ async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
         }],
         ..Default::default()
     };
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -1179,8 +1174,7 @@ async fn test_engine_orchestrator_manual_refresh() {
         }],
         ..Default::default()
     };
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -1226,8 +1220,8 @@ async fn test_engine_orchestrator_concurrent_uploads() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     let (task2_started_tx, mut task2_started_rx) = mpsc::channel::<()>(1);
@@ -1250,7 +1244,7 @@ async fn test_engine_orchestrator_concurrent_uploads() {
                         let _ = task2_started_tx.try_send(());
                     }
                     let session_url =
-                        format!("http://127.0.0.1:{}/resumable_session_{}", port, chunk_id);
+                        format!("http://127.0.0.1:{port}/resumable_session_{chunk_id}");
                     let response = Response::empty(200).with_header(
                         Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
                     );
@@ -1480,12 +1474,12 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
     };
 
     let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", drive_port),
-        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{drive_port}"),
+        format!("http://127.0.0.1:{drive_port}"),
     );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
@@ -1527,8 +1521,7 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
     let new_folder_name = renamed.unwrap();
     assert!(
         new_folder_name.contains("RenameStreamer - Updated Stream Title? Playing Now?"),
-        "Expected folder name to contain 'RenameStreamer - Updated Stream Title? Playing Now?', got: {}",
-        new_folder_name
+        "Expected folder name to contain 'RenameStreamer - Updated Stream Title? Playing Now?', got: {new_folder_name}"
     );
 
     // Verify ChannelUpdate event had new title
@@ -1682,12 +1675,12 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
     };
 
     let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", drive_port),
-        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{drive_port}"),
+        format!("http://127.0.0.1:{drive_port}"),
     );
 
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
@@ -1813,7 +1806,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
     };
 
     let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
@@ -2078,8 +2071,7 @@ async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupt
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", port));
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -2162,7 +2154,7 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
     let drive_server = Server::http("127.0.0.1:0").unwrap();
     let drive_port = drive_server.server_addr().to_ip().unwrap().port();
 
-    let upload_url = format!("http://127.0.0.1:{}/resumable_chunk_upload", drive_port);
+    let upload_url = format!("http://127.0.0.1:{drive_port}/resumable_chunk_upload");
     let upload_url_clone = upload_url.clone();
 
     std::thread::spawn(move || {
@@ -2219,8 +2211,8 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", drive_port),
-        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{drive_port}"),
+        format!("http://127.0.0.1:{drive_port}"),
     );
 
     let settings = Settings {
@@ -2238,7 +2230,7 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
     };
 
     let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
@@ -2340,8 +2332,8 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", port),
-        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
     );
 
     let (task2_unexpected_started_tx, mut task2_unexpected_started_rx) = mpsc::channel::<()>(1);
@@ -2383,7 +2375,7 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
                 }
 
                 let chunk_id = if is_task2 { "2" } else { "1" };
-                let session_url = format!("http://127.0.0.1:{}/serial_session_{}", port, chunk_id);
+                let session_url = format!("http://127.0.0.1:{port}/serial_session_{chunk_id}");
                 let response = Response::empty(200).with_header(
                     Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
                 );
@@ -2584,7 +2576,7 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
                 } else {
                     "session_chunk_0"
                 };
-                let session_url = format!("http://127.0.0.1:{}/{}", drive_port, session_id);
+                let session_url = format!("http://127.0.0.1:{drive_port}/{session_id}");
                 let response = Response::empty(200).with_header(
                     Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
                 );
@@ -2631,8 +2623,8 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", drive_port),
-        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{drive_port}"),
+        format!("http://127.0.0.1:{drive_port}"),
     );
 
     let settings = Settings {
@@ -2650,7 +2642,7 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
     };
 
     let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
@@ -2771,15 +2763,14 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
                     "content": {{
                         "status": "OPEN",
                         "liveId": 112233,
-                        "liveTitle": "Concurrent Stream {}",
+                        "liveTitle": "Concurrent Stream {channel_id}",
                         "channel": {{
-                            "channelId": "{}",
-                            "channelName": "Streamer_{}"
+                            "channelId": "{channel_id}",
+                            "channelName": "Streamer_{channel_id}"
                         }},
                         "livePlaybackJson": "{{\"media\":[{{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}}]}}]}}"
                     }}
-                }}"#,
-                channel_id, channel_id, channel_id
+                }}"#
             );
 
             let response = Response::from_string(mock_body).with_header(
@@ -2812,7 +2803,7 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
             } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
                 let mut body = String::new();
                 req.as_reader().read_to_string(&mut body).unwrap();
-                let session_url = format!("http://127.0.0.1:{}/resumable_session", drive_port);
+                let session_url = format!("http://127.0.0.1:{drive_port}/resumable_session");
                 let response = Response::empty(200).with_header(
                     Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
                 );
@@ -2850,8 +2841,8 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", drive_port),
-        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{drive_port}"),
+        format!("http://127.0.0.1:{drive_port}"),
     );
 
     let settings = Settings {
@@ -2875,7 +2866,7 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
     };
 
     let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
@@ -3042,7 +3033,7 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_driv
             } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
                 let mut body = String::new();
                 req.as_reader().read_to_string(&mut body).unwrap();
-                let session_url = format!("http://127.0.0.1:{}/resumable_session", drive_port);
+                let session_url = format!("http://127.0.0.1:{drive_port}/resumable_session");
                 let response = Response::empty(200).with_header(
                     Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
                 );
@@ -3083,8 +3074,8 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_driv
 
     let auth = create_mock_drive_auth(&temp_dir).await;
     let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{}", drive_port),
-        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{drive_port}"),
+        format!("http://127.0.0.1:{drive_port}"),
     );
 
     let settings = Settings {
@@ -3102,7 +3093,7 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_driv
     };
 
     let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
