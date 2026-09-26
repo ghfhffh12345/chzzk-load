@@ -2,4 +2,5 @@
 token.json
 recordings/
 .superpowers/
+.agent/
 npm/platforms/
