@@ -42,7 +42,6 @@ pub fn build_ffmpeg_command(
     cmd.arg("-headers").arg(headers);
     cmd.arg("-extension_picky").arg("0");
     cmd.arg("-reconnect").arg("1");
-    cmd.arg("-reconnect_at_eof").arg("1");
     cmd.arg("-reconnect_streamed").arg("1");
     cmd.arg("-reconnect_delay_max").arg("10");
 
@@ -116,24 +115,23 @@ mod tests {
         assert_eq!(args[7], "0");
         assert_eq!(args[8], "-reconnect");
         assert_eq!(args[9], "1");
-        assert_eq!(args[10], "-reconnect_at_eof");
+        assert!(!args.contains(&"-reconnect_at_eof".to_string()));
+        assert_eq!(args[10], "-reconnect_streamed");
         assert_eq!(args[11], "1");
-        assert_eq!(args[12], "-reconnect_streamed");
-        assert_eq!(args[13], "1");
-        assert_eq!(args[14], "-reconnect_delay_max");
-        assert_eq!(args[15], "10");
-        assert_eq!(args[16], "-i");
-        assert_eq!(args[17], "http://example.com/live.m3u8");
-        assert_eq!(args[18], "-c");
-        assert_eq!(args[19], "copy");
-        assert_eq!(args[20], "-f");
-        assert_eq!(args[21], "segment");
-        assert_eq!(args[22], "-segment_time");
-        assert_eq!(args[23], "10");
-        assert_eq!(args[24], "-segment_format");
-        assert_eq!(args[25], "mpegts");
-        assert_eq!(args[26], "-reset_timestamps");
-        assert_eq!(args[27], "1");
+        assert_eq!(args[12], "-reconnect_delay_max");
+        assert_eq!(args[13], "10");
+        assert_eq!(args[14], "-i");
+        assert_eq!(args[15], "http://example.com/live.m3u8");
+        assert_eq!(args[16], "-c");
+        assert_eq!(args[17], "copy");
+        assert_eq!(args[18], "-f");
+        assert_eq!(args[19], "segment");
+        assert_eq!(args[20], "-segment_time");
+        assert_eq!(args[21], "10");
+        assert_eq!(args[22], "-segment_format");
+        assert_eq!(args[23], "mpegts");
+        assert_eq!(args[24], "-reset_timestamps");
+        assert_eq!(args[25], "1");
     }
 
     #[test]

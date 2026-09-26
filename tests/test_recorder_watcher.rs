@@ -144,9 +144,28 @@ fn test_build_ffmpeg_command() {
         reconnect_idx < i_idx,
         "-reconnect must precede -i for FFmpeg input options"
     );
-    assert!(args.contains(&"-reconnect_at_eof".to_string()));
+    assert!(
+        !args.contains(&"-reconnect_at_eof".to_string()),
+        "-reconnect_at_eof must NOT be included as it causes false reconnect loops on HLS m3u8 playlist EOF"
+    );
     assert!(args.contains(&"-reconnect_streamed".to_string()));
     assert!(args.contains(&"-reconnect_delay_max".to_string()));
+}
+
+#[test]
+fn test_ffmpeg_omits_reconnect_at_eof_for_hls() {
+    let out_pattern = Path::new("test_%04d.ts");
+    let cmd = build_ffmpeg_command("http://example.com/live.m3u8", out_pattern, 10, None);
+    let std_cmd = cmd.as_std();
+    let args: Vec<String> = std_cmd
+        .get_args()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+
+    assert!(
+        !args.iter().any(|a| a == "-reconnect_at_eof"),
+        "FFmpeg command must omit -reconnect_at_eof to avoid 20-30s reconnect stalls when reading m3u8 playlists"
+    );
 }
 
 #[test]
