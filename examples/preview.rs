@@ -2,19 +2,34 @@ use std::collections::{HashMap, VecDeque};
 use std::io::stdout;
 use std::time::{Duration, Instant};
 
+use chzzk_load::tui::ConsoleCodePageGuard;
 use chzzk_load::tui::app::{ActiveUpload, App, ChannelItem};
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::tui::ui::draw_ui;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Initialize Windows UTF-8 console codepage guard
+    let _console_guard = ConsoleCodePageGuard::init();
+
+    // 2. Set terminal panic recovery hook
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+        ConsoleCodePageGuard::restore_original();
+        default_panic(panic_info);
+    }));
+
     let mut app = App::new();
 
     let channel_hane = "a9a343510e132ea3026ff3cf682820b5".to_string();
@@ -37,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: true,
             is_active: true,
             title: "쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)".to_string(),
-            chat_count: 0,
+            chat_count: 1420,
         },
         ChannelItem {
             id: channel_lilpa.clone(),
@@ -45,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_live: true,
             is_active: true,
             title: "교정야호 교통정비공사 사장 황인정".to_string(),
-            chat_count: 0,
+            chat_count: 852,
         },
         ChannelItem {
             id: channel_kangqui.clone(),
@@ -129,14 +144,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
 
+    // Top status metrics & active recording starts
+    let now = Instant::now();
+    app.active_recording_starts.insert(
+        channel_hane.clone(),
+        now - Duration::from_secs(2 * 3600 + 15 * 60 + 42),
+    );
+    app.active_recording_starts.insert(
+        channel_lilpa.clone(),
+        now - Duration::from_secs(48 * 60 + 19),
+    );
     app.reclaimed_mb = 4120.8;
     app.uploaded_count = 141;
 
+    // Concurrent multi-stream upload simulation (v0.5.0 upload_concurrency)
     let mut uploads = HashMap::new();
     uploads.insert(
         channel_hane.clone(),
         ActiveUpload {
-            channel_id: channel_hane,
+            channel_id: channel_hane.clone(),
             chunk_name: "chunk_0142.ts".to_string(),
             streamer_name: "하네 | Hane".to_string(),
             uploaded_bytes: (18.4 * 1024.0 * 1024.0) as u64,
@@ -144,25 +170,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             speed_mb_s: 8.5,
         },
     );
+    uploads.insert(
+        channel_lilpa.clone(),
+        ActiveUpload {
+            channel_id: channel_lilpa.clone(),
+            chunk_name: "chunk_0048.ts".to_string(),
+            streamer_name: "너불".to_string(),
+            uploaded_bytes: (8.9 * 1024.0 * 1024.0) as u64,
+            total_bytes: (27.8 * 1024.0 * 1024.0) as u64,
+            speed_mb_s: 7.2,
+        },
+    );
     app.active_uploads = uploads;
 
     app.logs = VecDeque::from([
-        LogEntry::from("[INFO] Google Drive authenticated successfully"),
-        LogEntry::from(
-            "[REC] Spawned FFmpeg segmenter (600s TS chunks) -> recordings/a9a34351_20260922",
-        ),
-        LogEntry::from("[DRIVE] Session folder ready: 'Chzzk_Recordings/2026-09-22 하네 - 쌀먹쥐'"),
-        LogEntry::from("[FFMPEG] Packet corrupt (stream = 0, dts = 1875900)."),
-        LogEntry::from("[FFMPEG] Invalid NAL unit size (10632 > 6612)."),
-        LogEntry::from("[REC] chunk_0140.ts sealed. Pushed to Drive upload queue."),
-        LogEntry::from("[CLEAN] Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)"),
-        LogEntry::from("[REC] chunk_0141.ts sealed. Pushed to Drive upload queue."),
-        LogEntry::from("[CLEAN] Uploaded & deleted chunk_0141.ts (reclaimed 28.1 MB)"),
-        LogEntry::from(
-            "[REC] Spawned FFmpeg segmenter (600s TS chunks) -> recordings/b1a23456_20260922",
-        ),
-        LogEntry::from("[REC] chunk_0142.ts sealed. Pushed to Drive upload queue."),
-        LogEntry::from("[INFO] All monitored channels status synced successfully"),
+        LogEntry::info("Google Drive authenticated successfully (root: 'Chzzk_Recordings')"),
+        LogEntry::rec("Spawned FFmpeg segmenter (600s TS chunks) -> recordings/a9a34351_20260926"),
+        LogEntry::rec("Direct CDN stream extracted: 1080p single-variant (p2p bypass)"),
+        LogEntry::drive("Session folder ready: 'Chzzk_Recordings/2026-09-26 하네 - 쌀먹쥐'"),
+        LogEntry::chat("Connected to live chat WebSocket (kr-ss1.chat.naver.com)"),
+        LogEntry::chat("Buffered 500 messages (64 KB). Flushed to chat.jsonl"),
+        LogEntry::rec("chunk_0140.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::clean("Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)"),
+        LogEntry::rec("chunk_0141.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::clean("Uploaded & deleted chunk_0141.ts (reclaimed 28.1 MB)"),
+        LogEntry::rec("Spawned FFmpeg segmenter (600s TS chunks) -> recordings/b1a23456_20260926"),
+        LogEntry::drive("Initialized 'title_history.txt' in Drive folder for 너불"),
+        LogEntry::rec("chunk_0142.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::rec("chunk_0048.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::info("Monitored channels synced: 12 total, 5 live, 2 recording"),
     ]);
 
     enable_raw_mode()?;
@@ -171,48 +207,116 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stdout,
         EnterAlternateScreen,
         Hide,
-        crossterm::terminal::SetTitle("chzzk-load preview")
+        crossterm::terminal::SetTitle("chzzk-load preview (Ratatui TUI)")
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut last_tick = Instant::now();
+    let mut event_reader = crossterm::event::EventStream::new();
+    let mut anim_interval = tokio::time::interval(Duration::from_millis(150));
+    let mut chat_interval = tokio::time::interval(Duration::from_secs(3));
+    let mut needs_redraw = true;
+
+    let mut chunk_counter_hane = 143;
+    let mut chunk_counter_lilpa = 49;
+    let mut chat_flush_cycle = 0;
 
     loop {
-        terminal.draw(|f| draw_ui(f, &app))?;
+        if needs_redraw {
+            terminal.draw(|f| draw_ui(f, &app))?;
+            needs_redraw = false;
+        }
 
-        // Animate upload progress smoothly
-        if last_tick.elapsed() >= Duration::from_millis(150) {
-            last_tick = Instant::now();
-            if let Some(upload) = app
-                .active_uploads
-                .get_mut("a9a343510e132ea3026ff3cf682820b5")
-            {
-                let increment = (0.45 * 1024.0 * 1024.0) as u64;
-                upload.uploaded_bytes = upload.uploaded_bytes.saturating_add(increment);
-                if upload.uploaded_bytes >= upload.total_bytes {
-                    upload.uploaded_bytes = (1.5 * 1024.0 * 1024.0) as u64;
-                    app.uploaded_count += 1;
-                    app.reclaimed_mb += 28.4;
+        tokio::select! {
+            biased;
+
+            // 1. Process crossterm input events asynchronously
+            Some(item) = event_reader.next() => {
+                if let Ok(Event::Key(key)) = item
+                    && key.kind != crossterm::event::KeyEventKind::Release
+                {
+                    if key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+                    {
+                        break;
+                    }
+                    if key.code == KeyCode::Char('q') {
+                        if app.is_shutting_down {
+                            break;
+                        } else {
+                            app.is_shutting_down = true;
+                            app.logs.push_back(LogEntry::warn(
+                                "Shutdown initiated. Completing active uploads... (press 'q' again to exit)",
+                            ));
+                        }
+                    } else if key.code == KeyCode::Char('r') {
+                        app.logs.push_back(LogEntry::info("Manual refresh triggered: polled 12 monitored channels."));
+                    } else {
+                        app.handle_event(AppEvent::Key(key));
+                    }
+                    needs_redraw = true;
                 }
+            }
+
+            // 2. Animate concurrent multi-stream uploads smoothly
+            _ = anim_interval.tick() => {
+                // Animate channel_hane upload
+                if let Some(upload) = app.active_uploads.get_mut(&channel_hane) {
+                    let increment = (0.45 * 1024.0 * 1024.0) as u64;
+                    upload.uploaded_bytes = upload.uploaded_bytes.saturating_add(increment);
+                    if upload.uploaded_bytes >= upload.total_bytes {
+                        app.uploaded_count += 1;
+                        app.reclaimed_mb += 28.4;
+                        app.logs.push_back(LogEntry::clean(format!(
+                            "Uploaded & deleted chunk_{:04}.ts (reclaimed 28.4 MB)",
+                            chunk_counter_hane - 1
+                        )));
+                        upload.chunk_name = format!("chunk_{:04}.ts", chunk_counter_hane);
+                        upload.uploaded_bytes = (1.2 * 1024.0 * 1024.0) as u64;
+                        upload.total_bytes = (28.4 * 1024.0 * 1024.0) as u64;
+                        chunk_counter_hane += 1;
+                    }
+                }
+
+                // Animate channel_lilpa upload
+                if let Some(upload) = app.active_uploads.get_mut(&channel_lilpa) {
+                    let increment = (0.35 * 1024.0 * 1024.0) as u64;
+                    upload.uploaded_bytes = upload.uploaded_bytes.saturating_add(increment);
+                    if upload.uploaded_bytes >= upload.total_bytes {
+                        app.uploaded_count += 1;
+                        app.reclaimed_mb += 27.8;
+                        app.logs.push_back(LogEntry::clean(format!(
+                            "Uploaded & deleted chunk_{:04}.ts (reclaimed 27.8 MB)",
+                            chunk_counter_lilpa - 1
+                        )));
+                        upload.chunk_name = format!("chunk_{:04}.ts", chunk_counter_lilpa);
+                        upload.uploaded_bytes = (0.8 * 1024.0 * 1024.0) as u64;
+                        upload.total_bytes = (27.8 * 1024.0 * 1024.0) as u64;
+                        chunk_counter_lilpa += 1;
+                    }
+                }
+
+                needs_redraw = true;
+            }
+
+            // 3. Simulate periodic live chat telemetry updates
+            _ = chat_interval.tick() => {
+                if let Some(ch) = app.channels.iter_mut().find(|c| c.id == channel_hane) {
+                    ch.chat_count += 3;
+                }
+                if let Some(ch) = app.channels.iter_mut().find(|c| c.id == channel_lilpa) {
+                    ch.chat_count += 2;
+                }
+                chat_flush_cycle += 1;
+                if chat_flush_cycle % 5 == 0 {
+                    app.logs.push_back(LogEntry::chat("Buffered 500 messages (64 KB). Flushed to chat.jsonl"));
+                }
+                needs_redraw = true;
             }
         }
 
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.kind == crossterm::event::KeyEventKind::Release {
-                continue;
-            }
-            if key.code == KeyCode::Esc
-                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-            {
-                break;
-            }
-            app.handle_event(AppEvent::Key(key));
-            if app.should_quit {
-                break;
-            }
+        if app.should_quit {
+            break;
         }
     }
 
