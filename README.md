@@ -113,6 +113,48 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 | `chzzk.nid_aut` / `nid_ses` | `""` | Optional Naver session cookies for adult/subscriber-only streams. |
 | `channels` | - | List of monitored Chzzk channels (`id` from channel URL, `name` for display). |
 
+### Recommended Configuration for SBCs (Raspberry Pi, etc.)
+
+For Single Board Computers (such as a Raspberry Pi or ARM64 board running Linux from a microSD card), it is strongly recommended to set `recordings_dir` to a RAM disk (e.g. `/dev/shm/chzzk-load`), shorten `chunk_duration_seconds` to `120`, and limit `upload_concurrency` to `2`.
+
+Because `chzzk-load` maintains only 1–2 video segments locally and deletes them immediately upon confirmed cloud upload, using `/dev/shm` buffers temporary chunks in memory and uploads them directly to Google Drive, completely eliminating flash storage wear and protecting microSD card longevity:
+
+```json
+{
+  "general": {
+    "chunk_duration_seconds": 120,
+    "poll_interval_seconds": 20,
+    "stream_cooldown_seconds": 0,
+    "recordings_dir": "/dev/shm/chzzk-load",
+    "min_free_disk_gb": 2.0,
+    "record_chat": true,
+    "chat_flush_interval_seconds": 30
+  },
+  "google_drive": {
+    "credentials_path": "credentials.json",
+    "token_path": "token.json",
+    "root_folder_name": "Chzzk_Recordings",
+    "upload_concurrency": 2
+  },
+  "chzzk": {
+    "nid_aut": "",
+    "nid_ses": ""
+  },
+  "channels": [
+    {
+      "id": "1a1dd9ce56fb61a37ffb6f69f6d5b978",
+      "name": "강퀴"
+    }
+  ]
+}
+```
+
+- **`recordings_dir: "/dev/shm/chzzk-load"`**: Points to Linux shared memory (RAM disk / tmpfs). Video chunks and chat logs are buffered in RAM and deleted immediately upon verified upload, resulting in zero disk writes to your microSD card.
+- **`chunk_duration_seconds: 120`**: Shorter 2-minute segments keep in-memory chunk sizes small (~50–100 MB at 1080p60), safely fitting within limited SBC RAM.
+- **`stream_cooldown_seconds: 0`**: Bypasses extra cooldown wait times between sessions.
+- **`upload_concurrency: 2`**: Bounded upload concurrency prevents network and CPU contention on resource-constrained devices.
+- **`chat_flush_interval_seconds: 30`**: Batches real-time chat messages in memory and flushes periodically, reducing I/O operations.
+
 ---
 
 ## Environment Variables

@@ -113,6 +113,48 @@ chzzk-load --config /path/to/my-settings.json
 | `chzzk.nid_aut` / `nid_ses` | `""` | 연령 제한 또는 구독자 전용 방송 녹화를 위한 네이버 로그인 세션 쿠키 값 (선택 사항). |
 | `channels` | - | 모니터링할 치지직 채널 목록 (`id`: 채널 URL의 고유 식별자, `name`: TUI 표시용 이름). |
 
+### SBC(라즈베리 파이 등) 권장 설정
+
+microSD 카드를 사용하는 라즈베리 파이(Raspberry Pi) 및 ARM64 단일 보드 컴퓨터(SBC) 환경에서는 `recordings_dir`을 RAM 디스크(예: `/dev/shm/chzzk-load`)로 지정하고, 세그먼트 길이를 `120`초로 단축하며, `upload_concurrency`를 `2`로 설정하는 것을 적극 권장합니다.
+
+`chzzk-load`는 클라우드 업로드 성공 시 로컬 세그먼트를 즉시 삭제하여 활성 스트림당 1~2개의 세그먼트만 디스크에 유지하므로, `/dev/shm`을 임시 디렉터리로 사용하면 영상 세그먼트가 메모리에만 기록된 후 Google Drive로 직접 전송되어 microSD 및 플래시 메모리의 쓰기 수명 마모를 완전히 방지할 수 있습니다:
+
+```json
+{
+  "general": {
+    "chunk_duration_seconds": 120,
+    "poll_interval_seconds": 20,
+    "stream_cooldown_seconds": 0,
+    "recordings_dir": "/dev/shm/chzzk-load",
+    "min_free_disk_gb": 2.0,
+    "record_chat": true,
+    "chat_flush_interval_seconds": 30
+  },
+  "google_drive": {
+    "credentials_path": "credentials.json",
+    "token_path": "token.json",
+    "root_folder_name": "Chzzk_Recordings",
+    "upload_concurrency": 2
+  },
+  "chzzk": {
+    "nid_aut": "",
+    "nid_ses": ""
+  },
+  "channels": [
+    {
+      "id": "1a1dd9ce56fb61a37ffb6f69f6d5b978",
+      "name": "강퀴"
+    }
+  ]
+}
+```
+
+- **`recordings_dir: "/dev/shm/chzzk-load"`**: Linux 공유 메모리(RAM 디스크 / tmpfs)를 사용하여 microSD 및 플래시 메모리에 대한 쓰기 작업을 원천 차단합니다.
+- **`chunk_duration_seconds: 120`**: 청크 길이를 2분으로 단축하여 1080p60 기준 약 50~100MB 크기로 유지함으로써 저용량 SBC RAM에서도 부담 없이 안전하게 동작합니다.
+- **`stream_cooldown_seconds: 0`**: 세션 간 불필요한 쿨다운 대기 시간을 제거합니다.
+- **`upload_concurrency: 2`**: 동시 업로드 수를 2개로 제한하여 저사양 기기에서의 CPU 및 네트워크 대역폭 경합을 방지합니다.
+- **`chat_flush_interval_seconds: 30`**: 실시간 채팅 메시지를 메모리에 버퍼링한 후 주기적으로 기록하여 디스크 I/O 빈도를 최소화합니다.
+
 ---
 
 ## 환경 변수 안내
