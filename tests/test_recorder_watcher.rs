@@ -207,3 +207,81 @@ fn test_detect_sealed_chunks_ignores_subdirectories_and_non_ts() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_two_ffmpeg_processes_simultaneously() {
+    let temp_dir = std::env::temp_dir().join(format!("test_ffmpeg_two_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let out1 = temp_dir.join("p1_%04d.ts");
+    let out2 = temp_dir.join("p2_%04d.ts");
+
+    let mut cmd1 = tokio::process::Command::new("ffmpeg");
+    cmd1.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("warning")
+        .arg("-y")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg("testsrc=size=320x240:rate=10")
+        .arg("-t")
+        .arg("3")
+        .arg("-f")
+        .arg("segment")
+        .arg("-segment_time")
+        .arg("1")
+        .arg("-segment_format")
+        .arg("mpegts")
+        .arg(&out1);
+
+    let mut cmd2 = tokio::process::Command::new("ffmpeg");
+    cmd2.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("warning")
+        .arg("-y")
+        .arg("-f")
+        .arg("lavfi")
+        .arg("-i")
+        .arg("testsrc=size=320x240:rate=10")
+        .arg("-t")
+        .arg("3")
+        .arg("-f")
+        .arg("segment")
+        .arg("-segment_time")
+        .arg("1")
+        .arg("-segment_format")
+        .arg("mpegts")
+        .arg(&out2);
+
+    let mut child1 = cmd1.spawn().unwrap();
+    let mut child2 = cmd2.spawn().unwrap();
+
+    let res1 = child1.wait().await.unwrap();
+    let res2 = child2.wait().await.unwrap();
+
+    assert!(res1.success());
+    assert!(res2.success());
+
+    let count1 = std::fs::read_dir(&temp_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("p1_"))
+        .count();
+    let count2 = std::fs::read_dir(&temp_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("p2_"))
+        .count();
+
+    assert!(count1 > 0, "p1 chunks must exist");
+    assert!(count2 > 0, "p2 chunks must exist");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Response, Server, StatusCode};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::config::{ChannelConfig, Settings};
@@ -672,7 +673,7 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
     );
 
     std::thread::spawn(move || {
-        if let Ok(req) = server.recv() {
+        while let Ok(req) = server.recv() {
             let response = Response::from_string("server error").with_status_code(StatusCode(500));
             let _ = req.respond(response);
         }
@@ -874,7 +875,7 @@ async fn test_process_sealed_chunk_retry_drive_failure() {
     let port = server.server_addr().to_ip().unwrap().port();
 
     std::thread::spawn(move || {
-        if let Ok(req) = server.recv() {
+        while let Ok(req) = server.recv() {
             let response =
                 Response::from_string("internal error").with_status_code(StatusCode(500));
             let _ = req.respond(response);
@@ -2741,5 +2742,439 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
         "chunk 1 must be deleted after upload"
     );
 
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_two_concurrent_live_streams() {
+    use std::collections::HashSet;
+    use tokio_util::sync::CancellationToken;
+
+    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
+    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = chzzk_server.recv() {
+            let url = request.url().to_string();
+            let channel_id = if url.contains("chan_multi_1") {
+                "chan_multi_1"
+            } else if url.contains("chan_multi_2") {
+                "chan_multi_2"
+            } else {
+                "unknown"
+            };
+
+            let mock_body = format!(
+                r#"{{
+                    "code": 200,
+                    "message": null,
+                    "content": {{
+                        "status": "OPEN",
+                        "liveId": 112233,
+                        "liveTitle": "Concurrent Stream {}",
+                        "channel": {{
+                            "channelId": "{}",
+                            "channelName": "Streamer_{}"
+                        }},
+                        "livePlaybackJson": "{{\"media\":[{{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}}]}}]}}"
+                    }}
+                }}"#,
+                channel_id, channel_id, channel_id
+            );
+
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("test_orch_multi_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let drive_server = Server::http("127.0.0.1:0").unwrap();
+    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(mut req) = drive_server.recv() {
+            let path = req.url().to_string();
+            if req.method().as_str() == "GET" && path.contains("/drive/v3/files") {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "files": [{ "id": "mock_root_folder", "name": "Chzzk_Recordings" }]
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                let session_url = format!("http://127.0.0.1:{}/resumable_session", drive_port);
+                let response = Response::empty(200).with_header(
+                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "PUT" {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "id": "uploaded_chunk_id",
+                        "name": "chunk.ts"
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "POST" && path.contains("/drive/v3/files") {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "id": "mock_subfolder_id",
+                        "name": "mock_subfolder"
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else {
+                let response = Response::empty(200);
+                let _ = req.respond(response);
+            }
+        }
+    });
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let drive_client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{}", drive_port),
+    );
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            record_chat: false,
+            ..Default::default()
+        },
+        channels: vec![
+            ChannelConfig {
+                id: "chan_multi_1".to_string(),
+                name: "Streamer_1".to_string(),
+            },
+            ChannelConfig {
+                id: "chan_multi_2".to_string(),
+                name: "Streamer_2".to_string(),
+            },
+        ],
+        ..Default::default()
+    };
+
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let cancel_token = CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        Some(drive_client),
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let run_handle = tokio::spawn(orchestrator.clone().run());
+
+    // Wait for RecordingStarted for both channels
+    let mut started = HashSet::new();
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv()).await
+    {
+        if let AppEvent::RecordingStarted { channel_id, .. } = ev {
+            started.insert(channel_id);
+            if started.len() == 2 {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        started.len(),
+        2,
+        "Both channels should have started recording sessions"
+    );
+
+    // Locate both session folders
+    let mut session_dir_1 = None;
+    let mut session_dir_2 = None;
+    for _ in 0..20 {
+        if let Ok(entries) = fs::read_dir(&temp_dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    let path = entry.path();
+                    let name = path.file_name().unwrap().to_str().unwrap();
+                    if name.starts_with("chan_multi_1_") {
+                        session_dir_1 = Some(path.clone());
+                    } else if name.starts_with("chan_multi_2_") {
+                        session_dir_2 = Some(path.clone());
+                    }
+                }
+            }
+        }
+        if session_dir_1.is_some() && session_dir_2.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let dir1 = session_dir_1.expect("Session dir 1 must exist");
+    let dir2 = session_dir_2.expect("Session dir 2 must exist");
+
+    // Write chunk_0000.ts and chunk_0001.ts to BOTH session folders
+    let d1_c0 = dir1.join("chunk_0000.ts");
+    let d1_c1 = dir1.join("chunk_0001.ts");
+    fs::write(&d1_c0, b"CHUNK_1_0_DATA").unwrap();
+    fs::write(&d1_c1, b"CHUNK_1_1_DATA").unwrap();
+
+    let d2_c0 = dir2.join("chunk_0000.ts");
+    let d2_c1 = dir2.join("chunk_0001.ts");
+    fs::write(&d2_c0, b"CHUNK_2_0_DATA").unwrap();
+    fs::write(&d2_c1, b"CHUNK_2_1_DATA").unwrap();
+
+    // Check if chunk_0000.ts from BOTH channels completes upload
+    let mut uploaded_channels = HashSet::new();
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv()).await
+    {
+        if let AppEvent::UploadCompleted {
+            channel_id,
+            chunk_name,
+            ..
+        } = ev
+            && chunk_name == "chunk_0000.ts"
+        {
+            uploaded_channels.insert(channel_id);
+            if uploaded_channels.len() == 2 {
+                break;
+            }
+        }
+    }
+
+    assert!(
+        uploaded_channels.contains("chan_multi_1"),
+        "chan_multi_1 chunk 0 should be uploaded"
+    );
+    assert!(
+        uploaded_channels.contains("chan_multi_2"),
+        "chan_multi_2 chunk 0 should be uploaded"
+    );
+
+    cancel_token.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run_handle).await;
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_drive_rate_limit() {
+    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
+    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(req) = chzzk_server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "liveId": 88881,
+                    "status": "OPEN",
+                    "liveTitle": "Retry Stream",
+                    "channel": { "channelId": "chan_retry", "channelName": "StreamerRetry" },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = req.respond(response);
+        }
+    });
+
+    let drive_server = Server::http("127.0.0.1:0").unwrap();
+    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
+
+    let folder_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let folder_attempts_clone = folder_attempts.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(mut req) = drive_server.recv() {
+            let path = req.url().to_string();
+            if req.method().as_str() == "GET" && path.contains("/drive/v3/files") {
+                // If searching for subfolder, fail with 429 on first 6 attempts (exceeding single-call retries)
+                if !path.contains("Chzzk_Recordings") {
+                    let attempt =
+                        folder_attempts_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if attempt < 6 {
+                        let response = Response::from_string(
+                            "{\"error\":{\"code\":429,\"message\":\"Rate Limit\"}}",
+                        )
+                        .with_status_code(StatusCode(429))
+                        .with_header(
+                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                                .unwrap(),
+                        );
+                        let _ = req.respond(response);
+                        continue;
+                    }
+                }
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "files": [{ "id": "mock_root_folder", "name": "Chzzk_Recordings" }]
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                let session_url = format!("http://127.0.0.1:{}/resumable_session", drive_port);
+                let response = Response::empty(200).with_header(
+                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "PUT" {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "id": "uploaded_chunk_id",
+                        "name": "chunk.ts"
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "POST" && path.contains("/drive/v3/files") {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "id": "mock_subfolder_id",
+                        "name": "mock_subfolder"
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else {
+                let response = Response::empty(200);
+                let _ = req.respond(response);
+            }
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("test_orch_retry_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let drive_client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{}", drive_port),
+    );
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            record_chat: false,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_retry".to_string(),
+            name: "StreamerRetry".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let cancel_token = CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        Some(drive_client),
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let run_handle = tokio::spawn(orchestrator.clone().run());
+
+    // Wait for RecordingStarted
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv()).await
+    {
+        if let AppEvent::RecordingStarted { channel_id, .. } = ev
+            && channel_id == "chan_retry"
+        {
+            break;
+        }
+    }
+
+    // Locate session folder
+    let mut session_dir = None;
+    for _ in 0..20 {
+        if let Ok(entries) = fs::read_dir(&temp_dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    let path = entry.path();
+                    let name = path.file_name().unwrap().to_str().unwrap();
+                    if name.starts_with("chan_retry_") {
+                        session_dir = Some(path.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        if session_dir.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let dir = session_dir.expect("Session dir must exist");
+
+    // Write chunk_0000.ts and chunk_0001.ts
+    let c0 = dir.join("chunk_0000.ts");
+    let c1 = dir.join("chunk_0001.ts");
+    fs::write(&c0, b"CHUNK_0_DATA").unwrap();
+    fs::write(&c1, b"CHUNK_1_DATA").unwrap();
+
+    // Check if chunk_0000.ts completes upload despite the initial rate limit failures!
+    let mut chunk_0_uploaded = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(AppEvent::UploadCompleted { chunk_name, .. })) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await
+            && chunk_name == "chunk_0000.ts"
+        {
+            chunk_0_uploaded = true;
+            break;
+        }
+    }
+
+    assert!(
+        chunk_0_uploaded,
+        "chunk_0000.ts must be uploaded after folder creation recovers from 429"
+    );
+
+    cancel_token.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run_handle).await;
     let _ = fs::remove_dir_all(&temp_dir);
 }
