@@ -601,7 +601,7 @@ async fn test_upload_worker_preserves_file_on_upload_failure() {
 
     std::thread::spawn(move || {
         // Return 500 error on init
-        if let Ok(request) = server.recv() {
+        while let Ok(request) = server.recv() {
             let response =
                 Response::from_string("Internal Server Error").with_status_code(StatusCode(500));
             let _ = request.respond(response);
@@ -787,4 +787,123 @@ fn test_root_credentials_not_touched() {
         let meta = fs::metadata(root_cred).unwrap();
         assert!(meta.len() > 0);
     }
+}
+
+#[tokio::test]
+async fn test_drive_client_root_folder_cached_concurrent() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_root_cache_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    let get_requests_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let get_cnt = Arc::clone(&get_requests_count);
+
+    std::thread::spawn(move || {
+        while let Ok(req) = server.recv() {
+            if req.method().as_str() == "GET" && req.url().contains("/drive/v3/files") {
+                get_cnt.fetch_add(1, Ordering::SeqCst);
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "files": [{ "id": "cached_root_folder_id_123", "name": "Chzzk_Recordings" }]
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else {
+                let _ = req.respond(Response::empty(200));
+            }
+        }
+    });
+
+    let c1 = client.clone();
+    let c2 = client.clone();
+    let c3 = client.clone();
+
+    // Call concurrently from 3 tasks
+    let (r1, r2, r3) = tokio::join!(
+        c1.get_or_create_folder("Chzzk_Recordings", None),
+        c2.get_or_create_folder("Chzzk_Recordings", None),
+        c3.get_or_create_folder("Chzzk_Recordings", None),
+    );
+
+    assert_eq!(r1.unwrap(), "cached_root_folder_id_123");
+    assert_eq!(r2.unwrap(), "cached_root_folder_id_123");
+    assert_eq!(r3.unwrap(), "cached_root_folder_id_123");
+
+    // Subsequent call should use cache immediately without hitting server again
+    let r4 = client
+        .get_or_create_folder("Chzzk_Recordings", None)
+        .await
+        .unwrap();
+    assert_eq!(r4, "cached_root_folder_id_123");
+
+    // Because root folder is cached, the number of GET queries should be 1 (or at most 2 under tight race), but strictly < 4
+    let calls = get_requests_count.load(Ordering::SeqCst);
+    assert!(
+        calls < 4,
+        "Root folder queries must be cached to prevent redundant API calls: expected < 4, got {}",
+        calls
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_drive_client_retries_on_429_too_many_requests() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_drive_429_retry_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", port),
+        format!("http://127.0.0.1:{}", port),
+    );
+
+    std::thread::spawn(move || {
+        // Request 1: 429 Too Many Requests
+        if let Ok(req) = server.recv() {
+            let response =
+                Response::from_string("Rate limit exceeded").with_status_code(StatusCode(429));
+            let _ = req.respond(response);
+        }
+
+        // Request 2 (retry): 200 OK
+        if let Ok(req) = server.recv() {
+            let response = Response::from_string(
+                serde_json::json!({
+                    "files": [{ "id": "recovered_folder_id_456", "name": "TestFolder429" }]
+                })
+                .to_string(),
+            )
+            .with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = req.respond(response);
+        }
+    });
+
+    let res = client.get_or_create_folder("TestFolder429", None).await;
+    assert!(
+        res.is_ok(),
+        "Client must retry on HTTP 429 Too Many Requests and succeed"
+    );
+    assert_eq!(res.unwrap(), "recovered_folder_id_456");
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }

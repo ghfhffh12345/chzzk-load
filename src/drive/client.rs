@@ -3,10 +3,12 @@ use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File;
+use tokio::sync::RwLock;
 use tokio_util::codec::{BytesCodec, FramedRead};
 
 pub fn build_resumable_init_body(filename: &str, parent_id: Option<&str>) -> String {
@@ -43,6 +45,7 @@ pub struct DriveClient {
     client: reqwest::Client,
     base_url: String,
     upload_base_url: String,
+    root_folder_cache: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl DriveClient {
@@ -60,6 +63,7 @@ impl DriveClient {
             client,
             base_url: "https://www.googleapis.com".to_string(),
             upload_base_url: "https://www.googleapis.com".to_string(),
+            root_folder_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -73,11 +77,53 @@ impl DriveClient {
         self
     }
 
+    pub async fn send_with_retry<F, Fut>(&self, mut req_builder: F) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<reqwest::Response, reqwest::Error>>,
+    {
+        let max_retries = 3;
+        let mut last_error = None;
+        for attempt in 0..=max_retries {
+            if attempt > 0 {
+                let backoff_ms = 100 * (1 << (attempt - 1));
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            }
+            match req_builder().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(resp);
+                    } else if status.as_u16() == 429 || status.is_server_error() {
+                        let err_msg = format!("HTTP error: status {}", status);
+                        last_error = Some(anyhow!(err_msg));
+                        continue;
+                    } else {
+                        return Ok(resp);
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(anyhow!(e));
+                    continue;
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("Request failed after retries")))
+    }
+
     pub async fn get_or_create_folder(
         &self,
         folder_name: &str,
         parent_id: Option<&str>,
     ) -> Result<String> {
+        let is_root = parent_id.is_none() || parent_id == Some("");
+        if is_root {
+            let cache = self.root_folder_cache.read().await;
+            if let Some(id) = cache.get(folder_name) {
+                return Ok(id.clone());
+            }
+        }
+
         let token = self.auth.get_valid_access_token().await?;
 
         // Query if exists
@@ -91,18 +137,31 @@ impl DriveClient {
         }
 
         let url = format!("{}/drive/v3/files", self.base_url);
-        let resp: DriveFileList = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", token))
-            .query(&[("q", query.as_str()), ("fields", "files(id, name)")])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let resp_res = self
+            .send_with_retry(|| {
+                let token = token.clone();
+                let url = url.clone();
+                let query = query.clone();
+                async move {
+                    self.client
+                        .get(&url)
+                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .query(&[("q", query.as_str()), ("fields", "files(id, name)")])
+                        .send()
+                        .await
+                }
+            })
             .await?;
 
+        let resp: DriveFileList = resp_res.error_for_status()?.json().await?;
+
         if let Some(first) = resp.files.first() {
+            if is_root {
+                self.root_folder_cache
+                    .write()
+                    .await
+                    .insert(folder_name.to_string(), first.id.clone());
+            }
             return Ok(first.id.clone());
         }
 
@@ -114,18 +173,33 @@ impl DriveClient {
         if let Some(pid) = parent_id.filter(|p| !p.is_empty()) {
             meta["parents"] = serde_json::json!([pid]);
         }
+        let meta_str = meta.to_string();
 
-        let created: DriveFileItem = self
-            .client
-            .post(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", token))
-            .header(CONTENT_TYPE, "application/json; charset=UTF-8")
-            .body(meta.to_string())
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let created_res = self
+            .send_with_retry(|| {
+                let token = token.clone();
+                let url = url.clone();
+                let meta_str = meta_str.clone();
+                async move {
+                    self.client
+                        .post(&url)
+                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header(CONTENT_TYPE, "application/json; charset=UTF-8")
+                        .body(meta_str)
+                        .send()
+                        .await
+                }
+            })
             .await?;
+
+        let created: DriveFileItem = created_res.error_for_status()?.json().await?;
+
+        if is_root {
+            self.root_folder_cache
+                .write()
+                .await
+                .insert(folder_name.to_string(), created.id.clone());
+        }
 
         Ok(created.id)
     }
@@ -137,16 +211,26 @@ impl DriveClient {
         let body = serde_json::json!({
             "name": new_name
         });
+        let body_str = body.to_string();
 
-        self.client
-            .patch(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", token))
-            .header(CONTENT_TYPE, "application/json; charset=UTF-8")
-            .body(body.to_string())
-            .send()
-            .await?
-            .error_for_status()?;
+        let resp = self
+            .send_with_retry(|| {
+                let token = token.clone();
+                let url = url.clone();
+                let body_str = body_str.clone();
+                async move {
+                    self.client
+                        .patch(&url)
+                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header(CONTENT_TYPE, "application/json; charset=UTF-8")
+                        .body(body_str)
+                        .send()
+                        .await
+                }
+            })
+            .await?;
 
+        resp.error_for_status()?;
         Ok(())
     }
 
@@ -169,16 +253,23 @@ impl DriveClient {
             }
 
             let url = format!("{}/drive/v3/files", self.base_url);
-            let resp: DriveFileList = self
-                .client
-                .get(&url)
-                .header(AUTHORIZATION, format!("Bearer {}", token))
-                .query(&[("q", query.as_str()), ("fields", "files(id, name)")])
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
+            let resp_res = self
+                .send_with_retry(|| {
+                    let token = token.clone();
+                    let url = url.clone();
+                    let query = query.clone();
+                    async move {
+                        self.client
+                            .get(&url)
+                            .header(AUTHORIZATION, format!("Bearer {}", token))
+                            .query(&[("q", query.as_str()), ("fields", "files(id, name)")])
+                            .send()
+                            .await
+                    }
+                })
                 .await?;
+
+            let resp: DriveFileList = resp_res.error_for_status()?.json().await?;
 
             if let Some(first) = resp.files.first() {
                 first.id.clone()
@@ -190,19 +281,26 @@ impl DriveClient {
                 if !parent_folder_id.is_empty() {
                     meta["parents"] = serde_json::json!([parent_folder_id]);
                 }
+                let meta_str = meta.to_string();
 
-                let created: DriveFileItem = self
-                    .client
-                    .post(&url)
-                    .header(AUTHORIZATION, format!("Bearer {}", token))
-                    .header(CONTENT_TYPE, "application/json; charset=UTF-8")
-                    .body(meta.to_string())
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
+                let created_res = self
+                    .send_with_retry(|| {
+                        let token = token.clone();
+                        let url = url.clone();
+                        let meta_str = meta_str.clone();
+                        async move {
+                            self.client
+                                .post(&url)
+                                .header(AUTHORIZATION, format!("Bearer {}", token))
+                                .header(CONTENT_TYPE, "application/json; charset=UTF-8")
+                                .body(meta_str)
+                                .send()
+                                .await
+                        }
+                    })
                     .await?;
 
+                let created: DriveFileItem = created_res.error_for_status()?.json().await?;
                 created.id
             }
         };
@@ -211,15 +309,26 @@ impl DriveClient {
             "{}/upload/drive/v3/files/{}?uploadType=media",
             self.upload_base_url, file_id
         );
+        let content_str = content.to_string();
 
-        self.client
-            .patch(&upload_url)
-            .header(AUTHORIZATION, format!("Bearer {}", token))
-            .header(CONTENT_TYPE, "text/plain; charset=UTF-8")
-            .body(content.to_string())
-            .send()
-            .await?
-            .error_for_status()?;
+        let patch_res = self
+            .send_with_retry(|| {
+                let token = token.clone();
+                let upload_url = upload_url.clone();
+                let content_str = content_str.clone();
+                async move {
+                    self.client
+                        .patch(&upload_url)
+                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header(CONTENT_TYPE, "text/plain; charset=UTF-8")
+                        .body(content_str)
+                        .send()
+                        .await
+                }
+            })
+            .await?;
+
+        patch_res.error_for_status()?;
 
         Ok(file_id)
     }
@@ -249,7 +358,7 @@ impl DriveClient {
             _ => "video/mp2t",
         };
 
-        // 1. Initiate resumable upload
+        // 1. Initiate resumable upload with retry
         let parent_opt = if parent_folder_id.is_empty() {
             None
         } else {
@@ -260,15 +369,26 @@ impl DriveClient {
             "{}/upload/drive/v3/files?uploadType=resumable",
             self.upload_base_url
         );
+
         let init_resp = self
-            .client
-            .post(&init_url)
-            .header(AUTHORIZATION, format!("Bearer {}", token))
-            .header("X-Upload-Content-Type", mime_type)
-            .header("X-Upload-Content-Length", file_size.to_string())
-            .header(CONTENT_TYPE, "application/json; charset=UTF-8")
-            .body(init_body)
-            .send()
+            .send_with_retry(|| {
+                let token = token.clone();
+                let init_url = init_url.clone();
+                let mime_type = mime_type.to_string();
+                let file_size_str = file_size.to_string();
+                let init_body = init_body.clone();
+                async move {
+                    self.client
+                        .post(&init_url)
+                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header("X-Upload-Content-Type", mime_type)
+                        .header("X-Upload-Content-Length", file_size_str)
+                        .header(CONTENT_TYPE, "application/json; charset=UTF-8")
+                        .body(init_body)
+                        .send()
+                        .await
+                }
+            })
             .await?
             .error_for_status()?;
 
@@ -291,10 +411,10 @@ impl DriveClient {
 
         let buffer_size = (file_size as usize).clamp(64 * 1024, RESUMABLE_UPLOAD_BUFFER_SIZE);
 
-        // 2. Stream chunk with progress, retrying transient errors
+        // 2. Stream chunk with progress, retrying transient errors with exponential backoff
         for attempt in 0..=max_retries {
             if attempt > 0 {
-                let backoff_ms = 50 * (1 << (attempt - 1));
+                let backoff_ms = 100 * (1 << (attempt - 1));
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
 
