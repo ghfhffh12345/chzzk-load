@@ -135,25 +135,24 @@ fn test_build_ffmpeg_command() {
         .expect("missing -headers");
     assert!(args[headers_idx + 1].contains("Cookie: NID_AUT=abc; NID_SES=xyz"));
 
-    let reconnect_idx = args
-        .iter()
-        .position(|a| a == "-reconnect")
-        .expect("missing -reconnect flag");
     let i_idx = args.iter().position(|a| a == "-i").expect("missing -i");
+    assert!(i_idx > 0);
     assert!(
-        reconnect_idx < i_idx,
-        "-reconnect must precede -i for FFmpeg input options"
+        !args.contains(&"-reconnect".to_string()),
+        "-reconnect must NOT be included as it causes false reconnect loops on HLS m3u8 playlist EOF"
     );
     assert!(
         !args.contains(&"-reconnect_at_eof".to_string()),
         "-reconnect_at_eof must NOT be included as it causes false reconnect loops on HLS m3u8 playlist EOF"
     );
-    assert!(args.contains(&"-reconnect_streamed".to_string()));
-    assert!(args.contains(&"-reconnect_delay_max".to_string()));
+    assert!(
+        !args.contains(&"-reconnect_streamed".to_string()),
+        "-reconnect_streamed must NOT be included as it treats manifest EOF as stream drop"
+    );
 }
 
 #[test]
-fn test_ffmpeg_omits_reconnect_at_eof_for_hls() {
+fn test_ffmpeg_omits_reconnect_flags_for_hls() {
     let out_pattern = Path::new("test_%04d.ts");
     let cmd = build_ffmpeg_command("http://example.com/live.m3u8", out_pattern, 10, None);
     let std_cmd = cmd.as_std();
@@ -163,8 +162,8 @@ fn test_ffmpeg_omits_reconnect_at_eof_for_hls() {
         .collect();
 
     assert!(
-        !args.iter().any(|a| a == "-reconnect_at_eof"),
-        "FFmpeg command must omit -reconnect_at_eof to avoid 20-30s reconnect stalls when reading m3u8 playlists"
+        !args.iter().any(|a| a.starts_with("-reconnect")),
+        "FFmpeg command must omit -reconnect flags to avoid 20-30s reconnect stalls when reading m3u8 playlists"
     );
 }
 
