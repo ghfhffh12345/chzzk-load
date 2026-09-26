@@ -25,22 +25,21 @@ pub fn detect_sealed_chunks(
                 continue;
             }
 
+            let file_name = entry.file_name();
+            let name_str = match file_name.to_str() {
+                Some(s) if s.len() >= 3 && s[s.len() - 3..].eq_ignore_ascii_case(".ts") => s,
+                _ => continue,
+            };
+
             let path = entry.path();
-            if path
-                .extension()
-                .and_then(|s| s.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("ts"))
-                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+            let meta = match entry.metadata() {
+                Ok(m) if m.len() > 0 => Ok(m),
+                _ => fs::metadata(&path),
+            };
+            if let Ok(meta) = meta
+                && meta.len() > 0
             {
-                let meta = match entry.metadata() {
-                    Ok(m) if m.len() > 0 => Ok(m),
-                    _ => fs::metadata(&path),
-                };
-                if let Ok(meta) = meta
-                    && meta.len() > 0
-                {
-                    chunks.push((name.to_string(), path, meta.len()));
-                }
+                chunks.push((name_str.to_string(), path, meta.len()));
             }
         }
     }

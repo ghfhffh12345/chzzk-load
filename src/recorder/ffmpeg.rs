@@ -2,15 +2,16 @@ use std::path::Path;
 use tokio::process::Command;
 
 pub fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| match c {
-            '\\' | '/' | ':' | '*' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
-            other => other,
-        })
-        .collect::<String>()
-        .trim()
-        .to_string()
+    let trimmed = name.trim();
+    let mut result = String::with_capacity(trimmed.len());
+    for c in trimmed.chars() {
+        match c {
+            '\\' | '/' | ':' | '*' | '"' | '<' | '>' | '|' => result.push('_'),
+            c if c.is_control() => result.push('_'),
+            other => result.push(other),
+        }
+    }
+    result
 }
 
 pub fn build_ffmpeg_command(
@@ -30,10 +31,13 @@ pub fn build_ffmpeg_command(
         .arg("warning")
         .arg("-y");
 
-    let mut headers =
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n".to_string();
+    let mut headers = String::from(
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n",
+    );
     if let Some(cookie) = cookie_header {
-        headers.push_str(&format!("Cookie: {}\r\n", cookie));
+        headers.push_str("Cookie: ");
+        headers.push_str(cookie);
+        headers.push_str("\r\n");
     }
     cmd.arg("-headers").arg(headers);
     cmd.arg("-extension_picky").arg("0");
