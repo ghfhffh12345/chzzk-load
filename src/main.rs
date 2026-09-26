@@ -4,10 +4,11 @@ use std::time::Duration;
 
 use clap::Parser;
 use crossterm::cursor::Show;
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{Event, KeyCode};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures_util::StreamExt;
 use ratatui::prelude::*;
 use tokio_util::sync::CancellationToken;
 
@@ -114,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let orch_handle = tokio::spawn(orchestrator.clone().run());
+    let mut orch_handle = tokio::spawn(orchestrator.clone().run());
 
     // Setup terminal
     enable_raw_mode()?;
@@ -126,12 +127,15 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::from_settings(&settings);
 
     // Main TUI render loop
-    let tick_rate = Duration::from_millis(100);
+    let mut event_reader = crossterm::event::EventStream::new();
+    let mut tick_interval = tokio::time::interval(Duration::from_millis(250));
+    let mut needs_redraw = true;
 
     loop {
         // Check if external shutdown signal (e.g. Ctrl+C) was received
         if cancel_token.is_cancelled() && !app.is_shutting_down {
             app.is_shutting_down = true;
+            needs_redraw = true;
         }
 
         // Check exit conditions
@@ -143,50 +147,70 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        terminal.draw(|f| draw_ui(f, &app))?;
+        if needs_redraw {
+            terminal.draw(|f| draw_ui(f, &app))?;
+            needs_redraw = false;
+        }
 
-        if event::poll(tick_rate)?
-            && let Event::Key(key) = event::read()?
-        {
-            if key.kind == crossterm::event::KeyEventKind::Release {
-                continue;
+        tokio::select! {
+            biased;
+
+            // Immediate exit when orchestrator terminates during shutdown
+            _ = &mut orch_handle, if app.is_shutting_down => {
+                break;
             }
-            if key.code == KeyCode::Char('q') {
-                if key.kind == crossterm::event::KeyEventKind::Press {
-                    if app.is_shutting_down {
-                        // Second 'q' press triggers immediate exit
-                        app.should_quit = true;
-                        cancel_token.cancel();
-                        break;
-                    } else {
-                        app.is_shutting_down = true;
-                        cancel_token.cancel();
-                    }
+
+            // Drain engine and upload events with sub-millisecond latency
+            Some(ev) = event_rx.recv() => {
+                app.handle_event(ev);
+                while let Ok(ev) = event_rx.try_recv() {
+                    app.handle_event(ev);
                 }
-            } else {
-                app.handle_event(AppEvent::Key(key));
+                if app.refresh_requested {
+                    app.refresh_requested = false;
+                    let _ = event_tx
+                        .send(AppEvent::Log(LogEntry::info("Manual refresh triggered...")))
+                        .await;
+                    orchestrator.trigger_refresh();
+                }
+                needs_redraw = true;
             }
-        }
 
-        while let Ok(ev) = event_rx.try_recv() {
-            app.handle_event(ev);
-        }
+            // Asynchronously process crossterm events (non-blocking)
+            Some(item) = event_reader.next() => {
+                if let Ok(Event::Key(key)) = item
+                    && key.kind != crossterm::event::KeyEventKind::Release
+                {
+                    if key.code == KeyCode::Char('q') && key.kind == crossterm::event::KeyEventKind::Press {
+                        if app.is_shutting_down {
+                            // Second 'q' press triggers immediate exit
+                            app.should_quit = true;
+                            cancel_token.cancel();
+                            break;
+                        } else {
+                            app.is_shutting_down = true;
+                            cancel_token.cancel();
+                        }
+                    } else {
+                        app.handle_event(AppEvent::Key(key));
+                    }
+                    if app.refresh_requested {
+                        app.refresh_requested = false;
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::info("Manual refresh triggered...")))
+                            .await;
+                        orchestrator.trigger_refresh();
+                    }
+                    needs_redraw = true;
+                }
+            }
 
-        if app.refresh_requested {
-            app.refresh_requested = false;
-            let _ = event_tx
-                .send(AppEvent::Log(LogEntry::info("Manual refresh triggered...")))
-                .await;
-            orchestrator.trigger_refresh();
-        }
-
-        // Re-check exit conditions after event processing
-        if app.should_quit {
-            cancel_token.cancel();
-            break;
-        }
-        if app.is_shutting_down && orch_handle.is_finished() {
-            break;
+            // Periodic tick for elapsed time & progress animations
+            _ = tick_interval.tick() => {
+                if !app.active_recording_starts.is_empty() || !app.active_uploads.is_empty() || app.is_shutting_down {
+                    needs_redraw = true;
+                }
+            }
         }
     }
 

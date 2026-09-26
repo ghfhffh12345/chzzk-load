@@ -19,6 +19,13 @@ pub fn log_kind_badge_and_style(kind: LogKind) -> (&'static str, Style) {
     }
 }
 
+const HORIZONTAL_RULE: &str = "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────";
+
+fn horizontal_rule(width: usize) -> &'static str {
+    let char_count = width.min(HORIZONTAL_RULE.len() / 3);
+    &HORIZONTAL_RULE[..char_count * 3]
+}
+
 pub fn draw_ui(f: &mut Frame, app: &App) {
     let area = f.area();
     if area.width == 0 || area.height == 0 {
@@ -90,7 +97,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     f.render_widget(header, header_area);
 
     // 1. Header Divider
-    let header_divider = Paragraph::new("─".repeat(header_div_area.width as usize))
+    let header_divider = Paragraph::new(horizontal_rule(header_div_area.width as usize))
         .style(Style::default().fg(theme::DIVIDER));
     f.render_widget(header_divider, header_div_area);
 
@@ -132,15 +139,13 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
         visible_channels
             .iter()
             .map(|c| {
-                let (status, color) = if c.is_active {
-                    ("ACTIVE", theme::CYAN)
+                let (badge_str, color) = if c.is_active {
+                    (" ACTIVE  ", theme::CYAN)
                 } else if c.is_live {
-                    ("LIVE", theme::GREEN)
+                    (" LIVE    ", theme::GREEN)
                 } else {
-                    ("OFFLINE", theme::MUTED_GRAY)
+                    (" OFFLINE ", theme::MUTED_GRAY)
                 };
-
-                let badge_str = format!(" {:<7} ", status);
                 let badge_len = 9;
                 let badge_style = Style::default().fg(color);
 
@@ -348,10 +353,10 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
         };
         let title_len = log_title.chars().count();
         let rule_len = (log_divider_area.width as usize).saturating_sub(title_len);
-        let log_divider_text: String = format!("{}{}", log_title, "─".repeat(rule_len))
-            .chars()
-            .take(log_divider_area.width as usize)
-            .collect();
+        let rule = horizontal_rule(rule_len);
+        let mut log_divider_text = String::with_capacity(log_title.len() + rule.len());
+        log_divider_text.push_str(&log_title);
+        log_divider_text.push_str(rule);
         let log_divider =
             Paragraph::new(log_divider_text).style(Style::default().fg(theme::DIVIDER));
         f.render_widget(log_divider, log_divider_area);
@@ -360,32 +365,27 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
             let inner_height = log_area.height as usize;
             let inner_width = log_area.width as usize;
 
-            // Flatten log entries directly into (LogKind, &str) borrowed pairs
-            let mut flattened_lines: Vec<(LogKind, &str)> = Vec::new();
-            for entry in &app.logs {
-                for line in entry.message.lines() {
-                    flattened_lines.push((entry.kind, line));
-                }
-            }
-
-            let total_lines = flattened_lines.len();
+            let total_lines: usize = app.logs.iter().map(|e| e.message.lines().count()).sum();
             let max_scroll = total_lines.saturating_sub(inner_height);
             let effective_scroll = app.log_scroll.min(max_scroll);
 
             let end_idx = total_lines.saturating_sub(effective_scroll);
             let start_idx = end_idx.saturating_sub(inner_height);
+            let take_count = end_idx - start_idx;
 
-            let slice = &flattened_lines[start_idx..end_idx];
-
-            let visible_lines: Vec<Line> = slice
+            let visible_lines: Vec<Line> = app
+                .logs
                 .iter()
+                .flat_map(|e| e.message.lines().map(move |l| (e.kind, l)))
+                .skip(start_idx)
+                .take(take_count)
                 .map(|(kind, message_str)| {
-                    let (badge_str, badge_style) = log_kind_badge_and_style(*kind);
+                    let (badge_str, badge_style) = log_kind_badge_and_style(kind);
                     let badge_len = 8;
                     if inner_width >= badge_len + message_str.chars().count() {
                         Line::from(vec![
                             Span::styled(badge_str, badge_style),
-                            Span::styled(*message_str, Style::default()),
+                            Span::styled(message_str, Style::default()),
                         ])
                     } else if inner_width > badge_len {
                         let available = inner_width.saturating_sub(badge_len + 1);
@@ -412,7 +412,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     }
 
     // 5. Footer Divider
-    let footer_divider = Paragraph::new("─".repeat(footer_div_area.width as usize))
+    let footer_divider = Paragraph::new(horizontal_rule(footer_div_area.width as usize))
         .style(Style::default().fg(theme::DIVIDER));
     f.render_widget(footer_divider, footer_div_area);
 

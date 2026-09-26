@@ -108,9 +108,9 @@ impl std::fmt::Display for LogEntry {
 
 impl<T: Into<String>> From<T> for LogEntry {
     fn from(s: T) -> Self {
-        let text = s.into();
+        let mut text = s.into();
         if let Some(rest) = text.strip_prefix('[')
-            && let Some((tag, msg)) = rest.split_once(']')
+            && let Some((tag, _)) = rest.split_once(']')
         {
             let kind = match tag.trim() {
                 "ERROR" => LogKind::Error,
@@ -123,9 +123,14 @@ impl<T: Into<String>> From<T> for LogEntry {
                 "CHAT" => LogKind::Chat,
                 _ => LogKind::Info,
             };
+            let prefix_len = 1 + tag.len() + 1;
+            let after_tag = &text[prefix_len..];
+            let trimmed = after_tag.trim_start();
+            let trim_len = after_tag.len() - trimmed.len();
+            text.drain(..(prefix_len + trim_len));
             return Self {
                 kind,
-                message: msg.trim_start().to_string(),
+                message: text,
             };
         }
         Self {
