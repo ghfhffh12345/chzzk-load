@@ -1,6 +1,8 @@
-use crate::drive::client::DriveClient;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::drive::client::DriveClient;
+
+/// Represents an upload task for a single video chunk or metadata file.
 #[derive(Debug, Clone)]
 pub struct UploadTask {
     pub channel_id: String,
@@ -10,12 +12,14 @@ pub struct UploadTask {
     pub streamer_name: String,
 }
 
+/// Worker responsible for executing resumable file uploads and cleaning up local files.
 pub struct UploadWorker;
 
 impl UploadWorker {
+    /// Uploads a file at `chunk_path` to Google Drive and deletes it locally upon confirmation.
     pub async fn upload_path_and_delete(
         client: &DriveClient,
-        chunk_path: &std::path::Path,
+        chunk_path: &Path,
         session_folder_id: &str,
         on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
     ) -> anyhow::Result<u64> {
@@ -28,6 +32,7 @@ impl UploadWorker {
         Ok(size)
     }
 
+    /// Uploads the given [`UploadTask`] to Google Drive and deletes the file locally upon confirmation.
     pub async fn upload_and_delete(
         client: &DriveClient,
         task: UploadTask,

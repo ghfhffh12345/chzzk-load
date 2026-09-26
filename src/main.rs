@@ -71,8 +71,7 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => {
                 let _ = event_tx
                     .send(AppEvent::Log(LogEntry::warn(format!(
-                        "Drive auth failed: {}",
-                        e
+                        "Drive auth failed: {e}"
                     ))))
                     .await;
                 None
@@ -81,8 +80,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let _ = event_tx
             .send(AppEvent::Log(LogEntry::info(format!(
-                "'{}' not found; running in local-only recording mode",
-                creds_path.display()
+                "'{path}' not found; running in local-only recording mode",
+                path = creds_path.display()
             ))))
             .await;
         None
@@ -187,10 +186,9 @@ async fn main() -> anyhow::Result<()> {
                             app.should_quit = true;
                             cancel_token.cancel();
                             break;
-                        } else {
-                            app.is_shutting_down = true;
-                            cancel_token.cancel();
                         }
+                        app.is_shutting_down = true;
+                        cancel_token.cancel();
                     } else {
                         app.handle_event(AppEvent::Key(key));
                     }

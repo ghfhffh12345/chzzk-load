@@ -95,7 +95,7 @@ impl DriveClient {
                     if status.is_success() {
                         return Ok(resp);
                     } else if status.as_u16() == 429 || status.is_server_error() {
-                        let err_msg = format!("HTTP error: status {}", status);
+                        let err_msg = format!("HTTP error: status {status}");
                         last_error = Some(anyhow!(err_msg));
                         continue;
                     } else {
@@ -129,11 +129,10 @@ impl DriveClient {
         // Query if exists
         let escaped_name = folder_name.replace('\\', "\\\\").replace('\'', "\\'");
         let mut query = format!(
-            "mimeType = 'application/vnd.google-apps.folder' and name = '{}' and trashed = false",
-            escaped_name
+            "mimeType = 'application/vnd.google-apps.folder' and name = '{escaped_name}' and trashed = false"
         );
         if let Some(pid) = parent_id.filter(|p| !p.is_empty()) {
-            query.push_str(&format!(" and '{}' in parents", pid));
+            query.push_str(&format!(" and '{pid}' in parents"));
         }
 
         let url = format!("{}/drive/v3/files", self.base_url);
@@ -145,7 +144,7 @@ impl DriveClient {
                 async move {
                     self.client
                         .get(&url)
-                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
                         .query(&[("q", query.as_str()), ("fields", "files(id, name)")])
                         .send()
                         .await
@@ -183,7 +182,7 @@ impl DriveClient {
                 async move {
                     self.client
                         .post(&url)
-                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
                         .header(CONTENT_TYPE, "application/json; charset=UTF-8")
                         .body(meta_str)
                         .send()
@@ -221,7 +220,7 @@ impl DriveClient {
                 async move {
                     self.client
                         .patch(&url)
-                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
                         .header(CONTENT_TYPE, "application/json; charset=UTF-8")
                         .body(body_str)
                         .send()
@@ -247,9 +246,9 @@ impl DriveClient {
             fid.to_string()
         } else {
             let escaped_name = file_name.replace('\\', "\\\\").replace('\'', "\\'");
-            let mut query = format!("name = '{}' and trashed = false", escaped_name);
+            let mut query = format!("name = '{escaped_name}' and trashed = false");
             if !parent_folder_id.is_empty() {
-                query.push_str(&format!(" and '{}' in parents", parent_folder_id));
+                query.push_str(&format!(" and '{parent_folder_id}' in parents"));
             }
 
             let url = format!("{}/drive/v3/files", self.base_url);
@@ -261,7 +260,7 @@ impl DriveClient {
                     async move {
                         self.client
                             .get(&url)
-                            .header(AUTHORIZATION, format!("Bearer {}", token))
+                            .header(AUTHORIZATION, format!("Bearer {token}"))
                             .query(&[("q", query.as_str()), ("fields", "files(id, name)")])
                             .send()
                             .await
@@ -291,7 +290,7 @@ impl DriveClient {
                         async move {
                             self.client
                                 .post(&url)
-                                .header(AUTHORIZATION, format!("Bearer {}", token))
+                                .header(AUTHORIZATION, format!("Bearer {token}"))
                                 .header(CONTENT_TYPE, "application/json; charset=UTF-8")
                                 .body(meta_str)
                                 .send()
@@ -319,7 +318,7 @@ impl DriveClient {
                 async move {
                     self.client
                         .patch(&upload_url)
-                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
                         .header(CONTENT_TYPE, "text/plain; charset=UTF-8")
                         .body(content_str)
                         .send()
@@ -380,7 +379,7 @@ impl DriveClient {
                 async move {
                     self.client
                         .post(&init_url)
-                        .header(AUTHORIZATION, format!("Bearer {}", token))
+                        .header(AUTHORIZATION, format!("Bearer {token}"))
                         .header("X-Upload-Content-Type", mime_type)
                         .header("X-Upload-Content-Length", file_size_str)
                         .header(CONTENT_TYPE, "application/json; charset=UTF-8")
@@ -420,7 +419,7 @@ impl DriveClient {
 
             let file = match File::open(file_path).await {
                 Ok(f) => f,
-                Err(e) => return Err(anyhow!("Failed to open file for upload: {}", e)),
+                Err(e) => return Err(anyhow!("Failed to open file for upload: {e}")),
             };
 
             let stream = FramedRead::with_capacity(file, BytesCodec::new(), buffer_size);
@@ -452,7 +451,7 @@ impl DriveClient {
                         let created: DriveFileItem = resp.json().await?;
                         return Ok(created.id);
                     } else if status.as_u16() == 429 || status.is_server_error() {
-                        let err_msg = format!("HTTP error: status {}", status);
+                        let err_msg = format!("HTTP error: status {status}");
                         last_error = Some(anyhow!(err_msg));
                         continue;
                     } else {

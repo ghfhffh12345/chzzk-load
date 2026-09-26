@@ -191,11 +191,11 @@ impl App {
         let secs = total_secs % 60;
 
         if hours > 0 {
-            format!("{}h {:02}m", hours, mins)
+            format!("{hours}h {mins:02}m")
         } else if mins > 0 {
-            format!("{}m {:02}s", mins, secs)
+            format!("{mins}m {secs:02}s")
         } else {
-            format!("{}s", secs)
+            format!("{secs}s")
         }
     }
 

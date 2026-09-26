@@ -127,7 +127,7 @@ impl DriveAuth {
         // Run one-time browser OAuth flow via loopback
         let (verifier, challenge) = generate_pkce_codes();
         let port = 8085;
-        let redirect_uri = format!("http://127.0.0.1:{}/oauth2callback", port);
+        let redirect_uri = format!("http://127.0.0.1:{port}/oauth2callback");
 
         let auth_url = format!(
             "{}?response_type=code&client_id={}&redirect_uri={}&scope=https://www.googleapis.com/auth/drive.file&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
@@ -138,14 +138,11 @@ impl DriveAuth {
         );
 
         println!("Starting browser authorization for Google Drive...");
-        println!(
-            "If your browser did not open automatically, visit:\n{}",
-            auth_url
-        );
+        println!("If your browser did not open automatically, visit:\n{auth_url}");
         let _ = open::that(&auth_url);
 
-        let server = Server::http(format!("127.0.0.1:{}", port))
-            .map_err(|e| anyhow!("Failed to bind local OAuth server: {}", e))?;
+        let server = Server::http(format!("127.0.0.1:{port}"))
+            .map_err(|e| anyhow!("Failed to bind local OAuth server: {e}"))?;
 
         let code = tokio::task::spawn_blocking(move || -> Result<String> {
             for request in server.incoming_requests() {
@@ -160,11 +157,10 @@ impl DriveAuth {
                     }
                     Some(Err((err, desc))) => {
                         let response = Response::from_string(format!(
-                            "Authentication failed: {} ({}). You can close this tab.",
-                            err, desc
+                            "Authentication failed: {err} ({desc}). You can close this tab."
                         ));
                         let _ = request.respond(response);
-                        return Err(anyhow!("Google OAuth error: {} ({})", err, desc));
+                        return Err(anyhow!("Google OAuth error: {err} ({desc})"));
                     }
                     None => {
                         let _ = request.respond(Response::from_string("Waiting for Google authorization..."));

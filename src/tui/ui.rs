@@ -73,22 +73,17 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     let (header_text, header_style) = if app.is_shutting_down {
         (
             format!(
-                " SHUTTING DOWN │ Stopping recordings & finishing uploads... │ Recording: {}/{} │ Archived: {}",
-                active_count, total_count, archived_str
+                " SHUTTING DOWN │ Stopping recordings & finishing uploads... │ Recording: {active_count}/{total_count} │ Archived: {archived_str}"
             ),
             Style::default()
                 .fg(theme::YELLOW)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
+        let version = env!("CARGO_PKG_VERSION");
         (
             format!(
-                " chzzk-load v{} │ Recording: {}/{} │ Total Recorded: {} │ Archived: {}",
-                env!("CARGO_PKG_VERSION"),
-                active_count,
-                total_count,
-                duration_str,
-                archived_str
+                " chzzk-load v{version} │ Recording: {active_count}/{total_count} │ Total Recorded: {duration_str} │ Archived: {archived_str}"
             ),
             Style::default().add_modifier(Modifier::BOLD),
         )
@@ -149,10 +144,13 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                 let badge_len = 9;
                 let badge_style = Style::default().fg(color);
 
+                let name = &c.name;
+                let title = &c.title;
                 let name_and_title = if c.is_active {
-                    format!("{} - {} ({} chats)", c.name, c.title, c.chat_count)
+                    let chat_count = c.chat_count;
+                    format!("{name} - {title} ({chat_count} chats)")
                 } else {
-                    format!("{} - {}", c.name, c.title)
+                    format!("{name} - {title}")
                 };
                 let name_style = Style::default();
 
@@ -189,10 +187,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
     let total_speed: f64 = app.active_uploads.values().map(|u| u.speed_mb_s).sum();
     let active_count = app.active_uploads.len();
     let upload_title = if active_count > 0 {
-        format!(
-            " Cloud Upload (Total: {:.1} MB/s │ {} Active)",
-            total_speed, active_count
-        )
+        format!(" Cloud Upload (Total: {total_speed:.1} MB/s │ {active_count} Active)")
     } else {
         " Cloud Upload (Idle)".to_string()
     };
@@ -227,15 +222,13 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
                     let badge_len = 6;
                     let badge_style = Style::default().fg(theme::GREEN);
 
+                    let speed = u.speed_mb_s;
                     let metrics_str = if inner_width_right >= 48 {
-                        format!(
-                            " {}% {:.1}/{:.1}MB {:.1}MB/s",
-                            pct, up_mb, tot_mb, u.speed_mb_s
-                        )
+                        format!(" {pct}% {up_mb:.1}/{tot_mb:.1}MB {speed:.1}MB/s")
                     } else if inner_width_right >= 30 {
-                        format!(" {}% {:.1}MB/s", pct, u.speed_mb_s)
+                        format!(" {pct}% {speed:.1}MB/s")
                     } else {
-                        format!(" {}%", pct)
+                        format!(" {pct}%")
                     };
                     let metrics_len = metrics_str.chars().count();
 
@@ -347,7 +340,7 @@ pub fn draw_ui(f: &mut Frame, app: &App) {
             0
         };
         let log_title = if effective_scroll > 0 {
-            format!("── Live Activity Logs (-{}) ", effective_scroll)
+            format!("── Live Activity Logs (-{effective_scroll}) ")
         } else {
             "── Live Activity Logs ".to_string()
         };

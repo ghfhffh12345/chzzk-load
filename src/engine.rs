@@ -47,12 +47,10 @@ impl ActiveSessionState {
     }
 
     pub fn folder_name(&self) -> String {
-        format!(
-            "[{}] {} - {}",
-            self.start_timestamp,
-            sanitize_filename(&self.streamer_name),
-            sanitize_filename(&self.current_title)
-        )
+        let streamer = sanitize_filename(&self.streamer_name);
+        let title = sanitize_filename(&self.current_title);
+        let timestamp = &self.start_timestamp;
+        format!("[{timestamp}] {streamer} - {title}")
     }
 
     pub fn record_title_change(&mut self, new_title: String, timestamp: String) {
@@ -64,7 +62,7 @@ impl ActiveSessionState {
         use std::fmt::Write;
         let mut out = String::new();
         for (timestamp, title) in &self.title_history {
-            let _ = writeln!(out, "[{}] {}", timestamp, title);
+            let _ = writeln!(out, "[{timestamp}] {title}");
         }
         out
     }
@@ -190,8 +188,7 @@ impl EngineOrchestrator {
                         }
                         Err(e) => {
                             let _ = event_tx.try_send(AppEvent::Log(LogEntry::error(format!(
-                                "Upload worker task join error: {}",
-                                e
+                                "Upload worker task join error: {e}"
                             ))));
                         }
                     }
@@ -283,8 +280,7 @@ impl EngineOrchestrator {
                                                 .await;
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::error(format!(
-                                                    "Upload failed for {}: {}",
-                                                    name, e
+                                                    "Upload failed for {name}: {e}"
                                                 ))))
                                                 .await;
                                         }
@@ -375,8 +371,7 @@ impl EngineOrchestrator {
                     Ok(sub_id) => {
                         let _ = event_tx
                             .send(AppEvent::Log(LogEntry::drive(format!(
-                                "Session folder ready: '{}/{}'",
-                                root_name, subfolder_name
+                                "Session folder ready: '{root_name}/{subfolder_name}'"
                             ))))
                             .await;
                         Some(sub_id)
@@ -384,8 +379,7 @@ impl EngineOrchestrator {
                     Err(e) => {
                         let _ = event_tx
                             .send(AppEvent::Log(LogEntry::warn(format!(
-                                "Failed to create Drive session subfolder: {}",
-                                e
+                                "Failed to create Drive session subfolder: {e}"
                             ))))
                             .await;
                         None
@@ -395,8 +389,7 @@ impl EngineOrchestrator {
             Err(e) => {
                 let _ = event_tx
                     .send(AppEvent::Log(LogEntry::warn(format!(
-                        "Failed to access Drive root folder: {}",
-                        e
+                        "Failed to access Drive root folder: {e}"
                     ))))
                     .await;
                 None
@@ -437,8 +430,7 @@ impl EngineOrchestrator {
                 }
                 let _ = event_tx
                     .send(AppEvent::Log(LogEntry::drive(format!(
-                        "Initialized 'title_history.txt' in Drive folder for {}",
-                        channel_id
+                        "Initialized 'title_history.txt' in Drive folder for {channel_id}"
                     ))))
                     .await;
             }
@@ -491,23 +483,20 @@ impl EngineOrchestrator {
                 if send_res.is_ok() {
                     let _ = event_tx
                         .send(AppEvent::Log(LogEntry::rec(format!(
-                            "{} sealed. Pushed to Drive upload queue.",
-                            chunk_name
+                            "{chunk_name} sealed. Pushed to Drive upload queue."
                         ))))
                         .await;
                 } else {
                     let _ = event_tx
                         .send(AppEvent::Log(LogEntry::rec(format!(
-                            "{} sealed (saved locally).",
-                            chunk_name
+                            "{chunk_name} sealed (saved locally)."
                         ))))
                         .await;
                 }
             } else {
                 let _ = event_tx
                     .send(AppEvent::Log(LogEntry::rec(format!(
-                        "{} sealed (saved locally).",
-                        chunk_name
+                        "{chunk_name} sealed (saved locally)."
                     ))))
                     .await;
             }
@@ -588,7 +577,7 @@ impl EngineOrchestrator {
             }
 
             let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-            let folder_name = format!("{}_{}", channel_id, timestamp);
+            let folder_name = format!("{channel_id}_{timestamp}");
             let recordings_base = resolve_path(Path::new(&settings.general.recordings_dir));
             let session_dir = recordings_base.join(&folder_name);
 
@@ -634,8 +623,7 @@ impl EngineOrchestrator {
                                 Ok(t) => {
                                     let _ = event_tx_chat
                                         .send(AppEvent::Log(LogEntry::chat(format!(
-                                            "Retrieved chat access token for channel {}",
-                                            chat_cid_id
+                                            "Retrieved chat access token for channel {chat_cid_id}"
                                         ))))
                                         .await;
                                     t
@@ -643,8 +631,7 @@ impl EngineOrchestrator {
                                 Err(e) => {
                                     let _ = event_tx_chat
                                         .send(AppEvent::Log(LogEntry::warn(format!(
-                                            "Failed to retrieve chat access token for channel {}: {}",
-                                            chat_cid_id, e
+                                            "Failed to retrieve chat access token for channel {chat_cid_id}: {e}"
                                         ))))
                                         .await;
                                     return;
@@ -681,8 +668,7 @@ impl EngineOrchestrator {
 
                         let _ = event_tx_chat
                             .send(AppEvent::Log(LogEntry::chat(format!(
-                                "Started real-time chat recording for channel {}",
-                                chat_cid_id
+                                "Started real-time chat recording for channel {chat_cid_id}"
                             ))))
                             .await;
 
@@ -690,16 +676,14 @@ impl EngineOrchestrator {
                             Ok(total_msgs) => {
                                 let _ = event_tx_chat
                                     .send(AppEvent::Log(LogEntry::chat(format!(
-                                        "Chat recording finished for channel {} ({} messages)",
-                                        chat_cid_id, total_msgs
+                                        "Chat recording finished for channel {chat_cid_id} ({total_msgs} messages)"
                                     ))))
                                     .await;
                             }
                             Err(e) => {
                                 let _ = event_tx_chat
                                     .send(AppEvent::Log(LogEntry::warn(format!(
-                                        "Chat recording error for channel {}: {}",
-                                        chat_cid_id, e
+                                        "Chat recording error for channel {chat_cid_id}: {e}"
                                     ))))
                                     .await;
                             }
@@ -753,8 +737,7 @@ impl EngineOrchestrator {
                 Err(e) => {
                     let _ = event_tx
                         .send(AppEvent::Log(LogEntry::error(format!(
-                            "Failed to spawn FFmpeg: {}",
-                            e
+                            "Failed to spawn FFmpeg: {e}"
                         ))))
                         .await;
                     session_cancel.cancel();
@@ -793,8 +776,7 @@ impl EngineOrchestrator {
                     _ = cancel_token.cancelled() => {
                         let _ = event_tx
                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                "Cancellation received for channel {}, stopping FFmpeg gracefully...",
-                                channel_id
+                                "Cancellation received for channel {channel_id}, stopping FFmpeg gracefully..."
                             ))))
                             .await;
 
@@ -809,8 +791,7 @@ impl EngineOrchestrator {
                             Ok(Ok(status)) => {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "FFmpeg process exited cleanly: {}",
-                                        status
+                                        "FFmpeg process exited cleanly: {status}"
                                     ))))
                                     .await;
                             }
@@ -892,15 +873,13 @@ impl EngineOrchestrator {
                                         if send_res.is_ok() {
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "{} sealed. Pushed to Drive upload queue.",
-                                                    chunk_name
+                                                    "{chunk_name} sealed. Pushed to Drive upload queue."
                                                 ))))
                                                 .await;
                                         } else {
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "{} sealed (saved locally).",
-                                                    chunk_name
+                                                    "{chunk_name} sealed (saved locally)."
                                                 ))))
                                                 .await;
                                         }
@@ -920,8 +899,7 @@ impl EngineOrchestrator {
                                     if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
                                         let _ = event_tx
                                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                                "{} sealed (saved locally).",
-                                                chunk_name
+                                                "{chunk_name} sealed (saved locally)."
                                             ))))
                                             .await;
                                     }
@@ -932,8 +910,7 @@ impl EngineOrchestrator {
                                 if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
                                     let _ = event_tx
                                         .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{} sealed (saved locally).",
-                                            chunk_name
+                                            "{chunk_name} sealed (saved locally)."
                                         ))))
                                         .await;
                                 }
@@ -947,8 +924,7 @@ impl EngineOrchestrator {
                             Ok(Some(status)) => {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "FFmpeg process exited with status: {}",
-                                        status
+                                        "FFmpeg process exited with status: {status}"
                                     ))))
                                     .await;
                                 true
@@ -957,8 +933,7 @@ impl EngineOrchestrator {
                             Err(e) => {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::warn(format!(
-                                        "Error waiting on FFmpeg child: {}",
-                                        e
+                                        "Error waiting on FFmpeg child: {e}"
                                     ))))
                                     .await;
                                 true
@@ -1032,15 +1007,13 @@ impl EngineOrchestrator {
                                         if send_res.is_ok() {
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "{} sealed. Pushed to Drive upload queue.",
-                                                    chunk_name
+                                                    "{chunk_name} sealed. Pushed to Drive upload queue."
                                                 ))))
                                                 .await;
                                         } else {
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "{} sealed (saved locally).",
-                                                    chunk_name
+                                                    "{chunk_name} sealed (saved locally)."
                                                 ))))
                                                 .await;
                                         }
@@ -1077,8 +1050,7 @@ impl EngineOrchestrator {
                                 if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
                                     let _ = event_tx
                                         .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{} sealed (saved locally).",
-                                            chunk_name
+                                            "{chunk_name} sealed (saved locally)."
                                         ))))
                                         .await;
                                 }
@@ -1145,15 +1117,13 @@ impl EngineOrchestrator {
                                 if send_res.is_ok() {
                                     let _ = event_tx
                                         .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{} sealed. Pushed to Drive upload queue.",
-                                            chunk_name
+                                            "{chunk_name} sealed. Pushed to Drive upload queue."
                                         ))))
                                         .await;
                                 } else {
                                     let _ = event_tx
                                         .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{} sealed (saved locally).",
-                                            chunk_name
+                                            "{chunk_name} sealed (saved locally)."
                                         ))))
                                         .await;
                                 }
@@ -1175,8 +1145,7 @@ impl EngineOrchestrator {
                             {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "{} sealed (saved locally).",
-                                        chunk_name
+                                        "{chunk_name} sealed (saved locally)."
                                     ))))
                                     .await;
                             }
@@ -1187,8 +1156,7 @@ impl EngineOrchestrator {
                         if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
                             let _ = event_tx
                                 .send(AppEvent::Log(LogEntry::rec(format!(
-                                    "{} sealed (saved locally).",
-                                    chunk_name
+                                    "{chunk_name} sealed (saved locally)."
                                 ))))
                                 .await;
                         }
@@ -1254,16 +1222,14 @@ impl EngineOrchestrator {
                             let _ = tokio::fs::remove_file(&chat_path).await;
                             let _ = event_tx
                                 .send(AppEvent::Log(LogEntry::drive(format!(
-                                    "Uploaded 'chat.jsonl' for {}",
-                                    channel_id
+                                    "Uploaded 'chat.jsonl' for {channel_id}"
                                 ))))
                                 .await;
                         }
                         Err(e) => {
                             let _ = event_tx
                                 .send(AppEvent::Log(LogEntry::warn(format!(
-                                    "Failed to upload 'chat.jsonl' for {}: {}",
-                                    channel_id, e
+                                    "Failed to upload 'chat.jsonl' for {channel_id}: {e}"
                                 ))))
                                 .await;
                         }
@@ -1624,8 +1590,7 @@ impl EngineOrchestrator {
             Ok(_) => {}
             Err(e) => {
                 let _ = self.event_tx.try_send(AppEvent::Log(LogEntry::warn(format!(
-                    "Failed to clean up empty session folders: {}",
-                    e
+                    "Failed to clean up empty session folders: {e}"
                 ))));
             }
         }

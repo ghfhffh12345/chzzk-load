@@ -30,7 +30,7 @@ pub fn compute_server_id(chat_channel_id: &str) -> u32 {
 
 /// Constructs the secure WebSocket endpoint URL for the assigned chat server ID.
 pub fn build_ws_url(server_id: u32) -> String {
-    format!("wss://kr-ss{}.chat.naver.com/chat", server_id)
+    format!("wss://kr-ss{server_id}.chat.naver.com/chat")
 }
 
 /// Parses a Chzzk chat packet into a list of `RecordedChatMessage` entries.
@@ -140,7 +140,7 @@ pub fn parse_chat_packet_owned(mut json: serde_json::Value) -> Vec<RecordedChatM
             Some(10) => "DONATION".to_string(),
             Some(11) => "SUBSCRIPTION".to_string(),
             Some(30) => "SYSTEM_MESSAGE".to_string(),
-            Some(other) => format!("TYPE_{}", other),
+            Some(other) => format!("TYPE_{other}"),
             None => match cmd {
                 CMD_DONATION => "DONATION".to_string(),
                 CMD_SUBSCRIPTION => "SUBSCRIPTION".to_string(),
