@@ -436,7 +436,7 @@ runTest('prepare-npm.js filters platforms with --platforms', () => {
   assert.ok(!fs.existsSync(path.join(tmpFilterDir, 'platforms', 'chzzk-load-darwin-x64')), 'darwin-x64 should not exist');
 });
 
-// Test 9: Error handling when binary is missing
+// Test 10: Error handling when binary is missing
 runTest('Launcher error handling: missing binary prints troubleshooting and exits code 1', () => {
   const envClean = { ...process.env };
   delete envClean.CHZZK_LOAD_BIN;
@@ -469,6 +469,127 @@ runTest('Launcher error handling: missing binary prints troubleshooting and exit
     stderr.includes('CHZZK_LOAD_BIN'),
     'Expected CHZZK_LOAD_BIN mention in troubleshooting'
   );
+});
+
+// Test 11: prepare-npm.js stages pre-release versions properly
+runTest('prepare-npm.js stages pre-release versions properly', () => {
+  const tmpPrereleaseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chzzk-load-prerelease-test-'));
+  const prereleaseVer = '0.2.0-beta.1';
+
+  const result = spawnSync('node', [
+    PREPARE_SCRIPT,
+    '--out-dir', tmpPrereleaseDir,
+    '--version', prereleaseVer,
+    '--dry-run',
+  ], { encoding: 'utf8' });
+
+  assert.strictEqual(result.status, 0, `prepare-npm failed: ${result.stderr}`);
+
+  const stagedRootPkg = JSON.parse(
+    fs.readFileSync(path.join(tmpPrereleaseDir, 'chzzk-load', 'package.json'), 'utf8')
+  );
+  assert.strictEqual(stagedRootPkg.version, prereleaseVer, 'Root package version should match pre-release version');
+
+  EXPECTED_PLATFORMS.forEach((p) => {
+    assert.strictEqual(
+      stagedRootPkg.optionalDependencies[p.name],
+      prereleaseVer,
+      `optionalDependencies pin for ${p.name} mismatch`
+    );
+    const platformPkg = JSON.parse(
+      fs.readFileSync(path.join(tmpPrereleaseDir, 'platforms', p.name, 'package.json'), 'utf8')
+    );
+    assert.strictEqual(platformPkg.version, prereleaseVer, `Platform package version for ${p.name} mismatch`);
+  });
+
+  try {
+    fs.rmSync(tmpPrereleaseDir, { recursive: true, force: true });
+  } catch (_) {}
+});
+
+// Test 12: resolveReleaseInfo resolves tag, version, isPrerelease, and npmTag correctly
+runTest('resolveReleaseInfo resolves tag, version, isPrerelease, and npmTag correctly', () => {
+  const { resolveReleaseInfo } = require('./prepare-npm.js');
+  assert.strictEqual(typeof resolveReleaseInfo, 'function', 'resolveReleaseInfo must be exported');
+
+  // Case 1: Standard release tag
+  const rel1 = resolveReleaseInfo({ tag: 'v0.1.0' });
+  assert.strictEqual(rel1.version, '0.1.0');
+  assert.strictEqual(rel1.tag, 'v0.1.0');
+  assert.strictEqual(rel1.isPrerelease, false);
+  assert.strictEqual(rel1.npmTag, 'latest');
+
+  // Case 2: SemVer pre-release tags auto-detection
+  const beta = resolveReleaseInfo({ tag: 'v0.2.0-beta.1' });
+  assert.strictEqual(beta.version, '0.2.0-beta.1');
+  assert.strictEqual(beta.tag, 'v0.2.0-beta.1');
+  assert.strictEqual(beta.isPrerelease, true);
+  assert.strictEqual(beta.npmTag, 'beta');
+
+  const rc = resolveReleaseInfo({ tag: 'v1.0.0-rc.2' });
+  assert.strictEqual(rc.isPrerelease, true);
+  assert.strictEqual(rc.npmTag, 'rc');
+
+  const alpha = resolveReleaseInfo({ tag: 'v1.0.0-alpha.0' });
+  assert.strictEqual(alpha.isPrerelease, true);
+  assert.strictEqual(alpha.npmTag, 'alpha');
+
+  const preview = resolveReleaseInfo({ tag: 'v1.0.0-preview.3' });
+  assert.strictEqual(preview.isPrerelease, true);
+  assert.strictEqual(preview.npmTag, 'preview');
+
+  // Case 3: Numeric-only pre-release identifier falls back to 'next'
+  const numericPre = resolveReleaseInfo({ tag: 'v1.0.0-1' });
+  assert.strictEqual(numericPre.isPrerelease, true);
+  assert.strictEqual(numericPre.npmTag, 'next');
+
+  // Case 4: Explicit prerelease input override
+  const forcedPre = resolveReleaseInfo({ tag: 'v0.1.0', prerelease: 'true' });
+  assert.strictEqual(forcedPre.isPrerelease, true);
+  assert.strictEqual(forcedPre.npmTag, 'next');
+
+  const forcedStable = resolveReleaseInfo({ tag: 'v0.2.0-beta.1', prerelease: 'false' });
+  assert.strictEqual(forcedStable.isPrerelease, false);
+  assert.strictEqual(forcedStable.npmTag, 'latest');
+
+  // Case 5: Explicit npmTag input override
+  const customTag = resolveReleaseInfo({ tag: 'v0.2.0-beta.1', npmTag: 'custom-channel' });
+  assert.strictEqual(customTag.isPrerelease, true);
+  assert.strictEqual(customTag.npmTag, 'custom-channel');
+
+  // Case 6: Fallback to Cargo.toml when tag is not passed
+  const fallback = resolveReleaseInfo({});
+  assert.strictEqual(typeof fallback.version, 'string');
+  assert.strictEqual(fallback.isPrerelease, false);
+  assert.strictEqual(fallback.npmTag, 'latest');
+});
+
+// Test 13: prepare-npm.js CLI --resolve-release outputs to GITHUB_OUTPUT
+runTest('prepare-npm.js CLI --resolve-release outputs to GITHUB_OUTPUT', () => {
+  const tmpOutputDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chzzk-load-gh-output-'));
+  const ghOutputFile = path.join(tmpOutputDir, 'github_output.txt');
+
+  const result = spawnSync('node', [
+    PREPARE_SCRIPT,
+    '--resolve-release',
+    '--tag', 'v0.3.0-rc.1',
+  ], {
+    env: { ...process.env, GITHUB_OUTPUT: ghOutputFile },
+    encoding: 'utf8',
+  });
+
+  assert.strictEqual(result.status, 0, `CLI failed: ${result.stderr || result.stdout}`);
+  assert.ok(fs.existsSync(ghOutputFile), 'GITHUB_OUTPUT file was not written');
+
+  const outputContent = fs.readFileSync(ghOutputFile, 'utf8');
+  assert.ok(outputContent.includes('tag=v0.3.0-rc.1'), 'tag output missing');
+  assert.ok(outputContent.includes('version=0.3.0-rc.1'), 'version output missing');
+  assert.ok(outputContent.includes('is_prerelease=true'), 'is_prerelease output missing');
+  assert.ok(outputContent.includes('npm_tag=rc'), 'npm_tag output missing');
+
+  try {
+    fs.rmSync(tmpOutputDir, { recursive: true, force: true });
+  } catch (_) {}
 });
 
 // Summary and cleanup

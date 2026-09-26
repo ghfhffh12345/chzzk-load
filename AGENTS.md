@@ -158,13 +158,13 @@ The repository uses GitHub Actions for continuous integration and automated mult
    - **`npm-test` job**: Sets up Node.js 20 on `ubuntu-latest` and executes `node scripts/test-npm-packages.js` to verify npm package generation, platform resolution, and launcher mechanics.
 
 2. **Automated Multi-Platform Release Pipeline (`.github/workflows/release.yml`)**:
-   - Triggers on tag pushes matching `v*` (e.g., `v0.1.0`) or manual trigger via `workflow_dispatch`.
-   - **`get-version`**: Resolves semver version from git tag or falls back to `Cargo.toml`.
+   - Triggers on tag pushes matching `v*` (e.g., `v0.1.0` or `v0.2.0-beta.1`) or manual trigger via `workflow_dispatch`.
+   - **`get-version`**: Resolves semver version from git tag or falls back to `Cargo.toml`. Automatically detects pre-releases (via SemVer hyphen e.g. `0.2.0-beta.1` or workflow inputs) and determines the npm distribution tag (e.g. `beta`, `rc`, `alpha`, or fallback to `next`, defaulting to `latest` for stable releases).
    - **`build-linux`**: Runs on `ubuntu-latest`. Uses Zig and `cargo-zigbuild` to compile static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
    - **`build-macos`**: Runs on `macos-14` (Apple Silicon runner). Compiles native binaries for `x86_64-apple-darwin` and `aarch64-apple-darwin`.
    - **`build-windows`**: Runs on `windows-latest`. Compiles native 64-bit binary for `x86_64-pc-windows-msvc`.
-   - **`github-release`**: Consolidates SHA256 checksums into `SHA256SUMS.txt`, collects archives (`.zip` for Windows, `.tar.gz` for Linux and macOS), and publishes a GitHub Release using `softprops/action-gh-release@v2`.
-   - **`publish-npm`**: Downloads raw binaries from all platform builds, executes `node scripts/prepare-npm.js` to generate platform packages and configure `optionalDependencies`, and publishes all platform packages and the root wrapper package to the npm registry with provenance.
+   - **`github-release`**: Consolidates SHA256 checksums into `SHA256SUMS.txt`, collects archives (`.zip` for Windows, `.tar.gz` for Linux and macOS), and publishes a GitHub Release using `softprops/action-gh-release@v2`. Correctly marks pre-releases (`prerelease: true`, `make_latest: false`).
+   - **`publish-npm`**: Downloads raw binaries from all platform builds, executes `node scripts/prepare-npm.js` to generate platform packages and configure `optionalDependencies`, and publishes all platform packages and the root wrapper package to the npm registry with provenance under the resolved distribution tag (`--tag <dist-tag>`).
 
 ### 4.2. Linux Cross-Compilation with `cargo-zigbuild`
 Instead of heavy Docker containers or slow QEMU system emulation for building ARM64 Linux binaries, the CI pipeline uses `cargo-zigbuild`:

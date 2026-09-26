@@ -13,6 +13,10 @@
  *   --platforms <list>   Comma-separated list of platform names (defaults to all)
  *   --dry-run            Generate package skeletons and placeholders without requiring real binaries
  *   --root-pkg <path>    Explicit path to root package.json to update
+ *   --resolve-release    Resolve tag, version, prerelease status, and npm dist-tag
+ *   --tag <tag>          Release tag for resolution (e.g. v0.1.0-beta.1)
+ *   --prerelease <bool>  Pre-release override (auto, true, false)
+ *   --npm-tag <tag>      npm dist-tag override (e.g. latest, next, beta)
  */
 
 const fs = require('fs');
@@ -38,6 +42,10 @@ function parseArgs(argv) {
     platforms: null,
     dryRun: false,
     rootPkg: null,
+    resolveRelease: false,
+    tag: null,
+    prerelease: 'auto',
+    npmTag: 'auto',
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -54,6 +62,14 @@ function parseArgs(argv) {
       args.dryRun = true;
     } else if (arg === '--root-pkg') {
       args.rootPkg = path.resolve(argv[++i]);
+    } else if (arg === '--resolve-release') {
+      args.resolveRelease = true;
+    } else if (arg === '--tag') {
+      args.tag = argv[++i];
+    } else if (arg === '--prerelease') {
+      args.prerelease = argv[++i];
+    } else if (arg === '--npm-tag') {
+      args.npmTag = argv[++i];
     } else if (arg === '--help' || arg === '-h') {
       printUsage();
       process.exit(0);
@@ -74,8 +90,56 @@ Options:
   --platforms <list>   Comma-separated platforms to build (defaults to all)
   --dry-run            Stage skeletons with placeholder binaries
   --root-pkg <path>    Explicit path to root wrapper package.json
+  --resolve-release    Resolve tag, version, prerelease status, and npm dist-tag
+  --tag <tag>          Release tag for resolution
+  --prerelease <bool>  Pre-release override (auto, true, false)
+  --npm-tag <tag>      npm dist-tag override (e.g. latest, next, beta)
   --help, -h           Show this help message
 `);
+}
+
+function resolveReleaseInfo({ tag, version, prerelease, npmTag } = {}) {
+  let resolvedVersion;
+  if (tag) {
+    resolvedVersion = tag.replace(/^v/, '');
+  } else if (version) {
+    resolvedVersion = version.replace(/^v/, '');
+  } else {
+    resolvedVersion = getVersion();
+  }
+
+  const resolvedTag = `v${resolvedVersion}`;
+
+  let isPrerelease = false;
+  if (prerelease === 'true' || prerelease === true) {
+    isPrerelease = true;
+  } else if (prerelease === 'false' || prerelease === false) {
+    isPrerelease = false;
+  } else {
+    // 'auto' or unspecified: detect based on hyphen in semver (e.g. 0.2.0-beta.1)
+    isPrerelease = resolvedVersion.includes('-');
+  }
+
+  let resolvedNpmTag = 'latest';
+  if (npmTag && npmTag !== 'auto') {
+    resolvedNpmTag = npmTag.trim();
+  } else if (isPrerelease) {
+    // Extract leading alphabetical identifier after hyphen
+    // e.g. 0.2.0-beta.1 -> beta, 1.0.0-rc.0 -> rc, 0.1.0-alpha.0 -> alpha
+    const match = resolvedVersion.match(/-([a-zA-Z]+)/);
+    if (match && match[1]) {
+      resolvedNpmTag = match[1].toLowerCase();
+    } else {
+      resolvedNpmTag = 'next';
+    }
+  }
+
+  return {
+    tag: resolvedTag,
+    version: resolvedVersion,
+    isPrerelease,
+    npmTag: resolvedNpmTag,
+  };
 }
 
 function getVersion(explicitVersion) {
@@ -279,6 +343,28 @@ function prepareNpm(options = {}) {
 function main() {
   const args = parseArgs(process.argv);
   try {
+    if (args.resolveRelease) {
+      const info = resolveReleaseInfo({
+        tag: args.tag,
+        version: args.version,
+        prerelease: args.prerelease,
+        npmTag: args.npmTag,
+      });
+
+      console.log(`[prepare-npm] Resolved Tag: ${info.tag}`);
+      console.log(`[prepare-npm] Resolved Version: ${info.version}`);
+      console.log(`[prepare-npm] Is Pre-release: ${info.isPrerelease}`);
+      console.log(`[prepare-npm] npm Dist-Tag: ${info.npmTag}`);
+
+      if (process.env.GITHUB_OUTPUT) {
+        fs.appendFileSync(
+          process.env.GITHUB_OUTPUT,
+          `tag=${info.tag}\nversion=${info.version}\nis_prerelease=${info.isPrerelease}\nnpm_tag=${info.npmTag}\n`
+        );
+      }
+      return;
+    }
+
     prepareNpm(args);
   } catch (err) {
     console.error(`[prepare-npm] Error: ${err.message}`);
@@ -295,4 +381,5 @@ module.exports = {
   prepareNpm,
   getVersion,
   parseArgs,
+  resolveReleaseInfo,
 };

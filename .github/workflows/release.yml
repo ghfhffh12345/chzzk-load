@@ -7,9 +7,22 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v0.1.0)'
+        description: 'Release tag (e.g. v0.1.0 or v0.2.0-beta.1)'
         required: false
         default: ''
+      prerelease:
+        description: 'Publish as pre-release (auto, true, false)'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - 'true'
+          - 'false'
+      npm_tag:
+        description: 'npm dist-tag override (e.g. latest, next, beta, alpha, rc, or auto)'
+        required: false
+        default: 'auto'
 
 permissions:
   contents: write
@@ -22,11 +35,13 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      npm_tag: ${{ steps.version.outputs.npm_tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Determine tag and version
+      - name: Determine tag, version, and release type
         id: version
         run: |
           RAW_TAG="${{ inputs.tag }}"
@@ -36,18 +51,10 @@ jobs:
             fi
           fi
 
-          if [ -n "$RAW_TAG" ]; then
-            VERSION="${RAW_TAG#v}"
-            TAG="v${VERSION}"
-          else
-            VERSION=$(grep -m1 '^version\s*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
-            TAG="v${VERSION}"
-          fi
-
-          echo "Resolved Tag: $TAG"
-          echo "Resolved Version: $VERSION"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          node scripts/prepare-npm.js --resolve-release \
+            --tag "$RAW_TAG" \
+            --prerelease "${{ inputs.prerelease || 'auto' }}" \
+            --npm-tag "${{ inputs.npm_tag || 'auto' }}"
 
   build-linux:
     name: Build Linux (x86_64 & aarch64 musl)
@@ -263,6 +270,8 @@ jobs:
             release-assets/chzzk-load-*.zip
             release-assets/SHA256SUMS.txt
           generate_release_notes: true
+          prerelease: ${{ needs.get-version.outputs.is_prerelease == 'true' }}
+          make_latest: ${{ needs.get-version.outputs.is_prerelease == 'true' && 'false' || 'true' }}
 
   publish-npm:
     name: Publish to npm
@@ -297,20 +306,21 @@ jobs:
       - name: Publish npm packages via OIDC (Trusted Publisher)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ needs.get-version.outputs.npm_tag }}
         run: |
           if [ -n "$NODE_AUTH_TOKEN" ]; then
             echo "NPM_TOKEN secret detected. Configuring auth token in ~/.npmrc..."
             echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
           fi
 
-          echo "Publishing platform packages to npm via GitHub Actions OIDC..."
+          echo "Publishing platform packages to npm (tag: ${NPM_TAG}) via GitHub Actions OIDC..."
           for dir in npm/platforms/*; do
             if [ -d "$dir" ]; then
-              echo "Publishing $dir..."
-              (cd "$dir" && npm publish --provenance --access public)
+              echo "Publishing $dir with tag ${NPM_TAG}..."
+              (cd "$dir" && npm publish --provenance --access public --tag "${NPM_TAG}")
             fi
           done
 
-          echo "Publishing root package chzzk-load via GitHub Actions OIDC..."
-          (cd npm/chzzk-load && npm publish --provenance --access public)
+          echo "Publishing root package chzzk-load (tag: ${NPM_TAG}) via GitHub Actions OIDC..."
+          (cd npm/chzzk-load && npm publish --provenance --access public --tag "${NPM_TAG}")
 
