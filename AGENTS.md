@@ -49,29 +49,29 @@ chzzk-load/
 │   ├── lib.rs                # Module root and library exports
 │   ├── app_path.rs           # Portable executable-relative path resolution
 │   ├── config.rs             # Settings structs, defaults, and serde loaders (upload_concurrency, record_chat)
+│   ├── chzzk.rs              # Chzzk API module root & re-exports
 │   ├── chzzk/                # Chzzk API integration
-│   │   ├── mod.rs
 │   │   ├── client.rs         # ChzzkClient: live detail polling, P2P/CDN HLS URL extraction, chat token API
 │   │   ├── chat.rs           # ChzzkChatClient: WebSocket handshake (cmd: 100), ping-pong, auto-reconnect backoff
 │   │   ├── models.rs         # Data structures: LiveDetailContent, LiveStreamInfo, etc.
 │   │   └── models_chat.rs    # Chat models: ChatAccessTokenResponse, RecordedChatMessage, WebSocket envelopes
+│   ├── recorder.rs           # Recorder module root & re-exports
 │   ├── recorder/             # FFmpeg process management, watcher & chat writer
-│   │   ├── mod.rs
 │   │   ├── ffmpeg.rs         # Command builder (-extension_picky 0, clean EOF termination, CHZZK_LOAD_FFMPEG_BIN)
 │   │   ├── watcher.rs        # SegmentWatcher, N+1 chunk sealing logic, zero-alloc extension check
 │   │   └── chat_writer.rs    # ChatWriter: byte-buffer direct serializer with dual-trigger flush
+│   ├── drive.rs              # Google Drive module root
 │   ├── drive/                # Google Drive API v3 client & OAuth2
-│   │   ├── mod.rs
 │   │   ├── auth.rs           # DriveAuth: PKCE authorization flow, token refresh
 │   │   └── client.rs         # DriveClient: folder caching, exponential backoff retries, resumable uploads, rename
-│   ├── uploader/             # Upload pipeline
-│   │   ├── mod.rs            # UploadTask, UploadWorker (upload-and-delete pipeline)
-│   ├── engine/               # Central orchestrator
-│   │   └── mod.rs            # EngineOrchestrator: channel polling, sessions, rate-limit queue, upload consumer
+│   ├── uploader.rs           # UploadTask, UploadWorker (upload-and-delete pipeline)
+│   ├── engine.rs             # EngineOrchestrator: channel polling, sessions, rate-limit queue, upload consumer
+│   ├── tui.rs                # Ratatui Dashboard module root & re-exports
 │   └── tui/                  # Ratatui Dashboard
-│       ├── mod.rs
 │       ├── app.rs            # App state, key event handling, channel list state, chat_count telemetry
+│       ├── console.rs        # Console codepage guard
 │       ├── event.rs          # Central AppEvent enum (ChatStats, LogEntry::chat)
+│       ├── theme.rs          # Color theme definitions
 │       └── ui.rs             # draw_ui: Layout constraints, strictly bounded zero-alloc logs view, chat badges
 └── tests/                    # Integration and smoke tests
     ├── test_app_path.rs
@@ -93,7 +93,7 @@ chzzk-load/
 
 ## 3. Core Architecture & Lifecycle
 
-### 3.1. Stream Polling & Session Orchestration (`src/engine/mod.rs`)
+### 3.1. Stream Polling & Session Orchestration (`src/engine.rs`)
 1. `EngineOrchestrator::run` executes a continuous loop polling monitored channels every `poll_interval_seconds`.
 2. When a channel returns `status == "OPEN"`:
    - Evaluates `is_recording` against `active_recordings`.
