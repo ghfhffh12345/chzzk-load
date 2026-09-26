@@ -248,9 +248,9 @@ impl DriveAuth {
 
                 let json = serde_json::to_string_pretty(&*guard)?;
                 if let Some(parent) = self.token_path.parent() {
-                    let _ = fs::create_dir_all(parent);
+                    let _ = tokio::fs::create_dir_all(parent).await;
                 }
-                let _ = fs::write(&self.token_path, json);
+                let _ = tokio::fs::write(&self.token_path, json).await;
             } else {
                 return Err(anyhow!(
                     "Google Drive access token is expired and no refresh_token is present in {}",

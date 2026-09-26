@@ -243,6 +243,12 @@ impl DriveClient {
 
         let token = self.auth.get_valid_access_token().await?;
 
+        let mime_type = match file_path.extension().and_then(|e| e.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("jsonl") => "application/x-ndjson",
+            Some(ext) if ext.eq_ignore_ascii_case("txt") => "text/plain; charset=UTF-8",
+            _ => "video/mp2t",
+        };
+
         // 1. Initiate resumable upload
         let parent_opt = if parent_folder_id.is_empty() {
             None
@@ -258,7 +264,7 @@ impl DriveClient {
             .client
             .post(&init_url)
             .header(AUTHORIZATION, format!("Bearer {}", token))
-            .header("X-Upload-Content-Type", "video/mp2t")
+            .header("X-Upload-Content-Type", mime_type)
             .header("X-Upload-Content-Length", file_size.to_string())
             .header(CONTENT_TYPE, "application/json; charset=UTF-8")
             .body(init_body)
@@ -283,7 +289,9 @@ impl DriveClient {
         let max_retries = 3;
         let mut last_error = None;
 
-        // 2. Stream chunk with progress using 256KB buffer, retrying transient errors
+        let buffer_size = (file_size as usize).clamp(64 * 1024, RESUMABLE_UPLOAD_BUFFER_SIZE);
+
+        // 2. Stream chunk with progress, retrying transient errors
         for attempt in 0..=max_retries {
             if attempt > 0 {
                 let backoff_ms = 50 * (1 << (attempt - 1));
@@ -295,9 +303,7 @@ impl DriveClient {
                 Err(e) => return Err(anyhow!("Failed to open file for upload: {}", e)),
             };
 
-            // 2. Stream chunk with progress using 8MB buffer, retrying transient errors
-            let stream =
-                FramedRead::with_capacity(file, BytesCodec::new(), RESUMABLE_UPLOAD_BUFFER_SIZE);
+            let stream = FramedRead::with_capacity(file, BytesCodec::new(), buffer_size);
             let mut uploaded = 0u64;
             let cb = Arc::clone(&progress_cb);
 
@@ -313,7 +319,7 @@ impl DriveClient {
                 .client
                 .put(&location)
                 .header(CONTENT_LENGTH, file_size.to_string())
-                .header(CONTENT_TYPE, "video/mp2t")
+                .header(CONTENT_TYPE, mime_type)
                 .header("Content-Range", &content_range)
                 .body(reqwest::Body::wrap_stream(progress_stream))
                 .send()

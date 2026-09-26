@@ -139,24 +139,28 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load_or_create_default(path: &Path) -> anyhow::Result<Self> {
-        if path.exists() {
-            let content = fs::read_to_string(path)
-                .with_context(|| format!("Failed to read settings from {}", path.display()))?;
-            let settings: Settings = serde_json::from_str(&content)
-                .with_context(|| format!("Failed to parse JSON in {}", path.display()))?;
-            Ok(settings)
-        } else {
-            let settings = Settings::default();
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create parent directory for {}", parent.display())
-                })?;
+        match fs::read_to_string(path) {
+            Ok(content) => {
+                let settings: Settings = serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse JSON in {}", path.display()))?;
+                Ok(settings)
             }
-            let content = serde_json::to_string_pretty(&settings)?;
-            fs::write(path, content).with_context(|| {
-                format!("Failed to write default settings to {}", path.display())
-            })?;
-            Ok(settings)
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let settings = Settings::default();
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).with_context(|| {
+                        format!("Failed to create parent directory for {}", parent.display())
+                    })?;
+                }
+                let content = serde_json::to_string_pretty(&settings)?;
+                fs::write(path, content).with_context(|| {
+                    format!("Failed to write default settings to {}", path.display())
+                })?;
+                Ok(settings)
+            }
+            Err(e) => {
+                Err(e).with_context(|| format!("Failed to read settings from {}", path.display()))
+            }
         }
     }
 }

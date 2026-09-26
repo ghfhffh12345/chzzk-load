@@ -1,10 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
-pub fn get_exe_dir() -> PathBuf {
+static EXE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+});
+
+pub fn get_exe_dir() -> PathBuf {
+    EXE_DIR.clone()
 }
 
 fn is_npm_context(exe_dir: &Path) -> bool {
