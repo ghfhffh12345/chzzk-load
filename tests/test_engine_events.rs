@@ -2485,3 +2485,261 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after_in_progress_upload()
+ {
+    use tokio_util::sync::CancellationToken;
+
+    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
+    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = chzzk_server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 887766,
+                    "liveTitle": "Live for shutdown serialization test",
+                    "channel": {
+                        "channelId": "chan_shutdown_serial",
+                        "channelName": "ShutdownSerialStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_orch_shutdown_serial_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let drive_server = Server::http("127.0.0.1:0").unwrap();
+    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
+
+    let (task2_unexpected_started_tx, mut task2_unexpected_started_rx) = mpsc::channel::<()>(1);
+    let (chunk0_in_flight_tx, mut chunk0_in_flight_rx) = mpsc::channel::<()>(1);
+    let (allow_chunk0_finish_tx, mut allow_chunk0_finish_rx) = mpsc::channel::<()>(1);
+
+    let put_chunk0_slot: Arc<std::sync::Mutex<Option<tiny_http::Request>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let put_chunk0_slot_clone = put_chunk0_slot.clone();
+
+    std::thread::spawn(move || {
+        let _ = allow_chunk0_finish_rx.blocking_recv();
+        for _ in 0..100 {
+            let maybe_req = put_chunk0_slot_clone.lock().unwrap().take();
+            if let Some(r) = maybe_req {
+                let mock_body = serde_json::json!({
+                    "id": "uploaded_chunk0_id",
+                    "name": "chunk_0000.ts"
+                });
+                let response = Response::from_string(mock_body.to_string()).with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = r.respond(response);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    });
+
+    let chunk0_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let chunk0_active_server = chunk0_active.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(mut req) = drive_server.recv() {
+            let path = req.url().to_string();
+            if req.method().as_str() == "GET" && path.contains("/drive/v3/files") {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "files": [{ "id": "mock_folder_111", "name": "Chzzk_Recordings" }]
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
+                let mut body = String::new();
+                req.as_reader().read_to_string(&mut body).unwrap();
+                let is_task2 = body.contains("chunk_0001.ts");
+                if is_task2 && chunk0_active_server.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = task2_unexpected_started_tx.try_send(());
+                }
+
+                let session_id = if is_task2 {
+                    "session_chunk_1"
+                } else {
+                    "session_chunk_0"
+                };
+                let session_url = format!("http://127.0.0.1:{}/{}", drive_port, session_id);
+                let response = Response::empty(200).with_header(
+                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else if req.method().as_str() == "PUT" {
+                if path.contains("session_chunk_0") {
+                    chunk0_active_server.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = chunk0_in_flight_tx.try_send(());
+                    *put_chunk0_slot.lock().unwrap() = Some(req);
+                } else if path.contains("session_chunk_1") {
+                    if chunk0_active_server.load(std::sync::atomic::Ordering::SeqCst) {
+                        let _ = task2_unexpected_started_tx.try_send(());
+                    }
+                    let response = Response::from_string(
+                        serde_json::json!({
+                            "id": "uploaded_chunk1_id",
+                            "name": "chunk_0001.ts"
+                        })
+                        .to_string(),
+                    )
+                    .with_header(
+                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                    );
+                    let _ = req.respond(response);
+                }
+            } else if req.method().as_str() == "POST" && path.contains("/drive/v3/files") {
+                let response = Response::from_string(
+                    serde_json::json!({
+                        "id": "mock_subfolder_222",
+                        "name": "mock_subfolder"
+                    })
+                    .to_string(),
+                )
+                .with_header(
+                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                );
+                let _ = req.respond(response);
+            } else {
+                let response = Response::empty(200);
+                let _ = req.respond(response);
+            }
+        }
+    });
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let drive_client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{}", drive_port),
+        format!("http://127.0.0.1:{}", drive_port),
+    );
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            record_chat: false,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_shutdown_serial".to_string(),
+            name: "ShutdownSerialStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{}", chzzk_port));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let cancel_token = CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        Some(drive_client),
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let run_handle = tokio::spawn(orchestrator.clone().run());
+
+    // Wait for RecordingStarted event
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(3), event_rx.recv()).await
+    {
+        if let AppEvent::RecordingStarted { channel_id, .. } = ev {
+            assert_eq!(channel_id, "chan_shutdown_serial");
+            break;
+        }
+    }
+
+    // Locate active session folder
+    let mut session_folder = None;
+    for _ in 0..20 {
+        if let Ok(entries) = fs::read_dir(&temp_dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    session_folder = Some(entry.path());
+                    break;
+                }
+            }
+        }
+        if session_folder.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let session_dir = session_folder.expect("Session directory must exist");
+    let chunk_path0 = session_dir.join("chunk_0000.ts");
+    let chunk_path1 = session_dir.join("chunk_0001.ts");
+
+    // Write chunk_0000.ts and chunk_0001.ts to trigger N+1 sealing of chunk_0000.ts
+    fs::write(&chunk_path0, b"TEST_CHUNK_0_DATA").unwrap();
+    fs::write(&chunk_path1, b"TEST_CHUNK_1_DATA").unwrap();
+
+    // Wait until chunk 0 starts uploading and reaches in-flight state (PUT request held)
+    let in_flight = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        chunk0_in_flight_rx.recv(),
+    )
+    .await;
+    assert!(
+        in_flight.is_ok(),
+        "chunk_0000.ts should have started uploading and reached in-flight PUT"
+    );
+
+    // Cancel while chunk 0 is actively uploading and chunk 1 is pending as final chunk
+    cancel_token.cancel();
+
+    // Verify chunk 1 is NOT started prematurely while chunk 0 is still in flight.
+    // FFmpeg stop takes up to 3.5s to exit cleanly and seal the final chunk.
+    let task2_started_prematurely = tokio::time::timeout(
+        std::time::Duration::from_millis(4000),
+        task2_unexpected_started_rx.recv(),
+    )
+    .await;
+
+    assert!(
+        task2_started_prematurely.is_err(),
+        "chunk_0001.ts must NOT start uploading concurrently while chunk_0000.ts is still in-flight on termination!"
+    );
+
+    // Allow chunk 0 to finish
+    chunk0_active.store(false, std::sync::atomic::Ordering::SeqCst);
+    let _ = allow_chunk0_finish_tx.send(()).await;
+
+    // Await run_handle
+    let res = tokio::time::timeout(std::time::Duration::from_secs(10), run_handle).await;
+    assert!(res.is_ok(), "Engine run_handle should complete cleanly");
+
+    assert!(
+        !chunk_path0.exists(),
+        "chunk 0 must be deleted after upload"
+    );
+    assert!(
+        !chunk_path1.exists(),
+        "chunk 1 must be deleted after upload"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
