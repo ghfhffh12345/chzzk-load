@@ -61,9 +61,10 @@ impl ActiveSessionState {
     }
 
     pub fn format_title_history(&self) -> String {
+        use std::fmt::Write;
         let mut out = String::new();
         for (timestamp, title) in &self.title_history {
-            out.push_str(&format!("[{}] {}\n", timestamp, title));
+            let _ = writeln!(out, "[{}] {}", timestamp, title);
         }
         out
     }
@@ -166,146 +167,111 @@ impl EngineOrchestrator {
         tokio::spawn(async move {
             let mut active_channels: HashSet<String> = HashSet::new();
             let mut channel_queues: HashMap<String, VecDeque<UploadTask>> = HashMap::new();
-            let mut channel_order: VecDeque<String> = VecDeque::new();
+            let mut ready_channels: VecDeque<String> = VecDeque::new();
             let mut join_set: tokio::task::JoinSet<String> = tokio::task::JoinSet::new();
             let mut rx_closed = false;
 
             loop {
-                // Periodically reap completed tasks
+                // Reap completed tasks
                 while let Some(res) = join_set.try_join_next() {
                     if let Ok(finished_cid) = res {
                         active_channels.remove(&finished_cid);
-                        if let Some(queue) = channel_queues.get(&finished_cid)
-                            && !queue.is_empty()
-                            && !channel_order.contains(&finished_cid)
-                        {
-                            channel_order.push_back(finished_cid);
-                        }
-                    }
-                }
-
-                if join_set.is_empty() {
-                    active_channels.clear();
-                }
-
-                // Restore any pending channel into channel_order if missing
-                if channel_order.is_empty() && !channel_queues.is_empty() {
-                    for cid in channel_queues.keys() {
-                        channel_order.push_back(cid.clone());
-                    }
-                }
-
-                // Dispatch pending tasks for idle channels up to concurrency limit
-                while join_set.len() < concurrency && !channel_order.is_empty() {
-                    let mut dispatched = false;
-                    let len = channel_order.len();
-                    for _ in 0..len {
-                        let ch_id = channel_order.pop_front().unwrap();
-                        if !active_channels.contains(&ch_id) {
-                            if let Some(queue) = channel_queues.get_mut(&ch_id)
-                                && let Some(task) = queue.pop_front()
-                            {
-                                active_channels.insert(ch_id.clone());
-                                if !queue.is_empty() {
-                                    channel_order.push_back(ch_id.clone());
-                                } else {
-                                    channel_queues.remove(&ch_id);
-                                }
-
-                                let drive = drive_opt.clone();
-                                let event_tx = event_tx.clone();
-                                let task_cid = ch_id.clone();
-
-                                join_set.spawn(async move {
-                                        let _ = std::panic::AssertUnwindSafe(async move {
-                                                if let Some(ref drive) = drive {
-                                                    let tx = event_tx.clone();
-                                                    let cid = task.channel_id.clone();
-                                                    let streamer = task.streamer_name.clone();
-                                                    let name = task.chunk_name.clone();
-                                                    let n = name.clone();
-                                                    let c = cid.clone();
-                                                    let s = streamer.clone();
-                                                    let chunk_start_time =
-                                                        std::time::Instant::now();
-
-                                                    let upload_res =
-                                                        UploadWorker::upload_and_delete(
-                                                            drive,
-                                                            task,
-                                                            move |uploaded, total| {
-                                                                let mb_s = (uploaded as f64
-                                                                    / 1_048_576.0)
-                                                                    / chunk_start_time
-                                                                        .elapsed()
-                                                                        .as_secs_f64()
-                                                                        .max(0.1);
-                                                                let _ = tx.try_send(
-                                                                    AppEvent::UploadProgress {
-                                                                        channel_id: c.clone(),
-                                                                        chunk_name: n.clone(),
-                                                                        streamer_name: s.clone(),
-                                                                        uploaded_bytes: uploaded,
-                                                                        total_bytes: total,
-                                                                        speed_mb_s: mb_s,
-                                                                    },
-                                                                );
-                                                            },
-                                                        )
-                                                        .await;
-
-                                                    match upload_res {
-                                                        Ok(reclaimed) => {
-                                                            let _ = event_tx
-                                                                .send(AppEvent::UploadCompleted {
-                                                                    channel_id: cid.clone(),
-                                                                    chunk_name: name.clone(),
-                                                                    reclaimed_bytes: reclaimed,
-                                                                })
-                                                                .await;
-                                                            let _ = event_tx
-                                                                .send(AppEvent::Log(
-                                                                    LogEntry::clean(format!(
-                                                                        "Uploaded & deleted {} (reclaimed {:.1} MB)",
-                                                                        name,
-                                                                        reclaimed as f64 / 1_048_576.0
-                                                                    )),
-                                                                ))
-                                                                .await;
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = event_tx
-                                                                .send(AppEvent::UploadFailed {
-                                                                    channel_id: cid.clone(),
-                                                                    chunk_name: name.clone(),
-                                                                })
-                                                                .await;
-                                                            let _ = event_tx
-                                                                .send(AppEvent::Log(
-                                                                    LogEntry::error(format!(
-                                                                        "Upload failed for {}: {}",
-                                                                        name, e
-                                                                    )),
-                                                                ))
-                                                                .await;
-                                                        }
-                                                    }
-                                                }
-                                            })
-                                            .catch_unwind()
-                                            .await;
-                                        task_cid
-                                    });
-
-                                dispatched = true;
-                                break;
+                        if let Some(queue) = channel_queues.get_mut(&finished_cid) {
+                            if queue.is_empty() {
+                                channel_queues.remove(&finished_cid);
+                            } else if !ready_channels.contains(&finished_cid) {
+                                ready_channels.push_back(finished_cid);
                             }
-                        } else {
-                            channel_order.push_back(ch_id);
                         }
                     }
-                    if !dispatched {
-                        break;
+                }
+
+                // Dispatch pending tasks for idle channels up to concurrency limit (O(1))
+                while join_set.len() < concurrency
+                    && let Some(ch_id) = ready_channels.pop_front()
+                {
+                    if let Some(queue) = channel_queues.get_mut(&ch_id)
+                        && let Some(task) = queue.pop_front()
+                    {
+                        active_channels.insert(ch_id.clone());
+                        let drive = drive_opt.clone();
+                        let event_tx = event_tx.clone();
+                        let task_cid = ch_id.clone();
+
+                        join_set.spawn(async move {
+                            let _ = std::panic::AssertUnwindSafe(async move {
+                                if let Some(ref drive) = drive {
+                                    let UploadTask {
+                                        channel_id: cid,
+                                        session_folder_id,
+                                        chunk_path,
+                                        chunk_name: name,
+                                        streamer_name: streamer,
+                                    } = task;
+
+                                    let tx = event_tx.clone();
+                                    let n = name.clone();
+                                    let c = cid.clone();
+                                    let s = streamer.clone();
+                                    let chunk_start_time = std::time::Instant::now();
+
+                                    let upload_res = UploadWorker::upload_path_and_delete(
+                                        drive,
+                                        &chunk_path,
+                                        &session_folder_id,
+                                        move |uploaded, total| {
+                                            let mb_s = (uploaded as f64 / 1_048_576.0)
+                                                / chunk_start_time.elapsed().as_secs_f64().max(0.1);
+                                            let _ = tx.try_send(AppEvent::UploadProgress {
+                                                channel_id: c.clone(),
+                                                chunk_name: n.clone(),
+                                                streamer_name: s.clone(),
+                                                uploaded_bytes: uploaded,
+                                                total_bytes: total,
+                                                speed_mb_s: mb_s,
+                                            });
+                                        },
+                                    )
+                                    .await;
+
+                                    match upload_res {
+                                        Ok(reclaimed) => {
+                                            let _ = event_tx
+                                                .send(AppEvent::UploadCompleted {
+                                                    channel_id: cid,
+                                                    chunk_name: name.clone(),
+                                                    reclaimed_bytes: reclaimed,
+                                                })
+                                                .await;
+                                            let _ = event_tx
+                                                .send(AppEvent::Log(LogEntry::clean(format!(
+                                                    "Uploaded & deleted {} (reclaimed {:.1} MB)",
+                                                    name,
+                                                    reclaimed as f64 / 1_048_576.0
+                                                ))))
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            let _ = event_tx
+                                                .send(AppEvent::UploadFailed {
+                                                    channel_id: cid,
+                                                    chunk_name: name.clone(),
+                                                })
+                                                .await;
+                                            let _ = event_tx
+                                                .send(AppEvent::Log(LogEntry::error(format!(
+                                                    "Upload failed for {}: {}",
+                                                    name, e
+                                                ))))
+                                                .await;
+                                        }
+                                    }
+                                }
+                            })
+                            .catch_unwind()
+                            .await;
+                            task_cid
+                        });
                     }
                 }
 
@@ -321,8 +287,8 @@ impl EngineOrchestrator {
                                 let cid = task.channel_id.clone();
                                 let queue = channel_queues.entry(cid.clone()).or_default();
                                 queue.push_back(task);
-                                if !channel_order.contains(&cid) {
-                                    channel_order.push_back(cid);
+                                if !active_channels.contains(&cid) && !ready_channels.contains(&cid) {
+                                    ready_channels.push_back(cid);
                                 }
                             }
                             None => {
@@ -333,11 +299,12 @@ impl EngineOrchestrator {
                     res = join_set.join_next(), if !join_set.is_empty() => {
                         if let Some(Ok(finished_cid)) = res {
                             active_channels.remove(&finished_cid);
-                            if let Some(queue) = channel_queues.get(&finished_cid)
-                                && !queue.is_empty()
-                                && !channel_order.contains(&finished_cid)
-                            {
-                                channel_order.push_back(finished_cid);
+                            if let Some(queue) = channel_queues.get_mut(&finished_cid) {
+                                if queue.is_empty() {
+                                    channel_queues.remove(&finished_cid);
+                                } else if !ready_channels.contains(&finished_cid) {
+                                    ready_channels.push_back(finished_cid);
+                                }
                             }
                         }
                     }
@@ -411,6 +378,47 @@ impl EngineOrchestrator {
                     ))))
                     .await;
                 None
+            }
+        }
+    }
+
+    async fn sync_title_history_to_drive(
+        active_sessions: &Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>>,
+        channel_id: &str,
+        session_folder_id: &Option<String>,
+        drive_opt: Option<&DriveClient>,
+        event_tx: &Sender<AppEvent>,
+    ) {
+        if let (Some(fid), Some(drive)) = (session_folder_id.as_deref(), drive_opt) {
+            let history_to_upload = {
+                let mut sessions = active_sessions.lock().await;
+                if let Some(s) = sessions.get_mut(channel_id) {
+                    s.session_folder_id = Some(fid.to_string());
+                    if s.title_history_file_id.is_none() {
+                        Some(s.format_title_history())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+
+            if let Some(history_text) = history_to_upload
+                && let Ok(file_id) = drive
+                    .upload_text_file(fid, "title_history.txt", &history_text, None)
+                    .await
+            {
+                let mut sessions = active_sessions.lock().await;
+                if let Some(s) = sessions.get_mut(channel_id) {
+                    s.title_history_file_id = Some(file_id);
+                }
+                let _ = event_tx
+                    .send(AppEvent::Log(LogEntry::drive(format!(
+                        "Initialized 'title_history.txt' in Drive folder for {}",
+                        channel_id
+                    ))))
+                    .await;
             }
         }
     }
@@ -695,13 +703,18 @@ impl EngineOrchestrator {
                         let event_tx_stderr = event_tx.clone();
                         tokio::spawn(async move {
                             use tokio::io::{AsyncBufReadExt, BufReader};
-                            let mut lines = BufReader::new(stderr).lines();
-                            while let Ok(Some(line)) = lines.next_line().await {
-                                let trimmed = line.trim();
+                            let mut reader = BufReader::new(stderr);
+                            let mut line_buf = String::new();
+                            while let Ok(n) = reader.read_line(&mut line_buf).await {
+                                if n == 0 {
+                                    break;
+                                }
+                                let trimmed = line_buf.trim();
                                 if !trimmed.is_empty() {
                                     let _ = event_tx_stderr
                                         .try_send(AppEvent::Log(LogEntry::ffmpeg(trimmed)));
                                 }
+                                line_buf.clear();
                             }
                         });
                     }
@@ -817,35 +830,14 @@ impl EngineOrchestrator {
                         )
                         .await;
 
-                        if session_folder_id.is_some() {
-                            let mut sessions = active_sessions.lock().await;
-                            if let Some(s) = sessions.get_mut(&channel_id) {
-                                s.session_folder_id = session_folder_id.clone();
-                                if s.title_history_file_id.is_none()
-                                    && let (Some(fid), Some(drive)) =
-                                        (session_folder_id.as_deref(), drive_opt.as_ref())
-                                {
-                                    let history_text = s.format_title_history();
-                                    if let Ok(file_id) = drive
-                                        .upload_text_file(
-                                            fid,
-                                            "title_history.txt",
-                                            &history_text,
-                                            None,
-                                        )
-                                        .await
-                                    {
-                                        s.title_history_file_id = Some(file_id);
-                                        let _ = event_tx
-                                            .send(AppEvent::Log(LogEntry::drive(format!(
-                                                "Initialized 'title_history.txt' in Drive folder for {}",
-                                                channel_id
-                                            ))))
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
+                        Self::sync_title_history_to_drive(
+                            &active_sessions,
+                            &channel_id,
+                            &session_folder_id,
+                            drive_opt.as_ref(),
+                            &event_tx,
+                        )
+                        .await;
 
                         break;
                     }
@@ -872,7 +864,7 @@ impl EngineOrchestrator {
                             }
                         };
 
-                        let current_subfolder_name = {
+                        let current_subfolder_name = if session_folder_id.is_none() {
                             let sessions = active_sessions.lock().await;
                             if let Some(s) = sessions.get(&channel_id) {
                                 s.folder_name()
@@ -887,6 +879,8 @@ impl EngineOrchestrator {
                                 }
                                 .folder_name()
                             }
+                        } else {
+                            String::new()
                         };
 
                         Self::seal_and_enqueue_chunks(
@@ -903,35 +897,14 @@ impl EngineOrchestrator {
                         )
                         .await;
 
-                        if session_folder_id.is_some() {
-                            let mut sessions = active_sessions.lock().await;
-                            if let Some(s) = sessions.get_mut(&channel_id) {
-                                s.session_folder_id = session_folder_id.clone();
-                                if s.title_history_file_id.is_none()
-                                    && let (Some(fid), Some(drive)) =
-                                        (session_folder_id.as_deref(), drive_opt.as_ref())
-                                {
-                                    let history_text = s.format_title_history();
-                                    if let Ok(file_id) = drive
-                                        .upload_text_file(
-                                            fid,
-                                            "title_history.txt",
-                                            &history_text,
-                                            None,
-                                        )
-                                        .await
-                                    {
-                                        s.title_history_file_id = Some(file_id);
-                                        let _ = event_tx
-                                            .send(AppEvent::Log(LogEntry::drive(format!(
-                                                "Initialized 'title_history.txt' in Drive folder for {}",
-                                                channel_id
-                                            ))))
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
+                        Self::sync_title_history_to_drive(
+                            &active_sessions,
+                            &channel_id,
+                            &session_folder_id,
+                            drive_opt.as_ref(),
+                            &event_tx,
+                        )
+                        .await;
 
                         if is_finished {
                             break;
@@ -980,29 +953,16 @@ impl EngineOrchestrator {
                     .await;
                 }
 
-                if let Some(ref fid) = session_folder_id {
-                    {
-                        let mut sessions = active_sessions.lock().await;
-                        if let Some(s) = sessions.get_mut(&channel_id) {
-                            s.session_folder_id = session_folder_id.clone();
-                            if s.title_history_file_id.is_none() {
-                                let history_text = s.format_title_history();
-                                if let Ok(file_id) = drive
-                                    .upload_text_file(fid, "title_history.txt", &history_text, None)
-                                    .await
-                                {
-                                    s.title_history_file_id = Some(file_id);
-                                    let _ = event_tx
-                                            .send(AppEvent::Log(LogEntry::drive(format!(
-                                                "Initialized 'title_history.txt' in Drive folder for {}",
-                                                channel_id
-                                            ))))
-                                            .await;
-                                }
-                            }
-                        }
-                    }
+                Self::sync_title_history_to_drive(
+                    &active_sessions,
+                    &channel_id,
+                    &session_folder_id,
+                    drive_opt.as_ref(),
+                    &event_tx,
+                )
+                .await;
 
+                if let Some(ref fid) = session_folder_id {
                     match drive
                         .upload_file_resumable(&chat_path, fid, |_, _| {})
                         .await
@@ -1074,10 +1034,11 @@ impl EngineOrchestrator {
 
     pub async fn poll_channels_once(&self, upload_tx: &Sender<UploadTask>) {
         for channel in &self.settings.channels {
-            if self.cancel_token.is_cancelled() {
-                break;
-            }
-            match self.chzzk.get_live_detail(&channel.id).await {
+            let detail_res = tokio::select! {
+                _ = self.cancel_token.cancelled() => break,
+                res = self.chzzk.get_live_detail(&channel.id) => res,
+            };
+            match detail_res {
                 Ok(Some(info)) => {
                     let is_recording = {
                         let active = self.active_recordings.lock().await;
