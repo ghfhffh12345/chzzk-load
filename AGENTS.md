@@ -10,13 +10,16 @@ Welcome to `chzzk-load`. This document serves as the primary technical specifica
 
 ### Key System Characteristics
 - **Standalone Binary**: Compiles directly into an independent executable (`chzzk-load.exe`) runnable without Cargo or external runtime environments (FFmpeg must be installed and available on `PATH`, or configured via `CHZZK_LOAD_FFMPEG_BIN`).
-- **Zero CPU Transcoding**: Uses FFmpeg stream-copy (`-c copy`) to segment raw HLS video streams into `.ts` files with near-zero CPU and RAM overhead.
+- **Zero CPU Transcoding & Clean Termination**: Uses FFmpeg stream-copy (`-c copy`) to segment raw HLS video streams into `.ts` files with near-zero CPU and RAM overhead. HTTP reconnect flags (`-reconnect_at_eof`, etc.) are intentionally omitted to guarantee instant, clean termination upon natural stream completion.
+- **Direct CDN Stream Extraction (P2P/Grid Bypass)**: Automatically decodes base64-encoded `cdn_url` query parameters embedded in Chzzk `p2pPath` and `p2pPathUrlEncoding` payloads, extracting direct single-variant CDN HLS streams (prioritizing 1080p, 720p, and top-quality video) without requiring proprietary P2P or grid software.
 - **Real-Time Live Chat Archiving**: Concurrently connects to Chzzk chat WebSockets, capturing structured JSON Lines logs (`chat.jsonl`) with message timestamps, user badges, donation details, and raw payload.
-- **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD and flash memory longevity on Single Board Computers (Raspberry Pi/ARM64) using an in-memory buffer (`ChatWriter`) with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
+- **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD and flash memory longevity on Single Board Computers (Raspberry Pi/ARM64) using an in-memory buffer (`ChatWriter`) with direct byte-buffer serialization and dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
 - **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk simultaneously per active stream. Chunks and completed chat logs are deleted immediately upon receiving an HTTP 200/201 upload confirmation.
 - **N+1 Segment Boundary Safety**: Chunk $N$ is only sealed and queued for upload after chunk $N+1$ exists on disk with file size $> 0$ bytes (or upon final stream termination), guaranteeing no partial chunks are uploaded.
 - **Dynamic Title Tracking & Folder Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically synchronizes Google Drive folder names in real time.
+- **Resilient Cloud Sync with Exponential Backoff**: Caches Google Drive root folder IDs, retries transient network errors and HTTP 429 rate limits with exponential backoff, and maintains a resilient `pending_chunks` fallback queue to prevent segment loss during transient outages.
 - **Anti-Race Cache Deduplication**: Protects against Chzzk CDN cache TTL delays (10–30s) by tracking finished broadcast `live_id`s and enforcing a post-recording cooldown to prevent duplicate sessions.
+- **Event-Driven Zero-Alloc TUI**: Employs `crossterm::event::EventStream` and event-driven redraw scheduling with zero-allocation borrowed log rendering and zero CPU spinning.
 
 ---
 
@@ -39,37 +42,37 @@ chzzk-load/
 │       ├── package.json      # Wrapper package definition with optionalDependencies
 │       └── README.md
 ├── scripts/
-│   ├── prepare-npm.js        # Platform package generator & binary bundler
+│   ├── prepare-npm.js        # Platform package generator & binary bundler (--resolve-release)
 │   └── test-npm-packages.js  # Automated mock packaging & execution test suite
 ├── src/
-│   ├── main.rs               # CLI entrypoint, signals, panic hooks, TUI event loop
+│   ├── main.rs               # CLI entrypoint, signals, panic hooks, EventStream TUI render loop
 │   ├── lib.rs                # Module root and library exports
 │   ├── app_path.rs           # Portable executable-relative path resolution
-│   ├── config.rs             # Settings structs, defaults, and serde loaders (record_chat, chat_flush_interval_seconds)
+│   ├── config.rs             # Settings structs, defaults, and serde loaders (upload_concurrency, record_chat)
 │   ├── chzzk/                # Chzzk API integration
 │   │   ├── mod.rs
-│   │   ├── client.rs         # ChzzkClient: live detail polling, HLS URL extraction, chat access token API
+│   │   ├── client.rs         # ChzzkClient: live detail polling, P2P/CDN HLS URL extraction, chat token API
 │   │   ├── chat.rs           # ChzzkChatClient: WebSocket handshake (cmd: 100), ping-pong, auto-reconnect backoff
 │   │   ├── models.rs         # Data structures: LiveDetailContent, LiveStreamInfo, etc.
-│   │   └── models_chat.rs    # Chat models: ChatAccessTokenResponse, RecordedChatMessage, WebSocket packet envelopes
+│   │   └── models_chat.rs    # Chat models: ChatAccessTokenResponse, RecordedChatMessage, WebSocket envelopes
 │   ├── recorder/             # FFmpeg process management, watcher & chat writer
 │   │   ├── mod.rs
-│   │   ├── ffmpeg.rs         # Command builder (-extension_picky 0, piped stderr, CHZZK_LOAD_FFMPEG_BIN)
-│   │   ├── watcher.rs        # SegmentWatcher, N+1 chunk sealing logic
-│   │   └── chat_writer.rs    # ChatWriter: in-memory batched writer with dual-trigger flush
+│   │   ├── ffmpeg.rs         # Command builder (-extension_picky 0, clean EOF termination, CHZZK_LOAD_FFMPEG_BIN)
+│   │   ├── watcher.rs        # SegmentWatcher, N+1 chunk sealing logic, zero-alloc extension check
+│   │   └── chat_writer.rs    # ChatWriter: byte-buffer direct serializer with dual-trigger flush
 │   ├── drive/                # Google Drive API v3 client & OAuth2
 │   │   ├── mod.rs
 │   │   ├── auth.rs           # DriveAuth: PKCE authorization flow, token refresh
-│   │   └── client.rs         # DriveClient: folder search/creation, resumable uploads, rename
+│   │   └── client.rs         # DriveClient: folder caching, exponential backoff retries, resumable uploads, rename
 │   ├── uploader/             # Upload pipeline
 │   │   ├── mod.rs            # UploadTask, UploadWorker (upload-and-delete pipeline)
 │   ├── engine/               # Central orchestrator
-│   │   └── mod.rs            # EngineOrchestrator: channel polling, sessions, chat task, title history, upload consumer
+│   │   └── mod.rs            # EngineOrchestrator: channel polling, sessions, rate-limit queue, upload consumer
 │   └── tui/                  # Ratatui Dashboard
 │       ├── mod.rs
 │       ├── app.rs            # App state, key event handling, channel list state, chat_count telemetry
 │       ├── event.rs          # Central AppEvent enum (ChatStats, LogEntry::chat)
-│       └── ui.rs             # draw_ui: Layout constraints, strictly bounded logs view, chat badges
+│       └── ui.rs             # draw_ui: Layout constraints, strictly bounded zero-alloc logs view, chat badges
 └── tests/                    # Integration and smoke tests
     ├── test_app_path.rs
     ├── test_chat_client.rs
@@ -99,6 +102,9 @@ chzzk-load/
    - If valid and unrecorded, registers the channel into `active_recordings` and spawns `spawn_recording_session`.
 3. When the channel returns `status == "CLOSE"`:
    - Clears any `finished_sessions` tracking entry, resetting the channel for future broadcasts.
+4. **Non-Blocking Mutex Scoping & Rate-Limit Resiliency**:
+   - The orchestrator minimizes mutex hold times on `active_sessions` and `active_recordings`, releasing locks before issuing network requests (e.g. Drive folder creation or title sync).
+   - If Google Drive folder creation encounters transient 429 rate limits or errors, sealed chunks accumulate safely in an in-memory `pending_chunks` deque. Upon folder resolution or stream shutdown, all pending chunks are drained and dispatched to Drive, preventing segment loss.
 
 ### 3.2. FFmpeg Recording & N+1 Watcher (`src/recorder/`)
 - `build_ffmpeg_command` spawns an independent FFmpeg child process with:
@@ -107,8 +113,9 @@ chzzk-load/
   - `-c copy`: Zero re-encoding overhead.
   - `stdin(Stdio::piped())`: Enables graceful termination via `"q\n"`.
   - `stdout(Stdio::null())` & `stderr(Stdio::piped())`: Prevents raw child process output from leaking into the terminal and corrupting the TUI raw mode buffer. Stderr lines are asynchronously drained into `AppEvent::Log("[FFMPEG] ...")`.
+  - **Clean Termination on Manifest EOF**: HTTP reconnect flags (`-reconnect`, `-reconnect_at_eof`, `-reconnect_streamed`, `-reconnect_delay_max`) are intentionally omitted. When a live broadcast ends naturally, the HLS playlist reaches EOF and FFmpeg exits immediately without entering infinite reconnect retry loops.
 - `SegmentWatcher` polls the session folder every second:
-  - Finds `.ts` files sorted lexicographically (`chunk_0000.ts`, `chunk_0001.ts`, ...).
+  - Uses zero-allocation ASCII suffix matching (`s[s.len() - 3..].eq_ignore_ascii_case(".ts")`) to scan `.ts` files sorted lexicographically (`chunk_0000.ts`, `chunk_0001.ts`, ...).
   - Emits chunk $N$ as sealed only when chunk $N+1$ exists with size $> 0$.
   - When the child process exits (`is_stream_finished = true`), seals the final lingering chunk.
 
@@ -116,16 +123,19 @@ chzzk-load/
 - When `settings.general.record_chat` is enabled and `info.chat_channel_id` is present:
   1. Requests chat access token from `https://comm-api.game.naver.com/nng_main/v1/chats/access-token`.
   2. Spawns `ChzzkChatClient` connecting via WebSocket to `wss://kr-ss{n}.chat.naver.com/chat`.
-  3. Sends `cmd: 100` (`CONNECT`) handshake with 10-second read timeout. Automatically handles server ping (`cmd: 0` $\to$ pong `cmd: 10000`) and 20-second client heartbeat pings.
-  4. Parses chat messages (`cmd: 93101`, `93102`), extracting timestamp, user info, message text, donations (cheese), and raw payload.
+  3. Sends `cmd: 100` (`CONNECT`) handshake with 10-second read timeout. Automatically handles server ping (`cmd: 0` $\to$ pong `cmd: 10000`) using pre-allocated static payloads (`PING_PAYLOAD`, `PONG_PAYLOAD`) and 20-second client heartbeat pings.
+  4. Parses chat messages (`cmd: 93101`, `93102`) using zero-clone owned deserialization (`parse_chat_packet_owned`), extracting timestamp, user info, message text, donations (cheese), and raw payload.
   5. Telemetry counts are relayed non-blockingly (`try_send`) to `AppEvent::ChatStats`.
-  6. **Flash Longevity Buffer (`ChatWriter`)**: Messages are queued in memory and written to `<session_dir>/chat.jsonl` using dual-trigger flushing (500 messages or 64 KB capacity, or periodic timer interval `chat_flush_interval_seconds`). No per-message `fsync` is performed during streaming.
+  6. **Flash Longevity Buffer (`ChatWriter`)**: Messages are serialized directly into a pre-allocated byte buffer (`Vec<u8>`) using `serde_json::to_writer`, avoiding intermediate string allocations. Buffered data is written to `<session_dir>/chat.jsonl` using dual-trigger flushing (500 messages or 64 KB capacity, or periodic timer interval `chat_flush_interval_seconds`). No per-message `fsync` is performed during streaming.
   7. On session cancellation or stream termination, flushes all remaining records, guaranteeing zero lost messages.
 
 ### 3.4. Google Drive Upload Pipeline & Title History Sync (`src/drive/` & `src/uploader/`)
 - Sealed chunks are sent over an `mpsc::Sender<UploadTask>` channel to `spawn_upload_consumer_with_concurrency`.
-- **Per-Channel Serialization & Cross-Channel Concurrency**: To prevent uplink bandwidth contention, disk accumulation, and Google Drive segment ordering disruption, chunks belonging to the same channel are strictly serialized in FIFO order. Independent channels upload concurrently up to `concurrency` (default: 3) using fair round-robin scheduling.
-- **High-Throughput Streaming Buffer**: Resumable file streaming uses an 8 MiB buffer (`RESUMABLE_UPLOAD_BUFFER_SIZE`, 32 * 256 KiB) via `FramedRead`, eliminating thread-pool switching overhead and saturating uplink bandwidth on high-speed networks.
+- **Per-Channel Serialization & Cross-Channel Concurrency**: To prevent uplink bandwidth contention, disk accumulation, and Google Drive segment ordering disruption, chunks belonging to the same channel are strictly serialized in FIFO order. Independent channels upload concurrently up to `upload_concurrency` (default: 3) using fair round-robin scheduling.
+- **Root Folder ID Caching**: Root folder lookups are executed once and cached, eliminating repetitive Drive API searches.
+- **Exponential Backoff Retries**: API operations and chunk streaming use `send_with_retry`, retrying up to 3 times with exponential backoff (`100ms * 2^(attempt-1)`) on HTTP 429 rate limits or transient 5xx errors.
+- **High-Throughput Streaming Buffer**: Resumable file streaming uses a buffer dynamically clamped between 64 KiB and 8 MiB (`(file_size as usize).clamp(64 * 1024, RESUMABLE_UPLOAD_BUFFER_SIZE)`) via `FramedRead`, eliminating thread-pool switching overhead and saturating uplink bandwidth on high-speed networks.
+- **Accurate MIME Types**: Sets `video/mp2t` for video segments, `application/x-ndjson` for `chat.jsonl`, and `text/plain; charset=UTF-8` for `title_history.txt`.
 - Drive subfolders are created lazily by `process_sealed_chunk` only when the first valid chunk is confirmed sealed.
 - **Stream Title History**: If the broadcast title changes during a session, the engine appends the timestamped change to `title_history.txt`, and asynchronously renames the Google Drive folder via `drive.rename_folder`.
 - Resumable upload initiates with a `POST /upload/drive/v3/files?uploadType=resumable` metadata request, obtaining a session URI.
@@ -134,13 +144,15 @@ chzzk-load/
 - Upon recording session end, `chat.jsonl` is uploaded to the broadcast's Google Drive folder and deleted locally. If Drive is disabled, `chat.jsonl` is preserved on local disk.
 
 ### 3.5. Ratatui TUI Dashboard (`src/tui/`)
+- **Event-Driven Render Loop**: The main TUI event loop uses `crossterm::event::EventStream` and `tokio::select!` with biased selection. Rendering only executes when state actually changes (`needs_redraw = true`) or upon periodic 250ms animation ticks, eliminating idle CPU consumption.
 - Uses strict vertical layout constraints:
   - Header & Divider: `Constraint::Length(1)` each
   - Body: `Constraint::Length(10)` (or `Constraint::Fill(1)` when logs are hidden via 'l' key; horizontal split: Monitored Channels on left, Cloud Upload progress/status on right)
   - Logs Title Divider: `Constraint::Length(1)` & Logs Content: `Constraint::Fill(1)` (omitted when logs are toggled off via 'l' key)
   - Footer Divider & Keybind Footer: `Constraint::Length(1)` each
 - **Channel Row Telemetry**: Active recordings display segment count, elapsed duration, and live chat message count (`CHAT: {count}`).
-- **Log Slicing & Clipping**: Logs are flattened by `\n` to support multi-line error traces, and sliced to exactly `inner_height = log_area.height`. Lines exceeding `inner_width` are horizontally truncated with `…` to guarantee zero word-wrap overflow or terminal buffer scrolling. `[CHAT]` logs are rendered with a distinct cyan badge.
+- **Zero-Alloc Log Slicing & Clipping**: Logs are sliced directly from borrowed string lines using `.flat_map(...)` without intermediate `Vec` allocations, bounded to exactly `inner_height = log_area.height`. Lines exceeding `inner_width` are horizontally truncated with `…` to guarantee zero word-wrap overflow. `[CHAT]` logs are rendered with a distinct cyan badge.
+- **Zero-Alloc Dividers**: Horizontal dividers are generated via zero-allocation slicing of a static `HORIZONTAL_RULE` string.
 - **Log Scrolling**: Tail auto-scroll is maintained by default (`log_scroll = 0`). Users can navigate history using `PageUp`, `PageDown`, `Home`, and `End`.
 - **View Scrolling**: Channels and Cloud Upload scroll in synchronized lockstep using `Up`, `Down`, `k`, and `j`.
 
@@ -191,6 +203,7 @@ Instead of heavy Docker containers or slow QEMU system emulation for building AR
 - **Preparation Script (`scripts/prepare-npm.js`)**:
   - Dynamically constructs platform packages under `npm/platforms/` with appropriate `os`, `cpu`, and `libc` fields in their `package.json`.
   - Synchronizes versions across root and platform packages from CLI argument or `Cargo.toml`.
+  - Provides `--resolve-release` CLI option to determine tags, version, prerelease flags, and npm dist-tags for GitHub Actions workflows.
   - Copies native binary files into their respective platform packages.
 - **npm OIDC Trusted Publisher Authentication**:
   - Uses GitHub Actions OpenID Connect (OIDC) Trusted Publisher authentication. Long-lived `NPM_TOKEN` secrets are completely eliminated.
@@ -253,3 +266,6 @@ When implementing changes, AI agents must strictly preserve the following rules:
 7. **Flash Memory & Disk Wear Longevity**: Chat messages MUST NOT be synchronously flushed or fsynced to disk per message. All streaming chat writes must pass through `ChatWriter` with batching thresholds (500 msgs or 64 KB capacity, or periodic timer interval).
 8. **Non-Blocking Telemetry Backpressure**: Never block internal WebSocket reading or recording loops on TUI event channels (`try_send` should always be used for telemetry and stats reporting).
 9. **FFmpeg Binary Resolution**: `build_ffmpeg_command` must respect the `CHZZK_LOAD_FFMPEG_BIN` environment variable override before defaulting to `"ffmpeg"`.
+10. **Clean HLS Stream Termination (No Reconnect Flags)**: Never add `-reconnect` or `-reconnect_at_eof` flags to `build_ffmpeg_command`. Live HLS streams must terminate cleanly and promptly upon manifest EOF when the broadcast ends.
+11. **Non-Blocking Mutex Scoping in Engine**: Never hold the `active_sessions` or `active_recordings` mutex across asynchronous network I/O or Drive operations.
+

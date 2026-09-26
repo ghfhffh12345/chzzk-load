@@ -17,14 +17,16 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 
 ## Key Features
 
-- ⚡ **Lossless Stream-Copy (`-c copy`)**: Segments live HLS video streams into `.ts` chunks with zero CPU transcoding overhead.
+- ⚡ **Lossless Stream-Copy & Clean EOF (`-c copy`)**: Segments live HLS video streams into `.ts` chunks with zero CPU transcoding overhead. Omits reconnect flags to eliminate infinite HLS manifest EOF retry loops upon natural stream completion.
+- 🌐 **Direct CDN Stream Extraction (P2P/Grid Bypass)**: Automatically decodes base64-encoded `cdn_url` parameters from Chzzk `p2pPath` playlists, pulling direct 1080p/720p CDN HLS streams without requiring P2P or grid software.
 - 💬 **Real-Time Live Chat Recording (`chat.jsonl`)**: Simultaneously captures live chat via WebSocket into structured JSON Lines format, preserving timestamps, user nicknames, badges, donations/cheeses, and message text.
-- 💽 **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD card and flash storage longevity on Single Board Computers (Raspberry Pi, ARM64) using in-memory buffering with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
+- 💽 **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD card and flash storage longevity on Single Board Computers (Raspberry Pi, ARM64) using in-memory byte buffering with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
 - 🏷️ **Dynamic Title Tracking & Folder Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically updates Google Drive folder names in real-time.
-- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk per active stream. Chunks and completed chat logs are permanently deleted immediately upon verified cloud upload.
+- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk simultaneously per active stream. Chunks and completed chat logs are permanently deleted immediately upon verified cloud upload.
 - 🛡️ **N+1 Segment Boundary Safety**: Chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
-- ☁️ **Resumable Google Drive Sync & Local Fallback**: Direct cloud upload via Google Drive API v3 with automatic PKCE OAuth2 authorization. Runs in local-only recording mode if Google Drive credentials are omitted.
-- 🖥️ **Interactive Terminal Dashboard**: Real-time channel states, live stream titles, chat message counters, upload progress gauges, transfer speed metrics, header statistics (active recordings, total duration, archived size), collapsible activity logs (`l` key), and native Windows UTF-8 console code page support.
+- ☁️ **Resilient Google Drive Sync & Local Fallback**: Direct cloud upload via Google Drive API v3 with automatic PKCE OAuth2 authorization, root folder caching, and exponential backoff retries (HTTP 429 & 5xx). Runs in local-only recording mode if Google Drive credentials are omitted.
+- 🔀 **Intra-Channel FIFO Serialization & Multi-Stream Concurrency**: Guarantees segments belonging to the same stream upload strictly in sequential order while uploading across different channels concurrently (up to `upload_concurrency`, default: 3).
+- 🖥️ **Event-Driven Terminal Dashboard**: Powered by `crossterm::event::EventStream` with zero-allocation rendering, real-time channel states, live stream titles, chat message counters, upload progress gauges, transfer speed metrics, header statistics (active recordings, total duration, archived size), collapsible activity logs (`l` key), and native Windows UTF-8 console support.
 - 🔄 **Anti-Race Cache Protection**: Enforces post-recording cooldown and tracks broadcast session IDs to prevent duplicate recording triggers caused by CDN cache TTL delays.
 
 ---
@@ -77,7 +79,8 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
   "google_drive": {
     "credentials_path": "credentials.json",
     "token_path": "token.json",
-    "root_folder_name": "Chzzk_Recordings"
+    "root_folder_name": "Chzzk_Recordings",
+    "upload_concurrency": 3
   },
   "chzzk": {
     "nid_aut": "",
@@ -106,6 +109,7 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 | `google_drive.credentials_path` | `"credentials.json"` | Path to Google OAuth2 Desktop client secrets file. |
 | `google_drive.token_path` | `"token.json"` | Path to saved OAuth2 authorization tokens file. |
 | `google_drive.root_folder_name` | `"Chzzk_Recordings"` | Destination folder name created in Google Drive. |
+| `google_drive.upload_concurrency` | `3` | Maximum number of concurrent channel upload streams (intra-channel uploads remain strictly serialized). |
 | `chzzk.nid_aut` / `nid_ses` | `""` | Optional Naver session cookies for adult/subscriber-only streams. |
 | `channels` | - | List of monitored Chzzk channels (`id` from channel URL, `name` for display). |
 
