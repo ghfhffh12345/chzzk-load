@@ -267,11 +267,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if upload.uploaded_bytes >= upload.total_bytes {
                         app.uploaded_count += 1;
                         app.reclaimed_mb += 28.4;
+                        let prev_chunk = chunk_counter_hane - 1;
                         app.logs.push_back(LogEntry::clean(format!(
-                            "Uploaded & deleted chunk_{:04}.ts (reclaimed 28.4 MB)",
-                            chunk_counter_hane - 1
+                            "Uploaded & deleted chunk_{prev_chunk:04}.ts (reclaimed 28.4 MB)"
                         )));
-                        upload.chunk_name = format!("chunk_{:04}.ts", chunk_counter_hane);
+                        upload.chunk_name = format!("chunk_{chunk_counter_hane:04}.ts");
                         upload.uploaded_bytes = (1.2 * 1024.0 * 1024.0) as u64;
                         upload.total_bytes = (28.4 * 1024.0 * 1024.0) as u64;
                         chunk_counter_hane += 1;
@@ -285,11 +285,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if upload.uploaded_bytes >= upload.total_bytes {
                         app.uploaded_count += 1;
                         app.reclaimed_mb += 27.8;
+                        let prev_chunk = chunk_counter_lilpa - 1;
                         app.logs.push_back(LogEntry::clean(format!(
-                            "Uploaded & deleted chunk_{:04}.ts (reclaimed 27.8 MB)",
-                            chunk_counter_lilpa - 1
+                            "Uploaded & deleted chunk_{prev_chunk:04}.ts (reclaimed 27.8 MB)"
                         )));
-                        upload.chunk_name = format!("chunk_{:04}.ts", chunk_counter_lilpa);
+                        upload.chunk_name = format!("chunk_{chunk_counter_lilpa:04}.ts");
                         upload.uploaded_bytes = (0.8 * 1024.0 * 1024.0) as u64;
                         upload.total_bytes = (27.8 * 1024.0 * 1024.0) as u64;
                         chunk_counter_lilpa += 1;
