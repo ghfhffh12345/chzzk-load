@@ -558,10 +558,31 @@ runTest('resolveReleaseInfo resolves tag, version, isPrerelease, and npmTag corr
   assert.strictEqual(customTag.npmTag, 'custom-channel');
 
   // Case 6: Fallback to Cargo.toml when tag is not passed
+  const cargoContent = fs.readFileSync(CARGO_TOML, 'utf8');
+  const match = cargoContent.match(/\[package\][^]*?version\s*=\s*"([^"]+)"/);
+  assert.ok(match, 'Could not read version from Cargo.toml');
+  const expectedCargoVersion = match[1];
+
   const fallback = resolveReleaseInfo({});
   assert.strictEqual(typeof fallback.version, 'string');
-  assert.strictEqual(fallback.isPrerelease, false);
-  assert.strictEqual(fallback.npmTag, 'latest');
+  assert.strictEqual(fallback.version, expectedCargoVersion);
+  assert.strictEqual(fallback.tag, `v${expectedCargoVersion}`);
+  const expectedIsPrerelease = expectedCargoVersion.includes('-');
+  assert.strictEqual(fallback.isPrerelease, expectedIsPrerelease);
+
+  let expectedNpmTag = 'latest';
+  if (expectedIsPrerelease) {
+    const preMatch = expectedCargoVersion.match(/-([a-zA-Z]+)/);
+    expectedNpmTag = preMatch && preMatch[1] ? preMatch[1].toLowerCase() : 'next';
+  }
+  assert.strictEqual(fallback.npmTag, expectedNpmTag);
+
+  // Case 7: Explicit stable version without tag
+  const explicitStable = resolveReleaseInfo({ version: '1.2.3' });
+  assert.strictEqual(explicitStable.version, '1.2.3');
+  assert.strictEqual(explicitStable.tag, 'v1.2.3');
+  assert.strictEqual(explicitStable.isPrerelease, false);
+  assert.strictEqual(explicitStable.npmTag, 'latest');
 });
 
 // Test 13: prepare-npm.js CLI --resolve-release outputs to GITHUB_OUTPUT
