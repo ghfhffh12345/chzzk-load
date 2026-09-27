@@ -122,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
     crossterm::execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
     let mut app = App::from_settings(&settings);
 
@@ -177,29 +178,37 @@ async fn main() -> anyhow::Result<()> {
 
             // Asynchronously process crossterm events (non-blocking)
             Some(item) = event_reader.next() => {
-                if let Ok(Event::Key(key)) = item
-                    && key.kind != crossterm::event::KeyEventKind::Release
-                {
-                    if key.code == KeyCode::Char('q') && key.kind == crossterm::event::KeyEventKind::Press {
-                        if app.is_shutting_down {
-                            // Second 'q' press triggers immediate exit
-                            app.should_quit = true;
-                            cancel_token.cancel();
-                            break;
+                match item {
+                    Ok(Event::Key(key)) => {
+                        if key.kind != crossterm::event::KeyEventKind::Release {
+                            if key.code == KeyCode::Char('q') && key.kind == crossterm::event::KeyEventKind::Press {
+                                if app.is_shutting_down {
+                                    // Second 'q' press triggers immediate exit
+                                    app.should_quit = true;
+                                    cancel_token.cancel();
+                                    break;
+                                }
+                                app.is_shutting_down = true;
+                                cancel_token.cancel();
+                            } else {
+                                app.handle_event(AppEvent::Key(key));
+                            }
+                            if app.refresh_requested {
+                                app.refresh_requested = false;
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::info("Manual refresh triggered...")))
+                                    .await;
+                                orchestrator.trigger_refresh();
+                            }
+                            needs_redraw = true;
                         }
-                        app.is_shutting_down = true;
-                        cancel_token.cancel();
-                    } else {
-                        app.handle_event(AppEvent::Key(key));
                     }
-                    if app.refresh_requested {
-                        app.refresh_requested = false;
-                        let _ = event_tx
-                            .send(AppEvent::Log(LogEntry::info("Manual refresh triggered...")))
-                            .await;
-                        orchestrator.trigger_refresh();
+                    Ok(Event::Resize(width, height)) => {
+                        let _ = terminal.clear();
+                        app.handle_event(AppEvent::Resize(width, height));
+                        needs_redraw = true;
                     }
-                    needs_redraw = true;
+                    _ => {}
                 }
             }
 

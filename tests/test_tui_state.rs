@@ -1361,7 +1361,7 @@ fn test_draw_ui_header_preset_a_metrics() {
 fn test_draw_ui_dividers_render_correctly_on_various_widths() {
     use ratatui::style::Modifier;
 
-    let widths = [10, 25, 40, 80, 120];
+    let widths = [10, 25, 40, 80, 120, 160, 200, 300, 500];
     for &width in &widths {
         let backend = TestBackend::new(width, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1461,4 +1461,86 @@ fn test_log_entry_chat_helper() {
     assert_eq!(entry.to_string(), "[CHAT] Connected to live chat");
     assert_eq!(entry, "[CHAT] Connected to live chat");
     assert_eq!(entry, "Connected to live chat");
+}
+
+#[test]
+fn test_tui_resizes_to_fit_terminal_window() {
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut app = App::new();
+    app.logs.push_back(LogEntry::info("Test log entry"));
+
+    // 1. Initial draw at 80x24
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+    assert_eq!(terminal.backend().buffer().area.width, 80);
+    assert_eq!(terminal.backend().buffer().area.height, 24);
+
+    // 2. Terminal resized to 140x45 (e.g. user maximized window)
+    terminal.backend_mut().resize(140, 45);
+    app.handle_event(AppEvent::Resize(140, 45));
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer.area.width, 140);
+    assert_eq!(buffer.area.height, 45);
+
+    // Verify footer is at the bottom of the resized window (row 44)
+    let footer_line: String = (0..140)
+        .map(|x| buffer.cell((x, 44)).unwrap().symbol())
+        .collect();
+    assert!(footer_line.contains("q Quit"));
+
+    // Verify header divider spans the full 140 width
+    for x in 0..140 {
+        assert_eq!(
+            buffer.cell((x, 1)).unwrap().symbol(),
+            "─",
+            "Divider must span column {x} on resized 140-col window"
+        );
+    }
+
+    // 3. Terminal resized to ultra-wide 300x50
+    terminal.backend_mut().resize(300, 50);
+    app.handle_event(AppEvent::Resize(300, 50));
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+
+    let buffer_wide = terminal.backend().buffer();
+    assert_eq!(buffer_wide.area.width, 300);
+    assert_eq!(buffer_wide.area.height, 50);
+
+    // Verify header divider spans the full 300 width
+    for x in 0..300 {
+        assert_eq!(
+            buffer_wide.cell((x, 1)).unwrap().symbol(),
+            "─",
+            "Divider must span column {x} on resized 300-col window"
+        );
+    }
+
+    // 4. Terminal resized down to smaller size 60x18
+    terminal.backend_mut().resize(60, 18);
+    app.handle_event(AppEvent::Resize(60, 18));
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+
+    let buffer_small = terminal.backend().buffer();
+    assert_eq!(buffer_small.area.width, 60);
+    assert_eq!(buffer_small.area.height, 18);
+    let footer_small: String = (0..60)
+        .map(|x| buffer_small.cell((x, 17)).unwrap().symbol())
+        .collect();
+    assert!(footer_small.contains("q Quit"));
+
+    // 5. Terminal resized with logs hidden
+    app.show_logs = false;
+    terminal.backend_mut().resize(100, 30);
+    app.handle_event(AppEvent::Resize(100, 30));
+    terminal.draw(|f| draw_ui(f, &app)).unwrap();
+
+    let buffer_no_logs = terminal.backend().buffer();
+    assert_eq!(buffer_no_logs.area.width, 100);
+    assert_eq!(buffer_no_logs.area.height, 30);
+    let footer_no_logs: String = (0..100)
+        .map(|x| buffer_no_logs.cell((x, 29)).unwrap().symbol())
+        .collect();
+    assert!(footer_no_logs.contains("q Quit"));
 }

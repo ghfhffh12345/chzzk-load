@@ -180,6 +180,7 @@ impl PartialEq<LogEntry> for String {
 pub enum AppEvent {
     Tick,
     Key(KeyEvent),
+    Resize(u16, u16),
     ChannelUpdate {
         channel_id: String,
         channel_name: String,

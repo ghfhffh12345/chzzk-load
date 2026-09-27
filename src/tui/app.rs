@@ -213,6 +213,7 @@ impl App {
 
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
+            AppEvent::Resize(_width, _height) => {}
             AppEvent::ChannelUpdate {
                 channel_id,
                 channel_name,
