@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 
-use crate::chzzk::models::{ChzzkResponse, LiveDetailContent, LiveStreamInfo, PlaybackJson};
+use crate::chzzk::models::{
+    ChzzkResponse, LiveDetail, LiveDetailContent, LiveStreamInfo, PlaybackJson,
+};
 use crate::chzzk::models_chat::ChatAccessTokenResponse;
 use crate::config::ChzzkConfig;
 
@@ -222,7 +224,7 @@ impl ChzzkClient {
         self.cookie_header.as_deref()
     }
 
-    pub async fn get_live_detail(&self, channel_id: &str) -> Result<Option<LiveStreamInfo>> {
+    pub async fn get_live_detail(&self, channel_id: &str) -> Result<LiveDetail> {
         let url = format!(
             "{}/service/v2/channels/{}/live-detail",
             self.base_url, channel_id
@@ -238,20 +240,35 @@ impl ChzzkClient {
         }
 
         if let Some(content) = body.content.filter(|c| c.status == "OPEN") {
-            let hls_url = extract_best_hls_url(&content.live_playback_json)?;
-            return Ok(Some(LiveStreamInfo {
-                channel_id: channel_id.to_string(),
-                live_id: content.live_id,
-                streamer_name: content.channel.channel_name,
-                title: content
-                    .live_title
-                    .unwrap_or_else(|| "Untitled Broadcast".to_string()),
-                hls_url,
-                chat_channel_id: content.chat_channel_id,
-            }));
-        }
+            let live_id = content.live_id;
+            let streamer_name = content.channel.channel_name;
+            let title = content
+                .live_title
+                .unwrap_or_else(|| "Untitled Broadcast".to_string());
+            let chat_channel_id = content.chat_channel_id;
+            let adult = content.adult.unwrap_or(false);
 
-        Ok(None)
+            match extract_best_hls_url(&content.live_playback_json) {
+                Ok(hls_url) => Ok(LiveDetail::Open(LiveStreamInfo {
+                    channel_id: channel_id.to_string(),
+                    live_id,
+                    streamer_name,
+                    title,
+                    hls_url,
+                    chat_channel_id,
+                })),
+                Err(_) => Ok(LiveDetail::Restricted {
+                    channel_id: channel_id.to_string(),
+                    live_id,
+                    streamer_name,
+                    title,
+                    chat_channel_id,
+                    adult,
+                }),
+            }
+        } else {
+            Ok(LiveDetail::Close)
+        }
     }
 
     pub async fn get_chat_access_token(&self, chat_channel_id: &str) -> Result<String> {

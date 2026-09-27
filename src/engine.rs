@@ -1,7 +1,7 @@
 use crate::app_path::resolve_path;
 use crate::chzzk::chat::ChzzkChatClient;
 use crate::chzzk::client::ChzzkClient;
-use crate::chzzk::models::LiveStreamInfo;
+use crate::chzzk::models::{LiveDetail, LiveStreamInfo};
 use crate::config::Settings;
 use crate::drive::client::DriveClient;
 use crate::recorder::ffmpeg::{build_ffmpeg_command, sanitize_filename};
@@ -76,6 +76,7 @@ pub struct EngineOrchestrator {
     active_recordings: Arc<tokio::sync::Mutex<HashSet<String>>>,
     active_sessions: Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>>,
     finished_sessions: Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>>,
+    restricted_channels: Arc<tokio::sync::Mutex<HashSet<String>>>,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
     session_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -106,6 +107,7 @@ impl EngineOrchestrator {
             active_recordings: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             active_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             finished_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            restricted_channels: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -134,6 +136,10 @@ impl EngineOrchestrator {
 
     pub fn finished_sessions(&self) -> Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>> {
         self.finished_sessions.clone()
+    }
+
+    pub fn restricted_channels(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
+        self.restricted_channels.clone()
     }
 
     pub async fn register_finished_session(&self, channel_id: &str, live_id: Option<u64>) {
@@ -1288,7 +1294,12 @@ impl EngineOrchestrator {
                 res = self.chzzk.get_live_detail(&channel.id) => res,
             };
             match detail_res {
-                Ok(Some(info)) => {
+                Ok(LiveDetail::Open(info)) => {
+                    {
+                        let mut restricted = self.restricted_channels.lock().await;
+                        restricted.remove(&channel.id);
+                    }
+
                     let is_recording = {
                         let active = self.active_recordings.lock().await;
                         active.contains(&channel.id)
@@ -1491,8 +1502,68 @@ impl EngineOrchestrator {
                         self.spawn_recording_session(channel.id.clone(), info, upload_tx.clone());
                     }
                 }
-                Ok(None) => {
+                Ok(LiveDetail::Restricted {
+                    channel_id: _,
+                    live_id: _,
+                    streamer_name,
+                    title,
+                    chat_channel_id: _,
+                    adult,
+                }) => {
+                    let was_active = {
+                        let mut active = self.active_recordings.lock().await;
+                        active.remove(&channel.id)
+                    };
+                    if was_active {
+                        let mut sessions = self.active_sessions.lock().await;
+                        sessions.remove(&channel.id);
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::RecordingEnded {
+                                channel_id: channel.id.clone(),
+                            })
+                            .await;
+                    }
+
+                    let is_newly_restricted = {
+                        let mut restricted = self.restricted_channels.lock().await;
+                        restricted.insert(channel.id.clone())
+                    };
+
+                    if is_newly_restricted {
+                        let log_msg = if adult {
+                            format!(
+                                "Recording unavailable for channel {} ({}): 19+ age-restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
+                                channel.id, streamer_name
+                            )
+                        } else {
+                            format!(
+                                "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
+                                channel.id, streamer_name
+                            )
+                        };
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::Log(LogEntry::error(log_msg)))
+                            .await;
+                    }
+
+                    let _ = self
+                        .event_tx
+                        .send(AppEvent::ChannelUpdate {
+                            channel_id: channel.id.clone(),
+                            channel_name: streamer_name,
+                            is_live: true,
+                            title,
+                        })
+                        .await;
+                }
+                Ok(LiveDetail::Close) => {
                     // Channel reported CLOSE (offline)
+                    {
+                        let mut restricted = self.restricted_channels.lock().await;
+                        restricted.remove(&channel.id);
+                    }
                     {
                         let mut finished = self.finished_sessions.lock().await;
                         finished.remove(&channel.id);

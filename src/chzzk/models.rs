@@ -56,6 +56,8 @@ pub struct LiveDetailContent {
     pub live_playback_json: Option<String>,
     #[serde(default)]
     pub chat_channel_id: Option<String>,
+    #[serde(default)]
+    pub adult: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,4 +99,21 @@ pub struct LiveStreamInfo {
     pub title: String,
     pub hls_url: String,
     pub chat_channel_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveDetail {
+    /// Stream is OPEN and media HLS URL is available for recording.
+    Open(LiveStreamInfo),
+    /// Stream is OPEN, but recording is unavailable (restricted / 19+ / missing credentials).
+    Restricted {
+        channel_id: String,
+        live_id: Option<u64>,
+        streamer_name: String,
+        title: String,
+        chat_channel_id: Option<String>,
+        adult: bool,
+    },
+    /// Channel is CLOSE (offline).
+    Close,
 }

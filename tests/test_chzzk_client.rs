@@ -1,5 +1,5 @@
 use chzzk_load::chzzk::client::{ChzzkClient, extract_best_hls_url};
-use chzzk_load::chzzk::models::{ChzzkResponse, LiveDetailContent};
+use chzzk_load::chzzk::models::{ChzzkResponse, LiveDetail, LiveDetailContent};
 use chzzk_load::config::ChzzkConfig;
 
 #[test]
@@ -178,14 +178,15 @@ async fn test_get_live_detail_success() {
     let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
         .with_base_url(format!("http://127.0.0.1:{port}"));
 
-    let stream_info = client
-        .get_live_detail("chan123")
-        .await
-        .unwrap()
-        .expect("stream info");
-    assert_eq!(stream_info.streamer_name, "Streamer123");
-    assert_eq!(stream_info.title, "Test Live");
-    assert_eq!(stream_info.hls_url, "https://test.com/hls.m3u8");
+    let detail = client.get_live_detail("chan123").await.unwrap();
+    match detail {
+        LiveDetail::Open(stream_info) => {
+            assert_eq!(stream_info.streamer_name, "Streamer123");
+            assert_eq!(stream_info.title, "Test Live");
+            assert_eq!(stream_info.hls_url, "https://test.com/hls.m3u8");
+        }
+        other => panic!("Expected LiveDetail::Open, got {other:?}"),
+    }
 }
 
 #[test]
@@ -346,12 +347,106 @@ async fn test_get_live_detail_with_chat_channel_id() {
     let config = ChzzkConfig::default();
     let client = ChzzkClient::new(&config).with_base_url(format!("http://127.0.0.1:{port}"));
 
-    let stream_info = client
-        .get_live_detail("chan123")
-        .await
-        .unwrap()
-        .expect("stream info");
-    assert_eq!(stream_info.chat_channel_id, Some("chat_999".to_string()));
+    let detail = client.get_live_detail("chan123").await.unwrap();
+    match detail {
+        LiveDetail::Open(stream_info) => {
+            assert_eq!(stream_info.chat_channel_id, Some("chat_999".to_string()));
+        }
+        other => panic!("Expected LiveDetail::Open, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_live_detail_restricted_when_playback_json_null() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "liveId": 9999,
+                    "status": "OPEN",
+                    "liveTitle": "[19+] Adult Restricted Stream",
+                    "channel": {
+                        "channelId": "chan_restricted",
+                        "channelName": "RestrictedStreamer"
+                    },
+                    "livePlaybackJson": null,
+                    "adult": true,
+                    "chatChannelId": "chat_restricted_123"
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let detail = client.get_live_detail("chan_restricted").await.unwrap();
+    match detail {
+        LiveDetail::Restricted {
+            channel_id,
+            live_id,
+            streamer_name,
+            title,
+            chat_channel_id,
+            adult,
+        } => {
+            assert_eq!(channel_id, "chan_restricted");
+            assert_eq!(live_id, Some(9999));
+            assert_eq!(streamer_name, "RestrictedStreamer");
+            assert_eq!(title, "[19+] Adult Restricted Stream");
+            assert_eq!(chat_channel_id, Some("chat_restricted_123".to_string()));
+            assert!(adult);
+        }
+        other => panic!("Expected LiveDetail::Restricted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_live_detail_close_when_offline() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "liveId": null,
+                    "status": "CLOSE",
+                    "liveTitle": null,
+                    "channel": {
+                        "channelId": "chan_offline",
+                        "channelName": "OfflineStreamer"
+                    },
+                    "livePlaybackJson": null
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let detail = client.get_live_detail("chan_offline").await.unwrap();
+    assert_eq!(detail, LiveDetail::Close);
 }
 
 #[tokio::test]

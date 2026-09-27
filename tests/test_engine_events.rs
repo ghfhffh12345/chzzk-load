@@ -3169,3 +3169,365 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_driv
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run_handle).await;
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_engine_orchestrator_poll_channel_restricted_stream_sets_live_and_logs_once() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "liveId": 5001,
+                    "status": "OPEN",
+                    "liveTitle": "[19+] Midnight Broadcast",
+                    "channel": { "channelId": "chan_restricted", "channelName": "RestrictedStreamer" },
+                    "livePlaybackJson": null,
+                    "adult": true
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("test_orch_restr_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_restricted".to_string(),
+            name: "RestrictedStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+
+    // Poll 1
+    orchestrator.poll_channels_once(&upload_tx).await;
+    // Poll 2
+    orchestrator.poll_channels_once(&upload_tx).await;
+    // Poll 3
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    let mut error_log_count = 0;
+    let mut channel_updates = Vec::new();
+    let mut saw_recording_started = false;
+
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            AppEvent::Log(entry) => {
+                if entry
+                    .message
+                    .contains("Recording unavailable for channel chan_restricted")
+                {
+                    error_log_count += 1;
+                }
+            }
+            AppEvent::ChannelUpdate { is_live, title, .. } => {
+                channel_updates.push((is_live, title));
+            }
+            AppEvent::RecordingStarted { .. } => {
+                saw_recording_started = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        error_log_count, 1,
+        "Expected exactly 1 error log across 3 polls"
+    );
+    assert!(
+        !saw_recording_started,
+        "Must not start recording session for restricted stream"
+    );
+    assert!(
+        !channel_updates.is_empty(),
+        "Must receive ChannelUpdate events"
+    );
+    for (is_live, title) in channel_updates {
+        assert!(
+            is_live,
+            "Restricted stream must be marked is_live: true in TUI"
+        );
+        assert_eq!(title, "[19+] Midnight Broadcast");
+    }
+    assert!(
+        orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_restricted")
+    );
+    assert!(orchestrator.active_recordings().lock().await.is_empty());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_restricted_stream_recovers_to_recordable() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let poll_count_clone = poll_count.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mock_body = if count == 0 {
+                // Poll 1: Restricted
+                r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 6001,
+                        "status": "OPEN",
+                        "liveTitle": "Watch Party (Restricted)",
+                        "channel": { "channelId": "chan_recover", "channelName": "RecoverStreamer" },
+                        "livePlaybackJson": null,
+                        "adult": false
+                    }
+                }"#
+            } else {
+                // Poll 2: Becomes recordable
+                r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 6001,
+                        "status": "OPEN",
+                        "liveTitle": "Watch Party (Public)",
+                        "channel": { "channelId": "chan_recover", "channelName": "RecoverStreamer" },
+                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}",
+                        "adult": false
+                    }
+                }"#
+            };
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("test_orch_recov_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_recover".to_string(),
+            name: "RecoverStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+
+    // Poll 1: Restricted
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_recover")
+    );
+    assert!(orchestrator.active_recordings().lock().await.is_empty());
+
+    // Poll 2: Now recordable
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        !orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_recover")
+    );
+    assert!(
+        orchestrator
+            .active_recordings()
+            .lock()
+            .await
+            .contains("chan_recover")
+    );
+
+    let mut saw_started = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(event)) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await
+        {
+            if let AppEvent::RecordingStarted { channel_id, .. } = event
+                && channel_id == "chan_recover"
+            {
+                saw_started = true;
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    assert!(
+        saw_started,
+        "RecordingStarted must be emitted once stream becomes recordable"
+    );
+
+    orchestrator.cancel();
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_restricted_stream_resets_on_offline() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let poll_count_clone = poll_count.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mock_body = match count {
+                0 => {
+                    // Poll 1: Restricted Stream A
+                    r#"{
+                        "code": 200,
+                        "message": null,
+                        "content": {
+                            "liveId": 7001,
+                            "status": "OPEN",
+                            "liveTitle": "Stream A",
+                            "channel": { "channelId": "chan_rst_off", "channelName": "StreamerRst" },
+                            "livePlaybackJson": null,
+                            "adult": true
+                        }
+                    }"#
+                }
+                1 => {
+                    // Poll 2: Channel goes CLOSE (offline)
+                    r#"{
+                        "code": 200,
+                        "message": null,
+                        "content": {
+                            "liveId": null,
+                            "status": "CLOSE",
+                            "liveTitle": null,
+                            "channel": { "channelId": "chan_rst_off", "channelName": "StreamerRst" },
+                            "livePlaybackJson": null
+                        }
+                    }"#
+                }
+                _ => {
+                    // Poll 3: Restricted Stream B starts
+                    r#"{
+                        "code": 200,
+                        "message": null,
+                        "content": {
+                            "liveId": 7002,
+                            "status": "OPEN",
+                            "liveTitle": "Stream B",
+                            "channel": { "channelId": "chan_rst_off", "channelName": "StreamerRst" },
+                            "livePlaybackJson": null,
+                            "adult": true
+                        }
+                    }"#
+                }
+            };
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_rst_off_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_rst_off".to_string(),
+            name: "StreamerRst".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+
+    // Poll 1: Restricted A
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_rst_off")
+    );
+
+    // Poll 2: Offline
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        !orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_rst_off")
+    );
+
+    // Poll 3: Restricted B
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_rst_off")
+    );
+
+    let mut error_log_count = 0;
+    while let Ok(event) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = event
+            && entry
+                .message
+                .contains("Recording unavailable for channel chan_rst_off")
+        {
+            error_log_count += 1;
+        }
+    }
+    assert_eq!(
+        error_log_count, 2,
+        "Expected 1 error log for Stream A and 1 for Stream B after offline reset"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
