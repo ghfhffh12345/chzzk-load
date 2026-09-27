@@ -77,6 +77,7 @@ pub struct EngineOrchestrator {
     active_sessions: Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>>,
     finished_sessions: Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>>,
     restricted_channels: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    restricted_live_ids: Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
     session_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -108,6 +109,7 @@ impl EngineOrchestrator {
             active_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             finished_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             restricted_channels: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            restricted_live_ids: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -140,6 +142,10 @@ impl EngineOrchestrator {
 
     pub fn restricted_channels(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
         self.restricted_channels.clone()
+    }
+
+    pub fn restricted_live_ids(&self) -> Arc<tokio::sync::Mutex<HashMap<String, u64>>> {
+        self.restricted_live_ids.clone()
     }
 
     pub async fn register_finished_session(&self, channel_id: &str, live_id: Option<u64>) {
@@ -601,6 +607,8 @@ impl EngineOrchestrator {
         let active_recordings = self.active_recordings.clone();
         let active_sessions = self.active_sessions.clone();
         let finished_sessions = self.finished_sessions.clone();
+        let restricted_channels = self.restricted_channels.clone();
+        let restricted_live_ids = self.restricted_live_ids.clone();
         let cancel_token = self.cancel_token.clone();
 
         let handle = tokio::spawn(async move {
@@ -754,11 +762,17 @@ impl EngineOrchestrator {
             let cookie = chzzk.cookie_header();
             let mut cmd = build_ffmpeg_command(&info.hls_url, &output_pattern, chunk_dur, cookie);
 
+            let key_forbidden = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let key_forbidden_notify = Arc::new(tokio::sync::Notify::new());
+
             let mut child = match cmd.spawn() {
                 Ok(mut child) => {
                     if let Some(stderr) = child.stderr.take() {
                         let event_tx_stderr = event_tx.clone();
+                        let key_forbidden_stderr = key_forbidden.clone();
+                        let key_forbidden_notify = key_forbidden_notify.clone();
                         tokio::spawn(async move {
+                            use std::sync::atomic::Ordering;
                             use tokio::io::{AsyncBufReadExt, BufReader};
                             let mut reader = BufReader::new(stderr);
                             let mut line_buf = String::new();
@@ -768,8 +782,22 @@ impl EngineOrchestrator {
                                 }
                                 let trimmed = line_buf.trim();
                                 if !trimmed.is_empty() {
-                                    let _ = event_tx_stderr
-                                        .try_send(AppEvent::Log(LogEntry::ffmpeg(trimmed)));
+                                    let is_key_error = trimmed.contains("Unable to open key file")
+                                        || (trimmed.contains("403 Forbidden")
+                                            && (trimmed.contains("aes_key")
+                                                || trimmed.contains("key file")))
+                                        || (trimmed.contains("aes_key")
+                                            && trimmed.contains("access denied"));
+
+                                    if is_key_error {
+                                        key_forbidden_stderr.store(true, Ordering::SeqCst);
+                                        key_forbidden_notify.notify_one();
+                                    }
+
+                                    if !key_forbidden_stderr.load(Ordering::SeqCst) {
+                                        let _ = event_tx_stderr
+                                            .try_send(AppEvent::Log(LogEntry::ffmpeg(trimmed)));
+                                    }
                                 }
                                 line_buf.clear();
                             }
@@ -821,9 +849,14 @@ impl EngineOrchestrator {
             let mut pending_chunks: VecDeque<PathBuf> = VecDeque::new();
             let mut last_folder_attempt: Option<Instant> = None;
             let mut last_title_sync: Option<Instant> = None;
+            let mut restricted_abort = false;
 
             loop {
                 tokio::select! {
+                    _ = key_forbidden_notify.notified() => {
+                        restricted_abort = true;
+                        break;
+                    }
                     _ = cancel_token.cancelled() => {
                         let _ = event_tx
                             .send(AppEvent::Log(LogEntry::rec(format!(
@@ -971,6 +1004,11 @@ impl EngineOrchestrator {
                         break;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        if key_forbidden.load(std::sync::atomic::Ordering::SeqCst) {
+                            restricted_abort = true;
+                            break;
+                        }
+
                         let is_finished = match child.try_wait() {
                             Ok(Some(status)) => {
                                 let _ = event_tx
@@ -1113,6 +1151,76 @@ impl EngineOrchestrator {
                         }
                     }
                 }
+            }
+
+            if restricted_abort {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+
+                session_cancel.cancel();
+                if let Some(mut chat_handle) = chat_task
+                    && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
+                        .await
+                        .is_err()
+                {
+                    chat_handle.abort();
+                }
+
+                // Clean up session directory and any empty/partial files
+                let chat_file = session_dir.join("chat.jsonl");
+                if tokio::fs::try_exists(&chat_file).await.unwrap_or(false) {
+                    let _ = tokio::fs::remove_file(&chat_file).await;
+                }
+                if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
+                    while let Ok(Some(entry)) = rd.next_entry().await {
+                        let _ = tokio::fs::remove_file(entry.path()).await;
+                    }
+                }
+                let _ = tokio::fs::remove_dir(&session_dir).await;
+
+                {
+                    let mut active = active_recordings.lock().await;
+                    active.remove(&channel_id);
+                }
+                {
+                    let mut sessions = active_sessions.lock().await;
+                    sessions.remove(&channel_id);
+                }
+
+                let is_newly_restricted = {
+                    let mut restricted = restricted_channels.lock().await;
+                    restricted.insert(channel_id.clone())
+                };
+
+                if let Some(lid) = info.live_id {
+                    let mut r_ids = restricted_live_ids.lock().await;
+                    r_ids.insert(channel_id.clone(), lid);
+                }
+
+                if is_newly_restricted {
+                    let log_msg = format!(
+                        "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
+                        channel_id, info.streamer_name
+                    );
+                    let _ = event_tx.send(AppEvent::Log(LogEntry::error(log_msg))).await;
+                }
+
+                let _ = event_tx
+                    .send(AppEvent::RecordingEnded {
+                        channel_id: channel_id.clone(),
+                    })
+                    .await;
+
+                let _ = event_tx
+                    .send(AppEvent::ChannelUpdate {
+                        channel_id: channel_id.clone(),
+                        channel_name: info.streamer_name.clone(),
+                        is_live: true,
+                        title: info.title.clone(),
+                    })
+                    .await;
+
+                return;
             }
 
             // Drain any remaining chunks if the process finished and chunks were queued
@@ -1346,6 +1454,42 @@ impl EngineOrchestrator {
             };
             match detail_res {
                 Ok(LiveDetail::Open(info)) => {
+                    let is_live_id_restricted = if let Some(lid) = info.live_id {
+                        let r_ids = self.restricted_live_ids.lock().await;
+                        r_ids.get(&channel.id).copied() == Some(lid)
+                    } else {
+                        false
+                    };
+
+                    if is_live_id_restricted {
+                        let is_newly_restricted = {
+                            let mut restricted = self.restricted_channels.lock().await;
+                            restricted.insert(channel.id.clone())
+                        };
+
+                        if is_newly_restricted {
+                            let log_msg = format!(
+                                "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
+                                channel.id, info.streamer_name
+                            );
+                            let _ = self
+                                .event_tx
+                                .send(AppEvent::Log(LogEntry::error(log_msg)))
+                                .await;
+                        }
+
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::ChannelUpdate {
+                                channel_id: channel.id.clone(),
+                                channel_name: info.streamer_name.clone(),
+                                is_live: true,
+                                title: info.title.clone(),
+                            })
+                            .await;
+                        continue;
+                    }
+
                     {
                         let mut restricted = self.restricted_channels.lock().await;
                         restricted.remove(&channel.id);
@@ -1614,6 +1758,10 @@ impl EngineOrchestrator {
                     {
                         let mut restricted = self.restricted_channels.lock().await;
                         restricted.remove(&channel.id);
+                    }
+                    {
+                        let mut r_ids = self.restricted_live_ids.lock().await;
+                        r_ids.remove(&channel.id);
                     }
                     {
                         let mut finished = self.finished_sessions.lock().await;

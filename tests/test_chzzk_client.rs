@@ -413,6 +413,249 @@ async fn test_get_live_detail_restricted_when_playback_json_null() {
 }
 
 #[tokio::test]
+async fn test_get_live_detail_restricted_when_paid_stream_and_aes_key_returns_403() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let url = request.url().to_string();
+            if url.contains("live-detail") {
+                let mock_body = r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 21326414,
+                        "status": "OPEN",
+                        "liveTitle": "Sports Broadcast (Requires Cheat Key)",
+                        "channel": {
+                            "channelId": "chan_sports",
+                            "channelName": "SportsStreamer"
+                        },
+                        "livePlaybackJson": "{\"meta\":{\"paidLive\":true,\"playbackAuthType\":\"CHZZK_CHEAT_KEY\"},\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
+                        "adult": false,
+                        "chatChannelId": "chat_sports_123"
+                    }
+                }"#;
+                let response = tiny_http::Response::from_string(mock_body).with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                );
+                let _ = request.respond(response);
+            } else if url.contains("/service/v1/encryption/lives/21326414/aes_key") {
+                let mock_body = r#"{"code":403,"message":"접근이 거부 되었습니다."}"#;
+                let response = tiny_http::Response::from_string(mock_body)
+                    .with_status_code(403)
+                    .with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/json"[..],
+                        )
+                        .unwrap(),
+                    );
+                let _ = request.respond(response);
+            } else {
+                let response = tiny_http::Response::from_string("Not Found").with_status_code(404);
+                let _ = request.respond(response);
+            }
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig {
+        nid_aut: "invalid_aut".to_string(),
+        nid_ses: "invalid_ses".to_string(),
+    };
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let detail = client.get_live_detail("chan_sports").await.unwrap();
+    match detail {
+        LiveDetail::Restricted {
+            channel_id,
+            live_id,
+            streamer_name,
+            title,
+            chat_channel_id,
+            adult,
+        } => {
+            assert_eq!(channel_id, "chan_sports");
+            assert_eq!(live_id, Some(21326414));
+            assert_eq!(streamer_name, "SportsStreamer");
+            assert_eq!(title, "Sports Broadcast (Requires Cheat Key)");
+            assert_eq!(chat_channel_id, Some("chat_sports_123".to_string()));
+            assert!(!adult, "Sports broadcast is not an adult stream");
+        }
+        other => panic!("Expected LiveDetail::Restricted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_live_detail_open_when_paid_stream_and_aes_key_returns_200() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let url = request.url().to_string();
+            if url.contains("live-detail") {
+                let mock_body = r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 21326414,
+                        "status": "OPEN",
+                        "liveTitle": "Sports Broadcast (Subscribed)",
+                        "channel": {
+                            "channelId": "chan_sports_sub",
+                            "channelName": "SportsStreamer"
+                        },
+                        "livePlaybackJson": "{\"meta\":{\"paidLive\":true,\"playbackAuthType\":\"CHZZK_CHEAT_KEY\"},\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
+                        "adult": false,
+                        "chatChannelId": "chat_sports_123"
+                    }
+                }"#;
+                let response = tiny_http::Response::from_string(mock_body).with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                );
+                let _ = request.respond(response);
+            } else if url.contains("/service/v1/encryption/lives/21326414/aes_key") {
+                let mock_key = vec![0u8; 16];
+                let response = tiny_http::Response::from_data(mock_key)
+                    .with_status_code(200)
+                    .with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Content-Type"[..],
+                            &b"application/octet-stream"[..],
+                        )
+                        .unwrap(),
+                    );
+                let _ = request.respond(response);
+            } else {
+                let response = tiny_http::Response::from_string("Not Found").with_status_code(404);
+                let _ = request.respond(response);
+            }
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig {
+        nid_aut: "valid_aut".to_string(),
+        nid_ses: "valid_ses".to_string(),
+    };
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let detail = client.get_live_detail("chan_sports_sub").await.unwrap();
+    match detail {
+        LiveDetail::Open(stream_info) => {
+            assert_eq!(stream_info.channel_id, "chan_sports_sub");
+            assert_eq!(stream_info.live_id, Some(21326414));
+            assert_eq!(stream_info.streamer_name, "SportsStreamer");
+            assert_eq!(stream_info.hls_url, "https://test.com/hls.m3u8");
+        }
+        other => panic!("Expected LiveDetail::Open, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_live_detail_restricted_when_playback_auth_type_requires_auth_and_no_cookies() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "liveId": 21326414,
+                    "status": "OPEN",
+                    "liveTitle": "Membership Exclusive Live",
+                    "channel": {
+                        "channelId": "chan_membership",
+                        "channelName": "MemberStreamer"
+                    },
+                    "livePlaybackJson": "{\"meta\":{\"paidLive\":false,\"playbackAuthType\":\"MEMBERSHIP\"},\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
+                    "adult": false,
+                    "chatChannelId": null
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default(); // no cookies
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let detail = client.get_live_detail("chan_membership").await.unwrap();
+    match detail {
+        LiveDetail::Restricted {
+            channel_id,
+            live_id,
+            adult,
+            ..
+        } => {
+            assert_eq!(channel_id, "chan_membership");
+            assert_eq!(live_id, Some(21326414));
+            assert!(!adult);
+        }
+        other => panic!("Expected LiveDetail::Restricted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_get_live_detail_restricted_when_playable_status_not_playable() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "liveId": 21326414,
+                    "status": "OPEN",
+                    "liveTitle": "Restricted Broadcast",
+                    "channel": {
+                        "channelId": "chan_status_restr",
+                        "channelName": "RestrictedStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
+                    "livePollingStatusJson": "{\"status\":\"STARTED\",\"isPublishing\":true,\"playableStatus\":\"RESTRICTED\"}",
+                    "adult": false
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let detail = client.get_live_detail("chan_status_restr").await.unwrap();
+    match detail {
+        LiveDetail::Restricted {
+            channel_id, adult, ..
+        } => {
+            assert_eq!(channel_id, "chan_status_restr");
+            assert!(!adult);
+        }
+        other => panic!("Expected LiveDetail::Restricted, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_get_live_detail_close_when_offline() {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();

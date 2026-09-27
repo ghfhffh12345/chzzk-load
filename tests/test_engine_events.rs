@@ -3841,3 +3841,254 @@ async fn test_recording_session_cleans_empty_folder_when_no_chunks_saved() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_engine_orchestrator_handles_ffmpeg_key_403_forbidden_stream() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_ffmpeg_key_403_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let mock_bin = temp_dir.join(if cfg!(windows) {
+        "mock_ffmpeg.exe"
+    } else {
+        "mock_ffmpeg"
+    });
+    let src_path = temp_dir.join("mock_ffmpeg.rs");
+    std::fs::write(&src_path, r#"
+use std::io::Write;
+fn main() {
+    let stderr = std::io::stderr();
+    let mut handle = stderr.lock();
+    let _ = writeln!(handle, "[https @ 0xaaaaebe99930] HTTP error 403 Forbidden");
+    let _ = writeln!(handle, "[in#0 @ 0xaaaaebdbabe0] Unable to open key file https://api.chzzk.naver.com/service/v1/encryption/lives/21326414/aes_key, Server returned 403 Forbidden (access denied)");
+    let _ = writeln!(handle, "[in#0 @ 0xaaaaebdbabe0] Failed to open segment 4896 of playlist 0");
+    let _ = writeln!(handle, "[in#0 @ 0xaaaaebdbabe0] Segment 4896 of playlist 0 failed too many times, skipping");
+    let _ = handle.flush();
+    std::thread::sleep(std::time::Duration::from_secs(60));
+}
+"#).unwrap();
+    let compile_status = std::process::Command::new("rustc")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&mock_bin)
+        .status()
+        .expect("Failed to compile mock_ffmpeg");
+    assert!(compile_status.success(), "mock_ffmpeg compilation failed");
+
+    let prev_bin = std::env::var("CHZZK_LOAD_FFMPEG_BIN").ok();
+    unsafe {
+        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", &mock_bin);
+    }
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let poll_count_clone = poll_count.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mock_body = if count == 0 {
+                // Poll 2: OPEN broadcast (API cache still OPEN)
+                r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 21326414,
+                        "status": "OPEN",
+                        "liveTitle": "Sports Broadcast (Encrypted)",
+                        "channel": { "channelId": "chan_sports", "channelName": "SportsStreamer" },
+                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
+                        "adult": false
+                    }
+                }"#
+            } else {
+                // Poll 3: CLOSE (offline)
+                r#"{
+                    "code": 200,
+                    "message": null,
+                    "content": {
+                        "liveId": 21326414,
+                        "status": "CLOSE",
+                        "liveTitle": "Sports Broadcast (Concluded)",
+                        "channel": { "channelId": "chan_sports", "channelName": "SportsStreamer" },
+                        "livePlaybackJson": null,
+                        "adult": false
+                    }
+                }"#
+            };
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            record_chat: false,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_sports".to_string(),
+            name: "SportsStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        None,
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let info = chzzk_load::chzzk::models::LiveStreamInfo {
+        channel_id: "chan_sports".to_string(),
+        live_id: Some(21326414),
+        streamer_name: "SportsStreamer".to_string(),
+        title: "Sports Broadcast (Encrypted)".to_string(),
+        hls_url: "https://test.com/hls.m3u8".to_string(),
+        chat_channel_id: None,
+    };
+
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+    {
+        orchestrator
+            .active_recordings()
+            .lock()
+            .await
+            .insert("chan_sports".to_string());
+    }
+    orchestrator.spawn_recording_session("chan_sports".to_string(), info, upload_tx.clone());
+
+    // Collect events emitted during FFmpeg 403 handling
+    let mut got_error_log = false;
+    let mut got_ended = false;
+    let mut got_live_channel_update = false;
+    let mut ffmpeg_logs = Vec::new();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_millis(300), event_rx.recv()).await {
+            Ok(Some(ev)) => match ev {
+                AppEvent::Log(entry) => {
+                    if entry.message.contains("requires valid Naver credentials") {
+                        got_error_log = true;
+                    }
+                    if entry.message.starts_with("[FFMPEG]") {
+                        ffmpeg_logs.push(entry.message);
+                    }
+                }
+                AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_sports" => {
+                    got_ended = true;
+                }
+                AppEvent::ChannelUpdate {
+                    ref channel_id,
+                    is_live,
+                    ..
+                } if channel_id == "chan_sports" && is_live => {
+                    got_live_channel_update = true;
+                }
+                _ => {}
+            },
+            _ => {
+                if got_error_log && got_ended && got_live_channel_update {
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(
+        got_error_log,
+        "Must emit single error log for restricted stream credentials"
+    );
+    assert!(got_ended, "Must emit RecordingEnded event");
+    assert!(got_live_channel_update, "Must set channel status to LIVE");
+    assert!(
+        ffmpeg_logs.is_empty(),
+        "FFmpeg 403 and segment skipping errors must NOT be forwarded to logs (zero log spam), got: {ffmpeg_logs:?}"
+    );
+
+    // Verify channel is removed from active_recordings, and marked in restricted_channels and restricted_live_ids
+    assert!(
+        !orchestrator
+            .active_recordings()
+            .lock()
+            .await
+            .contains("chan_sports"),
+        "Channel must not be in active_recordings after 403 detection"
+    );
+    assert!(
+        orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_sports"),
+        "Channel must be in restricted_channels after 403 detection"
+    );
+    assert_eq!(
+        orchestrator
+            .restricted_live_ids()
+            .lock()
+            .await
+            .get("chan_sports")
+            .copied(),
+        Some(21326414),
+        "restricted_live_ids must track liveId 21326414"
+    );
+
+    // Poll 2: Next polling cycle for the same broadcast
+    orchestrator.poll_channels_once(&upload_tx).await;
+    // Should NOT spawn another recording session
+    assert!(
+        !orchestrator
+            .active_recordings()
+            .lock()
+            .await
+            .contains("chan_sports"),
+        "Channel must not spawn another session for the same restricted liveId"
+    );
+    assert!(
+        orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_sports"),
+        "Channel must remain in restricted_channels"
+    );
+
+    // Poll 3: Channel goes offline (CLOSE)
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        !orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_sports"),
+        "Channel must be cleared from restricted_channels on CLOSE"
+    );
+    assert!(
+        !orchestrator
+            .restricted_live_ids()
+            .lock()
+            .await
+            .contains_key("chan_sports"),
+        "Channel must be cleared from restricted_live_ids on CLOSE"
+    );
+
+    // Cleanup env var
+    unsafe {
+        match prev_bin {
+            Some(bin) => std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", bin),
+            None => std::env::remove_var("CHZZK_LOAD_FFMPEG_BIN"),
+        }
+    }
+    let _ = fs::remove_dir_all(&temp_dir);
+}

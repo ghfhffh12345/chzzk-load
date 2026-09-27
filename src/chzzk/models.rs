@@ -58,12 +58,42 @@ pub struct LiveDetailContent {
     pub chat_channel_id: Option<String>,
     #[serde(default)]
     pub adult: Option<bool>,
+    #[serde(default)]
+    pub paid_product: Option<serde_json::Value>,
+    #[serde(default)]
+    pub live_polling_status_json: Option<String>,
+    #[serde(default)]
+    pub user_adult_status: Option<String>,
+    #[serde(default)]
+    pub membership_benefit_type: Option<String>,
+    #[serde(default)]
+    pub watch_party_paid_product_id: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackMeta {
+    pub video_id: Option<String>,
+    pub stream_seq: Option<u64>,
+    pub live_id: Option<String>,
+    pub paid_live: Option<bool>,
+    pub playback_auth_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlaybackJson {
     #[serde(default)]
+    pub meta: Option<PlaybackMeta>,
+    #[serde(default)]
     pub media: Vec<MediaEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LivePollingStatus {
+    pub status: Option<String>,
+    pub is_publishing: Option<bool>,
+    pub playable_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

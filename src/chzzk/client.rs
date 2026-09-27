@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::chzzk::models::{
-    ChzzkResponse, LiveDetail, LiveDetailContent, LiveStreamInfo, PlaybackJson,
+    ChzzkResponse, LiveDetail, LiveDetailContent, LivePollingStatus, LiveStreamInfo, PlaybackJson,
 };
 use crate::chzzk::models_chat::ChatAccessTokenResponse;
 use crate::config::ChzzkConfig;
@@ -157,6 +157,79 @@ pub fn extract_best_hls_url(playback_json_str: &Option<String>) -> Result<String
     Ok(hls_media.path.clone())
 }
 
+pub fn is_stream_auth_required(content: &LiveDetailContent, hls_url: &str) -> bool {
+    // 1. Check PlaybackJson (meta and raw JSON containing aes_key / encryption)
+    if let Some(json_str) = &content.live_playback_json {
+        if json_str.contains("aes_key") || json_str.contains("/encryption/") {
+            return true;
+        }
+        if let Ok(playback) = serde_json::from_str::<PlaybackJson>(json_str)
+            && let Some(meta) = playback.meta
+        {
+            if meta.paid_live.unwrap_or(false) {
+                return true;
+            }
+            if let Some(auth_type) = &meta.playback_auth_type
+                && !auth_type.eq_ignore_ascii_case("NONE")
+            {
+                return true;
+            }
+        }
+    }
+
+    // 2. Check track URL query parameter playback_auth_type or aes_key
+    let lower_url = hls_url.to_ascii_lowercase();
+    if lower_url.contains("aes_key")
+        || lower_url.contains("/encryption/")
+        || (lower_url.contains("playback_auth_type=")
+            && !lower_url.contains("playback_auth_type=none"))
+    {
+        return true;
+    }
+
+    // 3. Check content fields (paidProduct, membershipBenefitType, watchPartyPaidProductId)
+    if content.paid_product.is_some() || content.watch_party_paid_product_id.is_some() {
+        return true;
+    }
+    if let Some(membership) = &content.membership_benefit_type
+        && !membership.eq_ignore_ascii_case("NONE")
+    {
+        return true;
+    }
+
+    false
+}
+
+pub fn is_polling_status_restricted(content: &LiveDetailContent) -> bool {
+    if let Some(polling_str) = &content.live_polling_status_json
+        && let Ok(polling) = serde_json::from_str::<LivePollingStatus>(polling_str)
+        && let Some(status) = polling.playable_status
+        && !status.eq_ignore_ascii_case("PLAYABLE")
+    {
+        return true;
+    }
+    false
+}
+
+pub fn extract_hls_key_uri(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("#EXT-X-KEY:") || trimmed.starts_with("#EXT-X-SESSION-KEY:"))
+            && !trimmed.contains("METHOD=NONE")
+            && let Some(uri_idx) = trimmed.find("URI=\"")
+        {
+            let rest = &trimmed[uri_idx + 5..];
+            if let Some(end_quote) = rest.find('"') {
+                let uri = &rest[..end_quote];
+                if !uri.is_empty() {
+                    return Some(uri.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Clone)]
 pub struct ChzzkClient {
     client: reqwest::Client,
@@ -224,6 +297,28 @@ impl ChzzkClient {
         self.cookie_header.as_deref()
     }
 
+    pub async fn check_aes_key_access(&self, live_id: u64) -> Result<bool> {
+        let url = format!(
+            "{}/service/v1/encryption/lives/{live_id}/aes_key",
+            self.base_url
+        );
+        let resp = self.client.get(&url).send().await?;
+        if resp.status() == reqwest::StatusCode::FORBIDDEN
+            || resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        {
+            Ok(false)
+        } else if resp.status().is_success() {
+            Ok(true)
+        } else if resp.status().is_client_error() {
+            Ok(false)
+        } else {
+            bail!(
+                "Unexpected HTTP status {} from aes_key endpoint",
+                resp.status()
+            );
+        }
+    }
+
     pub async fn get_live_detail(&self, channel_id: &str) -> Result<LiveDetail> {
         let url = format!(
             "{}/service/v2/channels/{}/live-detail",
@@ -241,31 +336,78 @@ impl ChzzkClient {
 
         if let Some(content) = body.content.filter(|c| c.status == "OPEN") {
             let live_id = content.live_id;
-            let streamer_name = content.channel.channel_name;
+            let streamer_name = content.channel.channel_name.clone();
             let title = content
                 .live_title
+                .clone()
                 .unwrap_or_else(|| "Untitled Broadcast".to_string());
-            let chat_channel_id = content.chat_channel_id;
+            let chat_channel_id = content.chat_channel_id.clone();
             let adult = content.adult.unwrap_or(false);
 
-            match extract_best_hls_url(&content.live_playback_json) {
-                Ok(hls_url) => Ok(LiveDetail::Open(LiveStreamInfo {
-                    channel_id: channel_id.to_string(),
-                    live_id,
-                    streamer_name,
-                    title,
-                    hls_url,
-                    chat_channel_id,
-                })),
-                Err(_) => Ok(LiveDetail::Restricted {
+            if is_polling_status_restricted(&content) {
+                return Ok(LiveDetail::Restricted {
                     channel_id: channel_id.to_string(),
                     live_id,
                     streamer_name,
                     title,
                     chat_channel_id,
                     adult,
-                }),
+                });
             }
+
+            let hls_url = match extract_best_hls_url(&content.live_playback_json) {
+                Ok(url) => url,
+                Err(_) => {
+                    return Ok(LiveDetail::Restricted {
+                        channel_id: channel_id.to_string(),
+                        live_id,
+                        streamer_name,
+                        title,
+                        chat_channel_id,
+                        adult,
+                    });
+                }
+            };
+
+            let auth_required = is_stream_auth_required(&content, &hls_url);
+            if auth_required {
+                if self.cookie_header.is_none() {
+                    return Ok(LiveDetail::Restricted {
+                        channel_id: channel_id.to_string(),
+                        live_id,
+                        streamer_name,
+                        title,
+                        chat_channel_id,
+                        adult,
+                    });
+                }
+
+                if let Some(id) = live_id {
+                    match self.check_aes_key_access(id).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Ok(LiveDetail::Restricted {
+                                channel_id: channel_id.to_string(),
+                                live_id,
+                                streamer_name,
+                                title,
+                                chat_channel_id,
+                                adult,
+                            });
+                        }
+                        Err(_e) => {}
+                    }
+                }
+            }
+
+            Ok(LiveDetail::Open(LiveStreamInfo {
+                channel_id: channel_id.to_string(),
+                live_id,
+                streamer_name,
+                title,
+                hls_url,
+                chat_channel_id,
+            }))
         } else {
             Ok(LiveDetail::Close)
         }
