@@ -122,7 +122,6 @@ async fn main() -> anyhow::Result<()> {
     crossterm::execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
 
     let mut app = App::from_settings(&settings);
 
@@ -204,7 +203,6 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     Ok(Event::Resize(width, height)) => {
-                        let _ = terminal.clear();
                         app.handle_event(AppEvent::Resize(width, height));
                         needs_redraw = true;
                     }
