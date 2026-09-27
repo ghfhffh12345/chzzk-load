@@ -264,7 +264,7 @@ impl EngineOrchestrator {
                                         Ok(reclaimed) => {
                                             let _ = event_tx
                                                 .send(AppEvent::UploadCompleted {
-                                                    channel_id: cid,
+                                                    channel_id: cid.clone(),
                                                     chunk_name: name.clone(),
                                                     reclaimed_bytes: reclaimed,
                                                 })
@@ -276,6 +276,34 @@ impl EngineOrchestrator {
                                                     reclaimed as f64 / 1_048_576.0
                                                 ))))
                                                 .await;
+
+                                            // If the chunk's parent directory is an empty session directory for this channel, clean it up
+                                            if let Some(parent) = chunk_path.parent() {
+                                                let is_session_dir = parent
+                                                    .file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .map(|n| n.starts_with(&format!("{cid}_")))
+                                                    .unwrap_or(false);
+
+                                                if is_session_dir
+                                                    && let Ok(mut rd) =
+                                                        tokio::fs::read_dir(parent).await
+                                                    && rd
+                                                        .next_entry()
+                                                        .await
+                                                        .ok()
+                                                        .flatten()
+                                                        .is_none()
+                                                    && tokio::fs::remove_dir(parent).await.is_ok()
+                                                {
+                                                    let _ = event_tx
+                                                        .send(AppEvent::Log(LogEntry::clean(format!(
+                                                            "Cleaned up empty session folder '{}'",
+                                                            parent.display()
+                                                        ))))
+                                                        .await;
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             let _ = event_tx
@@ -337,7 +365,10 @@ impl EngineOrchestrator {
         })
     }
 
-    pub async fn cleanup_empty_session_dirs(recordings_dir: &Path) -> std::io::Result<usize> {
+    pub async fn cleanup_empty_session_dirs_excluding(
+        recordings_dir: &Path,
+        active_channels: &HashSet<String>,
+    ) -> std::io::Result<usize> {
         if !recordings_dir.exists() || !recordings_dir.is_dir() {
             return Ok(0);
         }
@@ -351,6 +382,16 @@ impl EngineOrchestrator {
             };
             if is_dir {
                 let path = entry.path();
+                let dir_name = entry.file_name();
+                let dir_name_str = dir_name.to_string_lossy();
+
+                let is_active = active_channels
+                    .iter()
+                    .any(|cid| dir_name_str.starts_with(&format!("{cid}_")));
+                if is_active {
+                    continue;
+                }
+
                 if let Ok(mut sub_entries) = tokio::fs::read_dir(&path).await
                     && let Ok(None) = sub_entries.next_entry().await
                     && tokio::fs::remove_dir(&path).await.is_ok()
@@ -360,6 +401,10 @@ impl EngineOrchestrator {
             }
         }
         Ok(removed_count)
+    }
+
+    pub async fn cleanup_empty_session_dirs(recordings_dir: &Path) -> std::io::Result<usize> {
+        Self::cleanup_empty_session_dirs_excluding(recordings_dir, &HashSet::new()).await
     }
 
     pub async fn ensure_session_folder(
@@ -1273,11 +1318,17 @@ impl EngineOrchestrator {
                 ))))
                 .await;
 
-            // Clean up session directory if no chunks were saved
+            // Clean up session directory if empty (e.g. no chunks were saved or all chunks/chat were already uploaded)
             if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await
                 && rd.next_entry().await.ok().flatten().is_none()
+                && tokio::fs::remove_dir(&session_dir).await.is_ok()
             {
-                let _ = tokio::fs::remove_dir(&session_dir).await;
+                let _ = event_tx
+                    .send(AppEvent::Log(LogEntry::clean(format!(
+                        "Cleaned up empty session folder '{}'",
+                        session_dir.display()
+                    ))))
+                    .await;
             }
         });
 
@@ -1573,6 +1624,22 @@ impl EngineOrchestrator {
                         sessions.remove(&channel.id);
                     }
 
+                    let recordings_base =
+                        resolve_path(Path::new(&self.settings.general.recordings_dir));
+                    let active = self.active_recordings.lock().await.clone();
+                    if let Ok(count) =
+                        Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active).await
+                        && count > 0
+                    {
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::Log(LogEntry::clean(format!(
+                                "Cleaned up {count} empty session folder(s) in '{}'",
+                                recordings_base.display()
+                            ))))
+                            .await;
+                    }
+
                     let _ = self
                         .event_tx
                         .send(AppEvent::ChannelUpdate {
@@ -1613,6 +1680,20 @@ impl EngineOrchestrator {
             }
 
             self.poll_channels_once(&upload_tx).await;
+
+            let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
+            let active = self.active_recordings.lock().await.clone();
+            if let Ok(count) =
+                Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active).await
+                && count > 0
+            {
+                let _ = self
+                    .event_tx
+                    .try_send(AppEvent::Log(LogEntry::clean(format!(
+                        "Cleaned up {count} empty session folder(s) in '{}'",
+                        recordings_base.display()
+                    ))));
+            }
 
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {

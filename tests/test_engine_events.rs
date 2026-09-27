@@ -3531,3 +3531,313 @@ async fn test_engine_orchestrator_restricted_stream_resets_on_offline() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_finish() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_session_clean_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let channel_id = "chan_post_broadcast";
+    let session_dir = temp_dir.join(format!("{channel_id}_20260927_100000"));
+    fs::create_dir_all(&session_dir).unwrap();
+
+    let chunk_path = session_dir.join("chunk_0000.ts");
+    fs::write(&chunk_path, vec![0u8; 1024 * 1024]).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let auth = create_mock_drive_auth(&temp_dir).await;
+    let client = DriveClient::new(auth).with_base_urls(
+        format!("http://127.0.0.1:{port}"),
+        format!("http://127.0.0.1:{port}"),
+    );
+
+    let upload_session_url = format!("http://127.0.0.1:{port}/resumable_upload_session");
+    let session_url_clone = upload_session_url.clone();
+
+    std::thread::spawn(move || {
+        // 1. Init resumable upload request
+        if let Ok(req) = server.recv() {
+            assert_eq!(req.method().as_str(), "POST");
+            let response = Response::from_string("").with_header(
+                Header::from_bytes(&b"Location"[..], session_url_clone.as_bytes()).unwrap(),
+            );
+            let _ = req.respond(response);
+        }
+
+        // 2. Stream byte chunk upload
+        if let Ok(req) = server.recv() {
+            assert_eq!(req.method().as_str(), "PUT");
+            let response_body = serde_json::json!({
+                "id": "file_uploaded_test_999",
+                "name": "chunk_0000.ts"
+            });
+            let response = Response::from_string(response_body.to_string()).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = req.respond(response);
+        }
+    });
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let _consumer_handle =
+        EngineOrchestrator::spawn_upload_consumer(Some(client), event_tx, upload_rx);
+
+    upload_tx
+        .send(UploadTask {
+            channel_id: channel_id.to_string(),
+            session_folder_id: "folder_clean_123".to_string(),
+            chunk_path: chunk_path.clone(),
+            chunk_name: "chunk_0000.ts".to_string(),
+            streamer_name: "Streamer Clean".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let mut got_clean_log = false;
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv()).await
+    {
+        if let AppEvent::Log(entry) = ev
+            && entry.message.contains("Cleaned up empty session folder")
+        {
+            got_clean_log = true;
+            break;
+        }
+    }
+
+    assert!(
+        !chunk_path.exists(),
+        "Chunk file must be deleted upon upload confirmation"
+    );
+    assert!(
+        !session_dir.exists(),
+        "Empty stream session folder must be deleted after broadcast ends and all cleanup tasks are finished"
+    );
+    assert!(
+        got_clean_log,
+        "Expected log message indicating session folder cleanup"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_cleanup_empty_session_dirs_excluding_active_preserves_active_session() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_cleanup_excluding_active_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let active_chan = "ch_active";
+    let ended_chan = "ch_ended";
+
+    let active_dir = temp_dir.join(format!("{active_chan}_20260927_100000"));
+    let ended_dir = temp_dir.join(format!("{ended_chan}_20260927_090000"));
+    let non_empty_dir = temp_dir.join("ch_other_20260927_080000");
+
+    fs::create_dir_all(&active_dir).unwrap();
+    fs::create_dir_all(&ended_dir).unwrap();
+    fs::create_dir_all(&non_empty_dir).unwrap();
+    fs::write(non_empty_dir.join("chunk_0000.ts"), b"data").unwrap();
+
+    let mut active_set = std::collections::HashSet::new();
+    active_set.insert(active_chan.to_string());
+
+    let removed = EngineOrchestrator::cleanup_empty_session_dirs_excluding(&temp_dir, &active_set)
+        .await
+        .expect("cleanup should succeed");
+
+    assert_eq!(removed, 1, "Only ended_dir should be removed");
+    assert!(!ended_dir.exists(), "ended_dir should be deleted");
+    assert!(
+        active_dir.exists(),
+        "active_dir must be preserved even if empty"
+    );
+    assert!(non_empty_dir.exists(), "non_empty_dir must be preserved");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_ends() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_live_clean_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    // Channel goes CLOSE
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "CLOSE",
+                    "channel": {
+                        "channelId": "chan_ended",
+                        "channelName": "EndedStreamer"
+                    }
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let empty_session_dir = temp_dir.join("chan_ended_20260927_100000");
+    fs::create_dir_all(&empty_session_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![chzzk_load::config::ChannelConfig {
+            id: "chan_ended".to_string(),
+            name: "EndedStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        None,
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+    // Poll channel once while orchestrator is running
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    assert!(
+        !empty_session_dir.exists(),
+        "Empty session directory must be deleted after stream ends during normal polling"
+    );
+
+    let mut got_clean_log = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = ev
+            && entry.message.contains("Cleaned up")
+            && entry.message.contains("empty session folder")
+        {
+            got_clean_log = true;
+            break;
+        }
+    }
+    assert!(
+        got_clean_log,
+        "Expected clean log message for deleted empty session folder"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_recording_session_cleans_empty_folder_when_no_chunks_saved() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_session_clean_no_chunks_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            record_chat: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
+        settings,
+        chzzk,
+        None,
+        event_tx,
+        cancel_token.clone(),
+    ));
+
+    let info = chzzk_load::chzzk::models::LiveStreamInfo {
+        channel_id: "chan_empty_session".to_string(),
+        live_id: Some(12345),
+        streamer_name: "EmptyStreamer".to_string(),
+        title: "Empty Stream Title".to_string(),
+        hls_url: "http://127.0.0.1:9999/nonexistent.m3u8".to_string(),
+        chat_channel_id: None,
+    };
+
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+    orchestrator.spawn_recording_session("chan_empty_session".to_string(), info, upload_tx);
+
+    let cancel_clone = cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        cancel_clone.cancel();
+    });
+
+    let mut got_clean_log = false;
+    let mut got_ended = false;
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(10), event_rx.recv()).await
+    {
+        match ev {
+            AppEvent::Log(entry) if entry.message.contains("Cleaned up empty session folder") => {
+                got_clean_log = true;
+            }
+            AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_empty_session" => {
+                got_ended = true;
+            }
+            _ => {}
+        }
+        if got_clean_log && got_ended {
+            break;
+        }
+    }
+
+    // Give session directory cleanup a moment to finalize
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Check temp_dir contents: there should be no empty session folder remaining
+    let mut entries = tokio::fs::read_dir(&temp_dir).await.unwrap();
+    let mut remaining_session_dirs = 0;
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        if entry
+            .file_type()
+            .await
+            .map(|ft| ft.is_dir())
+            .unwrap_or(false)
+        {
+            remaining_session_dirs += 1;
+        }
+    }
+
+    assert_eq!(
+        remaining_session_dirs, 0,
+        "Empty stream session folder must be deleted when no chunks were saved"
+    );
+    assert!(
+        got_clean_log,
+        "Expected clean log message for empty session folder deletion"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
