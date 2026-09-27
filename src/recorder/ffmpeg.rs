@@ -14,14 +14,13 @@ pub fn sanitize_filename(name: &str) -> String {
     result
 }
 
-pub fn build_ffmpeg_command(
+pub fn build_ffmpeg_command_with_bin(
+    ffmpeg_bin: &str,
     m3u8_url: &str,
     output_pattern: &Path,
     chunk_duration_seconds: u64,
     cookie_header: Option<&str>,
 ) -> Command {
-    let ffmpeg_bin =
-        std::env::var("CHZZK_LOAD_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
     let mut cmd = Command::new(ffmpeg_bin);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::null());
@@ -57,6 +56,23 @@ pub fn build_ffmpeg_command(
         .arg(output_pattern);
 
     cmd
+}
+
+pub fn build_ffmpeg_command(
+    m3u8_url: &str,
+    output_pattern: &Path,
+    chunk_duration_seconds: u64,
+    cookie_header: Option<&str>,
+) -> Command {
+    let ffmpeg_bin =
+        std::env::var("CHZZK_LOAD_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
+    build_ffmpeg_command_with_bin(
+        &ffmpeg_bin,
+        m3u8_url,
+        output_pattern,
+        chunk_duration_seconds,
+        cookie_header,
+    )
 }
 
 #[cfg(test)]

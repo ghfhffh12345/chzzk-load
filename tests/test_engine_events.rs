@@ -3416,10 +3416,11 @@ async fn test_engine_orchestrator_normal_to_restricted_to_normal_transitions_int
         r#"
 use std::io::Read;
 fn main() {
-    let out_dir = std::env::var("MOCK_LOG_DIR").unwrap_or_else(|_| ".".to_string());
+    let exe = std::env::current_exe().unwrap();
+    let out_dir = exe.parent().unwrap();
     let pid = std::process::id();
-    let start_file = format!("{out_dir}/ffmpeg_start_{pid}.txt");
-    let exit_file = format!("{out_dir}/ffmpeg_exit_{pid}.txt");
+    let start_file = out_dir.join(format!("ffmpeg_start_{pid}.txt"));
+    let exit_file = out_dir.join(format!("ffmpeg_exit_{pid}.txt"));
     let _ = std::fs::write(&start_file, "running");
     let mut stdin = std::io::stdin();
     let mut buf = [0u8; 128];
@@ -3441,12 +3442,6 @@ fn main() {
         .status()
         .expect("Failed to compile mock_ffmpeg");
     assert!(compile_status.success(), "mock_ffmpeg compilation failed");
-
-    let prev_bin = std::env::var("CHZZK_LOAD_FFMPEG_BIN").ok();
-    unsafe {
-        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", &mock_bin);
-        std::env::set_var("MOCK_LOG_DIR", temp_dir.to_string_lossy().to_string());
-    }
 
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
@@ -3527,7 +3522,8 @@ fn main() {
     let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx)
+        .with_ffmpeg_bin(mock_bin.to_string_lossy());
 
     // --- Poll 1: Normal stream starts recording ---
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -3676,13 +3672,6 @@ fn main() {
     );
 
     orchestrator.cancel();
-    unsafe {
-        match prev_bin {
-            Some(bin) => std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", bin),
-            None => std::env::remove_var("CHZZK_LOAD_FFMPEG_BIN"),
-        }
-        std::env::remove_var("MOCK_LOG_DIR");
-    }
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -4162,11 +4151,6 @@ fn main() {
         .expect("Failed to compile mock_ffmpeg");
     assert!(compile_status.success(), "mock_ffmpeg compilation failed");
 
-    let prev_bin = std::env::var("CHZZK_LOAD_FFMPEG_BIN").ok();
-    unsafe {
-        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", &mock_bin);
-    }
-
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
     let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -4227,13 +4211,16 @@ fn main() {
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
-    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
-        settings,
-        chzzk,
-        None,
-        event_tx,
-        cancel_token.clone(),
-    ));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::with_cancel_token(
+            settings,
+            chzzk,
+            None,
+            event_tx,
+            cancel_token.clone(),
+        )
+        .with_ffmpeg_bin(mock_bin.to_string_lossy()),
+    );
 
     let info = chzzk_load::chzzk::models::LiveStreamInfo {
         channel_id: "chan_sports".to_string(),
@@ -4370,12 +4357,5 @@ fn main() {
         "Channel must be cleared from restricted_live_ids on CLOSE"
     );
 
-    // Cleanup env var
-    unsafe {
-        match prev_bin {
-            Some(bin) => std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", bin),
-            None => std::env::remove_var("CHZZK_LOAD_FFMPEG_BIN"),
-        }
-    }
     let _ = fs::remove_dir_all(&temp_dir);
 }

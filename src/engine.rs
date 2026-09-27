@@ -4,7 +4,9 @@ use crate::chzzk::client::ChzzkClient;
 use crate::chzzk::models::{LiveDetail, LiveStreamInfo};
 use crate::config::Settings;
 use crate::drive::client::DriveClient;
-use crate::recorder::ffmpeg::{build_ffmpeg_command, sanitize_filename};
+use crate::recorder::ffmpeg::{
+    build_ffmpeg_command, build_ffmpeg_command_with_bin, sanitize_filename,
+};
 use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{UploadTask, UploadWorker};
@@ -83,6 +85,7 @@ pub struct EngineOrchestrator {
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
     session_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    ffmpeg_bin: Option<String>,
 }
 
 impl EngineOrchestrator {
@@ -117,7 +120,13 @@ impl EngineOrchestrator {
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
+            ffmpeg_bin: None,
         }
+    }
+
+    pub fn with_ffmpeg_bin(mut self, bin: impl Into<String>) -> Self {
+        self.ffmpeg_bin = Some(bin.into());
+        self
     }
 
     pub fn cancel(&self) {
@@ -625,6 +634,7 @@ impl EngineOrchestrator {
         let restricted_live_ids = self.restricted_live_ids.clone();
         let session_cancel_tokens = self.session_cancel_tokens.clone();
         let cancel_token = self.cancel_token.clone();
+        let ffmpeg_bin = self.ffmpeg_bin.clone();
 
         let handle = tokio::spawn(async move {
             let _ = event_tx
@@ -785,7 +795,16 @@ impl EngineOrchestrator {
             let output_pattern = session_dir.join("chunk_%04d.ts");
             let chunk_dur = settings.general.chunk_duration_seconds;
             let cookie = chzzk.cookie_header();
-            let mut cmd = build_ffmpeg_command(&info.hls_url, &output_pattern, chunk_dur, cookie);
+            let mut cmd = match ffmpeg_bin.as_deref() {
+                Some(bin) => build_ffmpeg_command_with_bin(
+                    bin,
+                    &info.hls_url,
+                    &output_pattern,
+                    chunk_dur,
+                    cookie,
+                ),
+                None => build_ffmpeg_command(&info.hls_url, &output_pattern, chunk_dur, cookie),
+            };
 
             let key_forbidden = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let key_forbidden_notify = Arc::new(tokio::sync::Notify::new());
