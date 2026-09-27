@@ -3400,6 +3400,293 @@ async fn test_engine_orchestrator_restricted_stream_recovers_to_recordable() {
 }
 
 #[tokio::test]
+async fn test_engine_orchestrator_normal_to_restricted_to_normal_transitions_into_new_session_folder()
+ {
+    let temp_dir = std::env::temp_dir().join(format!("test_orch_trans_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let mock_bin = temp_dir.join(if cfg!(windows) {
+        "mock_ffmpeg.exe"
+    } else {
+        "mock_ffmpeg"
+    });
+    let src_path = temp_dir.join("mock_ffmpeg.rs");
+    fs::write(
+        &src_path,
+        r#"
+use std::io::Read;
+fn main() {
+    let out_dir = std::env::var("MOCK_LOG_DIR").unwrap_or_else(|_| ".".to_string());
+    let pid = std::process::id();
+    let start_file = format!("{out_dir}/ffmpeg_start_{pid}.txt");
+    let exit_file = format!("{out_dir}/ffmpeg_exit_{pid}.txt");
+    let _ = std::fs::write(&start_file, "running");
+    let mut stdin = std::io::stdin();
+    let mut buf = [0u8; 128];
+    while let Ok(n) = stdin.read(&mut buf) {
+        if n == 0 || buf[..n].contains(&b'q') {
+            break;
+        }
+    }
+    let _ = std::fs::write(&exit_file, "exited");
+}
+"#,
+    )
+    .unwrap();
+
+    let compile_status = std::process::Command::new("rustc")
+        .arg(&src_path)
+        .arg("-o")
+        .arg(&mock_bin)
+        .status()
+        .expect("Failed to compile mock_ffmpeg");
+    assert!(compile_status.success(), "mock_ffmpeg compilation failed");
+
+    let prev_bin = std::env::var("CHZZK_LOAD_FFMPEG_BIN").ok();
+    unsafe {
+        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", &mock_bin);
+        std::env::set_var("MOCK_LOG_DIR", temp_dir.to_string_lossy().to_string());
+    }
+
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let poll_count_clone = poll_count.clone();
+
+    std::thread::spawn(move || {
+        while let Ok(request) = server.recv() {
+            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mock_body = match count {
+                0 => {
+                    // Poll 1: Normal stream
+                    r#"{
+                        "code": 200,
+                        "message": null,
+                        "content": {
+                            "liveId": 888777,
+                            "status": "OPEN",
+                            "liveTitle": "Public Stream Part 1",
+                            "channel": { "channelId": "chan_trans", "channelName": "TransStreamer" },
+                            "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}",
+                            "adult": false
+                        }
+                    }"#
+                }
+                1 => {
+                    // Poll 2: Transitions to Restricted (19+ adult without auth)
+                    r#"{
+                        "code": 200,
+                        "message": null,
+                        "content": {
+                            "liveId": 888777,
+                            "status": "OPEN",
+                            "liveTitle": "[19+] Restricted Stream Part 2",
+                            "channel": { "channelId": "chan_trans", "channelName": "TransStreamer" },
+                            "livePlaybackJson": null,
+                            "adult": true
+                        }
+                    }"#
+                }
+                _ => {
+                    // Poll 3: Returns back to Normal (Public stream again)
+                    r#"{
+                        "code": 200,
+                        "message": null,
+                        "content": {
+                            "liveId": 888777,
+                            "status": "OPEN",
+                            "liveTitle": "Public Stream Part 3 (Resumed)",
+                            "channel": { "channelId": "chan_trans", "channelName": "TransStreamer" },
+                            "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}",
+                            "adult": false
+                        }
+                    }"#
+                }
+            };
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            stream_cooldown_seconds: 30, // Normal 30s cooldown
+            record_chat: false,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_trans".to_string(),
+            name: "TransStreamer".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+
+    // --- Poll 1: Normal stream starts recording ---
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        orchestrator
+            .active_recordings()
+            .lock()
+            .await
+            .contains("chan_trans"),
+        "Poll 1: Must be in active_recordings"
+    );
+
+    // Wait for session 1 directory to be created on disk
+    let mut entries_after_poll1: Vec<String> = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    while tokio::time::Instant::now() < deadline {
+        entries_after_poll1 = fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("chan_trans_"))
+            .collect();
+        if entries_after_poll1.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    assert_eq!(
+        entries_after_poll1.len(),
+        1,
+        "Must create exactly 1 session folder for Poll 1: {entries_after_poll1:?}"
+    );
+    let folder_poll1 = entries_after_poll1[0].clone();
+    fs::write(
+        temp_dir.join(&folder_poll1).join("chunk_0000.ts"),
+        b"test segment content",
+    )
+    .unwrap();
+
+    // Sleep a moment to ensure timestamp clock advances
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // --- Poll 2: Stream transitions to Restricted ---
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        !orchestrator
+            .active_recordings()
+            .lock()
+            .await
+            .contains("chan_trans"),
+        "Poll 2: Must be removed from active_recordings on restriction"
+    );
+    assert!(
+        orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_trans"),
+        "Poll 2: Must be added to restricted_channels"
+    );
+
+    // Verify Session 1 FFmpeg process received termination and exited cleanly on restriction
+    let mut session1_exited = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let count = fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("ffmpeg_exit_"))
+            .count();
+        if count >= 1 {
+            session1_exited = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        session1_exited,
+        "Session 1 FFmpeg process must be gracefully terminated upon entering restricted state!"
+    );
+
+    // Simulate restriction latch and cooldown that occurs upon session conclusion
+    {
+        let r_ids_arc = orchestrator.restricted_live_ids();
+        let mut r_ids = r_ids_arc.lock().await;
+        r_ids.insert("chan_trans".to_string(), 888777);
+    }
+    {
+        let finished_arc = orchestrator.finished_sessions();
+        let mut finished = finished_arc.lock().await;
+        finished.insert(
+            "chan_trans".to_string(),
+            chzzk_load::engine::FinishedSession {
+                live_id: Some(888777),
+                finished_at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    // Sleep a moment to ensure timestamp clock advances
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // --- Poll 3: Stream transitions back to Normal (same liveId) ---
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(
+        orchestrator
+            .active_recordings()
+            .lock()
+            .await
+            .contains("chan_trans"),
+        "Poll 3: Must be recording again after returning to normal"
+    );
+    assert!(
+        !orchestrator
+            .restricted_channels()
+            .lock()
+            .await
+            .contains("chan_trans"),
+        "Poll 3: Must no longer be in restricted_channels"
+    );
+
+    // Wait for session 2 directory to be created on disk
+    let mut entries_after_poll3: Vec<String> = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    while tokio::time::Instant::now() < deadline {
+        entries_after_poll3 = fs::read_dir(&temp_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("chan_trans_"))
+            .collect();
+        if entries_after_poll3.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    assert!(
+        entries_after_poll3.len() >= 2,
+        "Must create a new distinct session folder for Poll 3, got: {entries_after_poll3:?}"
+    );
+    assert!(
+        entries_after_poll3.iter().any(|f| f != &folder_poll1),
+        "New session folder must be distinct from folder 1 '{folder_poll1}', got: {entries_after_poll3:?}"
+    );
+
+    orchestrator.cancel();
+    unsafe {
+        match prev_bin {
+            Some(bin) => std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", bin),
+            None => std::env::remove_var("CHZZK_LOAD_FFMPEG_BIN"),
+        }
+        std::env::remove_var("MOCK_LOG_DIR");
+    }
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_engine_orchestrator_restricted_stream_resets_on_offline() {
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();

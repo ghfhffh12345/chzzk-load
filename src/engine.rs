@@ -78,6 +78,8 @@ pub struct EngineOrchestrator {
     finished_sessions: Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>>,
     restricted_channels: Arc<tokio::sync::Mutex<HashSet<String>>>,
     restricted_live_ids: Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
+    api_restricted_channels: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    session_cancel_tokens: Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>>,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
     session_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -110,6 +112,8 @@ impl EngineOrchestrator {
             finished_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             restricted_channels: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             restricted_live_ids: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            api_restricted_channels: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            session_cancel_tokens: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -146,6 +150,16 @@ impl EngineOrchestrator {
 
     pub fn restricted_live_ids(&self) -> Arc<tokio::sync::Mutex<HashMap<String, u64>>> {
         self.restricted_live_ids.clone()
+    }
+
+    pub fn api_restricted_channels(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
+        self.api_restricted_channels.clone()
+    }
+
+    pub fn session_cancel_tokens(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>> {
+        self.session_cancel_tokens.clone()
     }
 
     pub async fn register_finished_session(&self, channel_id: &str, live_id: Option<u64>) {
@@ -609,6 +623,7 @@ impl EngineOrchestrator {
         let finished_sessions = self.finished_sessions.clone();
         let restricted_channels = self.restricted_channels.clone();
         let restricted_live_ids = self.restricted_live_ids.clone();
+        let session_cancel_tokens = self.session_cancel_tokens.clone();
         let cancel_token = self.cancel_token.clone();
 
         let handle = tokio::spawn(async move {
@@ -619,7 +634,13 @@ impl EngineOrchestrator {
                 })
                 .await;
 
-            let start_timestamp = Local::now().format("%Y-%m-%d_%H%M").to_string();
+            let start_timestamp = {
+                let sessions = active_sessions.lock().await;
+                sessions
+                    .get(&channel_id)
+                    .map(|s| s.start_timestamp.clone())
+                    .unwrap_or_else(|| Local::now().format("%Y-%m-%d_%H%M%S").to_string())
+            };
             let initial_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             {
                 let mut sessions = active_sessions.lock().await;
@@ -665,6 +686,10 @@ impl EngineOrchestrator {
             // Drive folder is created lazily in process_sealed_chunk when the first valid chunk is sealed
             let mut session_folder_id: Option<String> = None;
             let session_cancel = cancel_token.child_token();
+            {
+                let mut tokens = session_cancel_tokens.lock().await;
+                tokens.insert(channel_id.clone(), session_cancel.clone());
+            }
 
             let chat_session_cancel = session_cancel.clone();
             let chat_task = if settings.general.record_chat {
@@ -820,6 +845,10 @@ impl EngineOrchestrator {
                         ))))
                         .await;
                     session_cancel.cancel();
+                    {
+                        let mut tokens = session_cancel_tokens.lock().await;
+                        tokens.remove(&channel_id);
+                    }
                     if let Some(mut chat_handle) = chat_task
                         && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
                             .await
@@ -857,7 +886,7 @@ impl EngineOrchestrator {
                         restricted_abort = true;
                         break;
                     }
-                    _ = cancel_token.cancelled() => {
+                    _ = session_cancel.cancelled() => {
                         let _ = event_tx
                             .send(AppEvent::Log(LogEntry::rec(format!(
                                 "Cancellation received for channel {channel_id}, stopping FFmpeg gracefully..."
@@ -1179,6 +1208,10 @@ impl EngineOrchestrator {
                 let _ = tokio::fs::remove_dir(&session_dir).await;
 
                 {
+                    let mut tokens = session_cancel_tokens.lock().await;
+                    tokens.remove(&channel_id);
+                }
+                {
                     let mut active = active_recordings.lock().await;
                     active.remove(&channel_id);
                 }
@@ -1397,12 +1430,21 @@ impl EngineOrchestrator {
             }
 
             {
+                let mut tokens = session_cancel_tokens.lock().await;
+                tokens.remove(&channel_id);
+            }
+            {
                 let mut active = active_recordings.lock().await;
                 active.remove(&channel_id);
             }
             {
                 let mut sessions = active_sessions.lock().await;
-                sessions.remove(&channel_id);
+                if sessions
+                    .get(&channel_id)
+                    .is_some_and(|s| s.start_timestamp == start_timestamp)
+                {
+                    sessions.remove(&channel_id);
+                }
             }
             {
                 let mut finished = finished_sessions.lock().await;
@@ -1454,6 +1496,35 @@ impl EngineOrchestrator {
             };
             match detail_res {
                 Ok(LiveDetail::Open(info)) => {
+                    let was_api_restricted = {
+                        let mut api_restricted = self.api_restricted_channels.lock().await;
+                        api_restricted.remove(&channel.id)
+                    };
+
+                    if was_api_restricted {
+                        {
+                            let mut r_ids = self.restricted_live_ids.lock().await;
+                            r_ids.remove(&channel.id);
+                        }
+                        {
+                            let mut finished = self.finished_sessions.lock().await;
+                            finished.remove(&channel.id);
+                        }
+                        {
+                            let mut restricted = self.restricted_channels.lock().await;
+                            restricted.remove(&channel.id);
+                        }
+
+                        let log_msg = format!(
+                            "Restricted stream for channel {} ({}) returned to public broadcast (liveId: {:?}). Starting new recording session in new broadcast folder...",
+                            channel.id, info.streamer_name, info.live_id
+                        );
+                        let _ = self
+                            .event_tx
+                            .send(AppEvent::Log(LogEntry::rec(log_msg)))
+                            .await;
+                    }
+
                     let is_live_id_restricted = if let Some(lid) = info.live_id {
                         let r_ids = self.restricted_live_ids.lock().await;
                         r_ids.get(&channel.id).copied() == Some(lid)
@@ -1671,6 +1742,12 @@ impl EngineOrchestrator {
                             })
                             .await;
 
+                        let start_timestamp = if was_api_restricted {
+                            Local::now().format("%Y-%m-%d_%H%M%S").to_string()
+                        } else {
+                            Local::now().format("%Y-%m-%d_%H%M").to_string()
+                        };
+
                         {
                             let mut active = self.active_recordings.lock().await;
                             active.insert(channel.id.clone());
@@ -1680,9 +1757,7 @@ impl EngineOrchestrator {
                             sessions.insert(
                                 channel.id.clone(),
                                 ActiveSessionState {
-                                    start_timestamp: Local::now()
-                                        .format("%Y-%m-%d_%H%M")
-                                        .to_string(),
+                                    start_timestamp,
                                     streamer_name: info.streamer_name.clone(),
                                     current_title: info.title.clone(),
                                     session_folder_id: None,
@@ -1705,6 +1780,11 @@ impl EngineOrchestrator {
                     chat_channel_id: _,
                     adult,
                 }) => {
+                    if let Some(token) = self.session_cancel_tokens.lock().await.remove(&channel.id)
+                    {
+                        token.cancel();
+                    }
+
                     let was_active = {
                         let mut active = self.active_recordings.lock().await;
                         active.remove(&channel.id)
@@ -1718,6 +1798,11 @@ impl EngineOrchestrator {
                                 channel_id: channel.id.clone(),
                             })
                             .await;
+                    }
+
+                    {
+                        let mut api_restricted = self.api_restricted_channels.lock().await;
+                        api_restricted.insert(channel.id.clone());
                     }
 
                     let is_newly_restricted = {
@@ -1755,6 +1840,14 @@ impl EngineOrchestrator {
                 }
                 Ok(LiveDetail::Close) => {
                     // Channel reported CLOSE (offline)
+                    if let Some(token) = self.session_cancel_tokens.lock().await.remove(&channel.id)
+                    {
+                        token.cancel();
+                    }
+                    {
+                        let mut api_restricted = self.api_restricted_channels.lock().await;
+                        api_restricted.remove(&channel.id);
+                    }
                     {
                         let mut restricted = self.restricted_channels.lock().await;
                         restricted.remove(&channel.id);
