@@ -3,19 +3,18 @@ use crate::chzzk::chat::ChzzkChatClient;
 use crate::chzzk::client::ChzzkClient;
 use crate::chzzk::models::{LiveDetail, LiveStreamInfo};
 use crate::config::Settings;
-use crate::drive::client::DriveClient;
 use crate::recorder::ffmpeg::{
     build_ffmpeg_command, build_ffmpeg_command_with_bin, sanitize_filename,
 };
 use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::{AppEvent, LogEntry};
-use crate::uploader::{UploadTask, UploadWorker};
+use crate::uploader::{ProgressCallback, UploadBackend, UploadTask};
 use chrono::Local;
 use futures_util::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
@@ -29,28 +28,26 @@ pub struct FinishedSession {
 pub struct ActiveSessionState {
     pub start_timestamp: String,
     pub streamer_name: String,
+    pub initial_title: String,
     pub current_title: String,
-    pub session_folder_id: Option<String>,
     pub title_history: Vec<(String, String)>,
-    pub title_history_file_id: Option<String>,
 }
 
 impl ActiveSessionState {
-    pub fn new(start_timestamp: String, streamer_name: String, current_title: String) -> Self {
+    pub fn new(start_timestamp: String, streamer_name: String, initial_title: String) -> Self {
         let initial_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         Self {
             start_timestamp,
             streamer_name,
-            title_history: vec![(initial_time, current_title.clone())],
-            current_title,
-            session_folder_id: None,
-            title_history_file_id: None,
+            title_history: vec![(initial_time, initial_title.clone())],
+            current_title: initial_title.clone(),
+            initial_title,
         }
     }
 
     pub fn folder_name(&self) -> String {
         let streamer = sanitize_filename(&self.streamer_name);
-        let title = sanitize_filename(&self.current_title);
+        let title = sanitize_filename(&self.initial_title);
         let timestamp = &self.start_timestamp;
         format!("[{timestamp}] {streamer} - {title}")
     }
@@ -73,7 +70,7 @@ impl ActiveSessionState {
 pub struct EngineOrchestrator {
     settings: Settings,
     chzzk: ChzzkClient,
-    drive: Option<DriveClient>,
+    backend: Option<Arc<dyn UploadBackend>>,
     event_tx: Sender<AppEvent>,
     active_recordings: Arc<tokio::sync::Mutex<HashSet<String>>>,
     active_sessions: Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>>,
@@ -92,23 +89,23 @@ impl EngineOrchestrator {
     pub fn new(
         settings: Settings,
         chzzk: ChzzkClient,
-        drive: Option<DriveClient>,
+        backend: Option<Arc<dyn UploadBackend>>,
         event_tx: Sender<AppEvent>,
     ) -> Self {
-        Self::with_cancel_token(settings, chzzk, drive, event_tx, CancellationToken::new())
+        Self::with_cancel_token(settings, chzzk, backend, event_tx, CancellationToken::new())
     }
 
     pub fn with_cancel_token(
         settings: Settings,
         chzzk: ChzzkClient,
-        drive: Option<DriveClient>,
+        backend: Option<Arc<dyn UploadBackend>>,
         event_tx: Sender<AppEvent>,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
             settings,
             chzzk,
-            drive,
+            backend,
             event_tx,
             active_recordings: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             active_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -183,15 +180,15 @@ impl EngineOrchestrator {
     }
 
     pub fn spawn_upload_consumer(
-        drive_opt: Option<DriveClient>,
+        backend_opt: Option<Arc<dyn UploadBackend>>,
         event_tx: Sender<AppEvent>,
         upload_rx: tokio::sync::mpsc::Receiver<UploadTask>,
     ) -> tokio::task::JoinHandle<()> {
-        Self::spawn_upload_consumer_with_concurrency(drive_opt, event_tx, upload_rx, 3)
+        Self::spawn_upload_consumer_with_concurrency(backend_opt, event_tx, upload_rx, 3)
     }
 
     pub fn spawn_upload_consumer_with_concurrency(
-        drive_opt: Option<DriveClient>,
+        backend_opt: Option<Arc<dyn UploadBackend>>,
         event_tx: Sender<AppEvent>,
         mut upload_rx: tokio::sync::mpsc::Receiver<UploadTask>,
         concurrency: usize,
@@ -249,19 +246,19 @@ impl EngineOrchestrator {
                         && let Some(task) = queue.pop_front()
                     {
                         active_channels.insert(ch_id.clone());
-                        let drive = drive_opt.clone();
+                        let backend = backend_opt.clone();
                         let event_tx = event_tx.clone();
                         let task_cid = ch_id.clone();
 
                         join_set.spawn(async move {
                             let _ = std::panic::AssertUnwindSafe(async move {
-                                if let Some(ref drive) = drive {
+                                if let Some(ref backend) = backend {
                                     let UploadTask {
                                         channel_id: cid,
-                                        session_folder_id,
                                         chunk_path,
                                         chunk_name: name,
                                         streamer_name: streamer,
+                                        remote_dir,
                                         ..
                                     } = task;
 
@@ -269,26 +266,26 @@ impl EngineOrchestrator {
                                     let n = name.clone();
                                     let c = cid.clone();
                                     let s = streamer.clone();
-                                    let chunk_start_time = std::time::Instant::now();
 
-                                    let upload_res = UploadWorker::upload_path_and_delete(
-                                        drive,
-                                        &chunk_path,
-                                        &session_folder_id,
-                                        move |uploaded, total| {
-                                            let mb_s = (uploaded as f64 / 1_048_576.0)
-                                                / chunk_start_time.elapsed().as_secs_f64().max(0.1);
+                                    let progress_cb: ProgressCallback =
+                                        Box::new(move |uploaded, total, speed| {
                                             let _ = tx.try_send(AppEvent::UploadProgress {
                                                 channel_id: c.clone(),
                                                 chunk_name: n.clone(),
                                                 streamer_name: s.clone(),
                                                 uploaded_bytes: uploaded,
                                                 total_bytes: total,
-                                                speed_mb_s: mb_s,
+                                                speed_mb_s: speed,
                                             });
-                                        },
-                                    )
-                                    .await;
+                                        });
+
+                                    let upload_res = backend
+                                        .upload_file_and_delete(
+                                            &chunk_path,
+                                            &remote_dir,
+                                            progress_cb,
+                                        )
+                                        .await;
 
                                     match upload_res {
                                         Ok(reclaimed) => {
@@ -301,8 +298,7 @@ impl EngineOrchestrator {
                                                 .await;
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::clean(format!(
-                                                    "Uploaded & deleted {} (reclaimed {:.1} MB)",
-                                                    name,
+                                                    "Uploaded & deleted {name} (reclaimed {:.1} MB)",
                                                     reclaimed as f64 / 1_048_576.0
                                                 ))))
                                                 .await;
@@ -437,98 +433,14 @@ impl EngineOrchestrator {
         Self::cleanup_empty_session_dirs_excluding(recordings_dir, &HashSet::new()).await
     }
 
-    pub async fn ensure_session_folder(
-        drive: &DriveClient,
-        root_name: &str,
-        subfolder_name: &str,
-        event_tx: &Sender<AppEvent>,
-    ) -> Option<String> {
-        match drive.get_or_create_folder(root_name, None).await {
-            Ok(root_id) => {
-                match drive
-                    .get_or_create_folder(subfolder_name, Some(&root_id))
-                    .await
-                {
-                    Ok(sub_id) => {
-                        let _ = event_tx
-                            .send(AppEvent::Log(LogEntry::drive(format!(
-                                "Session folder ready: '{root_name}/{subfolder_name}'"
-                            ))))
-                            .await;
-                        Some(sub_id)
-                    }
-                    Err(e) => {
-                        let _ = event_tx
-                            .send(AppEvent::Log(LogEntry::warn(format!(
-                                "Failed to create Drive session subfolder: {e}"
-                            ))))
-                            .await;
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = event_tx
-                    .send(AppEvent::Log(LogEntry::warn(format!(
-                        "Failed to access Drive root folder: {e}"
-                    ))))
-                    .await;
-                None
-            }
-        }
-    }
-
-    async fn sync_title_history_to_drive(
-        active_sessions: &Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>>,
-        channel_id: &str,
-        session_folder_id: &Option<String>,
-        drive_opt: Option<&DriveClient>,
-        event_tx: &Sender<AppEvent>,
-    ) {
-        if let (Some(fid), Some(drive)) = (session_folder_id.as_deref(), drive_opt) {
-            let history_to_upload = {
-                let mut sessions = active_sessions.lock().await;
-                if let Some(s) = sessions.get_mut(channel_id) {
-                    s.session_folder_id = Some(fid.to_string());
-                    if s.title_history_file_id.is_none() {
-                        Some(s.format_title_history())
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            };
-
-            if let Some(history_text) = history_to_upload
-                && let Ok(file_id) = drive
-                    .upload_text_file(fid, "title_history.txt", &history_text, None)
-                    .await
-            {
-                let mut sessions = active_sessions.lock().await;
-                if let Some(s) = sessions.get_mut(channel_id) {
-                    s.title_history_file_id = Some(file_id);
-                }
-                let _ = event_tx
-                    .send(AppEvent::Log(LogEntry::drive(format!(
-                        "Initialized 'title_history.txt' in Drive folder for {channel_id}"
-                    ))))
-                    .await;
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub async fn process_sealed_chunk(
         chunk_path: &Path,
-        session_folder_id: &mut Option<String>,
-        drive_opt: Option<&DriveClient>,
-        root_name: &str,
-        drive_subfolder_name: &str,
+        remote_dir: &str,
         channel_id: &str,
         streamer_name: &str,
         upload_tx: &Sender<UploadTask>,
         event_tx: &Sender<AppEvent>,
+        backend_active: bool,
     ) {
         if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
             let size = tokio::fs::metadata(chunk_path)
@@ -542,20 +454,12 @@ impl EngineOrchestrator {
                 })
                 .await;
 
-            if session_folder_id.is_none()
-                && let Some(drive) = drive_opt
-            {
-                *session_folder_id =
-                    Self::ensure_session_folder(drive, root_name, drive_subfolder_name, event_tx)
-                        .await;
-            }
-
-            if let Some(folder_id) = session_folder_id.as_ref() {
+            if backend_active {
                 let send_res = upload_tx
                     .send(UploadTask {
                         channel_id: channel_id.to_string(),
-                        session_folder_id: folder_id.clone(),
-                        remote_dir: folder_id.clone(),
+                        session_folder_id: remote_dir.to_string(),
+                        remote_dir: remote_dir.to_string(),
                         chunk_path: chunk_path.to_path_buf(),
                         chunk_name: chunk_name.to_string(),
                         streamer_name: streamer_name.to_string(),
@@ -565,7 +469,7 @@ impl EngineOrchestrator {
                 if send_res.is_ok() {
                     let _ = event_tx
                         .send(AppEvent::Log(LogEntry::rec(format!(
-                            "{chunk_name} sealed. Pushed to Drive upload queue."
+                            "{chunk_name} sealed. Pushed to cloud upload queue."
                         ))))
                         .await;
                 } else {
@@ -588,28 +492,24 @@ impl EngineOrchestrator {
     #[allow(clippy::too_many_arguments)]
     pub async fn seal_and_enqueue_chunks(
         watcher: &mut SegmentWatcher,
-        session_folder_id: &mut Option<String>,
-        drive_opt: Option<&DriveClient>,
-        root_name: &str,
-        subfolder_name: &str,
+        remote_dir: &str,
         channel_id: &str,
         streamer_name: &str,
         upload_tx: &Sender<UploadTask>,
         event_tx: &Sender<AppEvent>,
+        backend_active: bool,
         is_finished: bool,
     ) {
         let sealed_chunks = watcher.detect_sealed(is_finished);
         for chunk_path in sealed_chunks {
             Self::process_sealed_chunk(
                 &chunk_path,
-                session_folder_id,
-                drive_opt,
-                root_name,
-                subfolder_name,
+                remote_dir,
                 channel_id,
                 streamer_name,
                 upload_tx,
                 event_tx,
+                backend_active,
             )
             .await;
         }
@@ -626,7 +526,7 @@ impl EngineOrchestrator {
         }
 
         let settings = self.settings.clone();
-        let drive_opt = self.drive.clone();
+        let backend_opt = self.backend.clone();
         let chzzk = self.chzzk.clone();
         let event_tx = self.event_tx.clone();
         let active_recordings = self.active_recordings.clone();
@@ -653,19 +553,15 @@ impl EngineOrchestrator {
                     .map(|s| s.start_timestamp.clone())
                     .unwrap_or_else(|| Local::now().format("%Y-%m-%d_%H%M%S").to_string())
             };
-            let initial_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             {
                 let mut sessions = active_sessions.lock().await;
-                sessions
-                    .entry(channel_id.clone())
-                    .or_insert_with(|| ActiveSessionState {
-                        start_timestamp: start_timestamp.clone(),
-                        streamer_name: info.streamer_name.clone(),
-                        current_title: info.title.clone(),
-                        session_folder_id: None,
-                        title_history: vec![(initial_time, info.title.clone())],
-                        title_history_file_id: None,
-                    });
+                sessions.entry(channel_id.clone()).or_insert_with(|| {
+                    ActiveSessionState::new(
+                        start_timestamp.clone(),
+                        info.streamer_name.clone(),
+                        info.title.clone(),
+                    )
+                });
             }
 
             let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
@@ -693,10 +589,20 @@ impl EngineOrchestrator {
                 return;
             }
 
-            let root_name = settings.google_drive.root_folder_name.clone();
-
-            // Drive folder is created lazily in process_sealed_chunk when the first valid chunk is sealed
-            let mut session_folder_id: Option<String> = None;
+            let session_folder_name = {
+                let sessions = active_sessions.lock().await;
+                sessions
+                    .get(&channel_id)
+                    .map(|s| s.folder_name())
+                    .unwrap_or_else(|| {
+                        ActiveSessionState::new(
+                            start_timestamp.clone(),
+                            info.streamer_name.clone(),
+                            info.title.clone(),
+                        )
+                        .folder_name()
+                    })
+            };
             let session_cancel = cancel_token.child_token();
             {
                 let mut tokens = session_cancel_tokens.lock().await;
@@ -897,8 +803,6 @@ impl EngineOrchestrator {
 
             let mut watcher = SegmentWatcher::new(session_dir.clone());
             let mut pending_chunks: VecDeque<PathBuf> = VecDeque::new();
-            let mut last_folder_attempt: Option<Instant> = None;
-            let mut last_title_sync: Option<Instant> = None;
             let mut restricted_abort = false;
 
             loop {
@@ -958,80 +862,27 @@ impl EngineOrchestrator {
                             pending_chunks.push_back(chunk_path);
                         }
 
-                        if let Some(ref drive) = drive_opt {
-                            if session_folder_id.is_none() && !pending_chunks.is_empty() {
-                                for attempt in 0..3 {
-                                    let subfolder_name = {
-                                        let sessions = active_sessions.lock().await;
-                                        if let Some(s) = sessions.get(&channel_id) {
-                                            s.folder_name()
-                                        } else {
-                                            ActiveSessionState {
-                                                start_timestamp: start_timestamp.clone(),
-                                                streamer_name: info.streamer_name.clone(),
-                                                current_title: info.title.clone(),
-                                                session_folder_id: None,
-                                                title_history: vec![],
-                                                title_history_file_id: None,
-                                            }
-                                            .folder_name()
-                                        }
-                                    };
-                                    session_folder_id = Self::ensure_session_folder(
-                                        drive,
-                                        &root_name,
-                                        &subfolder_name,
-                                        &event_tx,
-                                    )
-                                    .await;
-                                    if session_folder_id.is_some() {
-                                        break;
-                                    }
-                                    tokio::time::sleep(Duration::from_millis(300 * (1 << attempt))).await;
-                                }
-                            }
+                        if backend_opt.is_some() {
+                            while let Some(chunk_path) = pending_chunks.pop_front() {
+                                if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
+                                    let send_res = upload_tx
+                                        .send(UploadTask {
+                                            channel_id: channel_id.to_string(),
+                                            session_folder_id: session_folder_name.clone(),
+                                            remote_dir: session_folder_name.clone(),
+                                            chunk_path: chunk_path.clone(),
+                                            chunk_name: chunk_name.to_string(),
+                                            streamer_name: info.streamer_name.clone(),
+                                        })
+                                        .await;
 
-                            if let Some(ref fid) = session_folder_id {
-                                while let Some(chunk_path) = pending_chunks.pop_front() {
-                                    if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
-                                        let send_res = upload_tx
-                                            .send(UploadTask {
-                                                channel_id: channel_id.to_string(),
-                                                session_folder_id: fid.clone(),
-                                                remote_dir: fid.clone(),
-                                                chunk_path: chunk_path.clone(),
-                                                chunk_name: chunk_name.to_string(),
-                                                streamer_name: info.streamer_name.clone(),
-                                            })
+                                    if send_res.is_ok() {
+                                        let _ = event_tx
+                                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                                "{chunk_name} sealed. Pushed to cloud upload queue."
+                                            ))))
                                             .await;
-
-                                        if send_res.is_ok() {
-                                            let _ = event_tx
-                                                .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "{chunk_name} sealed. Pushed to Drive upload queue."
-                                                ))))
-                                                .await;
-                                        } else {
-                                            let _ = event_tx
-                                                .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "{chunk_name} sealed (saved locally)."
-                                                ))))
-                                                .await;
-                                        }
-                                    }
-                                }
-
-                                Self::sync_title_history_to_drive(
-                                    &active_sessions,
-                                    &channel_id,
-                                    &session_folder_id,
-                                    drive_opt.as_ref(),
-                                    &event_tx,
-                                )
-                                .await;
-                            } else {
-                                while let Some(chunk_path) = pending_chunks.pop_front() {
-                                    if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
+                                    } else {
                                         let _ = event_tx
                                             .send(AppEvent::Log(LogEntry::rec(format!(
                                                 "{chunk_name} sealed (saved locally)."
@@ -1097,92 +948,32 @@ impl EngineOrchestrator {
                             pending_chunks.push_back(chunk_path);
                         }
 
-                        if let Some(ref drive) = drive_opt {
-                            if session_folder_id.is_none() && !pending_chunks.is_empty() {
-                                let should_attempt = match last_folder_attempt {
-                                    None => true,
-                                    Some(t) => t.elapsed() >= Duration::from_secs(2),
-                                };
-                                if should_attempt {
-                                    last_folder_attempt = Some(Instant::now());
-                                    let subfolder_name = {
-                                        let sessions = active_sessions.lock().await;
-                                        if let Some(s) = sessions.get(&channel_id) {
-                                            s.folder_name()
-                                        } else {
-                                            ActiveSessionState {
-                                                start_timestamp: start_timestamp.clone(),
-                                                streamer_name: info.streamer_name.clone(),
-                                                current_title: info.title.clone(),
-                                                session_folder_id: None,
-                                                title_history: vec![],
-                                                title_history_file_id: None,
-                                            }
-                                            .folder_name()
-                                        }
-                                    };
-                                    session_folder_id = Self::ensure_session_folder(
-                                        drive,
-                                        &root_name,
-                                        &subfolder_name,
-                                        &event_tx,
-                                    )
-                                    .await;
-                                }
-                            }
-
-                            if let Some(ref fid) = session_folder_id {
-                                while let Some(chunk_path) = pending_chunks.pop_front() {
-                                    if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
-                                        let send_res = upload_tx
-                                            .send(UploadTask {
-                                                channel_id: channel_id.to_string(),
-                                                session_folder_id: fid.clone(),
-                                                remote_dir: fid.clone(),
-                                                chunk_path: chunk_path.clone(),
-                                                chunk_name: chunk_name.to_string(),
-                                                streamer_name: info.streamer_name.clone(),
-                                            })
-                                            .await;
-
-                                        if send_res.is_ok() {
-                                            let _ = event_tx
-                                                .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "{chunk_name} sealed. Pushed to Drive upload queue."
-                                                ))))
-                                                .await;
-                                        } else {
-                                            let _ = event_tx
-                                                .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "{chunk_name} sealed (saved locally)."
-                                                ))))
-                                                .await;
-                                        }
-                                    }
-                                }
-
-                                let should_sync_title = match last_title_sync {
-                                    None => true,
-                                    Some(t) => t.elapsed() >= Duration::from_secs(10),
-                                };
-                                if should_sync_title {
-                                    let needs_sync = {
-                                        let sessions = active_sessions.lock().await;
-                                        sessions
-                                            .get(&channel_id)
-                                            .map(|s| s.title_history_file_id.is_none())
-                                            .unwrap_or(false)
-                                    };
-                                    if needs_sync {
-                                        last_title_sync = Some(Instant::now());
-                                        Self::sync_title_history_to_drive(
-                                            &active_sessions,
-                                            &channel_id,
-                                            &session_folder_id,
-                                            drive_opt.as_ref(),
-                                            &event_tx,
-                                        )
+                        if backend_opt.is_some() {
+                            while let Some(chunk_path) = pending_chunks.pop_front() {
+                                if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
+                                    let send_res = upload_tx
+                                        .send(UploadTask {
+                                            channel_id: channel_id.to_string(),
+                                            session_folder_id: session_folder_name.clone(),
+                                            remote_dir: session_folder_name.clone(),
+                                            chunk_path: chunk_path.clone(),
+                                            chunk_name: chunk_name.to_string(),
+                                            streamer_name: info.streamer_name.clone(),
+                                        })
                                         .await;
+
+                                    if send_res.is_ok() {
+                                        let _ = event_tx
+                                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                                "{chunk_name} sealed. Pushed to cloud upload queue."
+                                            ))))
+                                            .await;
+                                    } else {
+                                        let _ = event_tx
+                                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                                "{chunk_name} sealed (saved locally)."
+                                            ))))
+                                            .await;
                                     }
                                 }
                             }
@@ -1281,84 +1072,27 @@ impl EngineOrchestrator {
 
             // Drain any remaining chunks if the process finished and chunks were queued
             if !pending_chunks.is_empty() {
-                if let Some(ref drive) = drive_opt {
-                    if session_folder_id.is_none() {
-                        for attempt in 0..3 {
-                            let subfolder_name = {
-                                let sessions = active_sessions.lock().await;
-                                if let Some(s) = sessions.get(&channel_id) {
-                                    s.folder_name()
-                                } else {
-                                    ActiveSessionState {
-                                        start_timestamp: start_timestamp.clone(),
-                                        streamer_name: info.streamer_name.clone(),
-                                        current_title: info.title.clone(),
-                                        session_folder_id: None,
-                                        title_history: vec![],
-                                        title_history_file_id: None,
-                                    }
-                                    .folder_name()
-                                }
-                            };
-                            session_folder_id = Self::ensure_session_folder(
-                                drive,
-                                &root_name,
-                                &subfolder_name,
-                                &event_tx,
-                            )
-                            .await;
-                            if session_folder_id.is_some() {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(300 * (1 << attempt))).await;
-                        }
-                    }
+                if backend_opt.is_some() {
+                    while let Some(chunk_path) = pending_chunks.pop_front() {
+                        if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
+                            let send_res = upload_tx
+                                .send(UploadTask {
+                                    channel_id: channel_id.to_string(),
+                                    session_folder_id: session_folder_name.clone(),
+                                    remote_dir: session_folder_name.clone(),
+                                    chunk_path: chunk_path.clone(),
+                                    chunk_name: chunk_name.to_string(),
+                                    streamer_name: info.streamer_name.clone(),
+                                })
+                                .await;
 
-                    if let Some(ref fid) = session_folder_id {
-                        while let Some(chunk_path) = pending_chunks.pop_front() {
-                            if let Some(chunk_name) =
-                                chunk_path.file_name().and_then(|n| n.to_str())
-                            {
-                                let send_res = upload_tx
-                                    .send(UploadTask {
-                                        channel_id: channel_id.to_string(),
-                                        session_folder_id: fid.clone(),
-                                        remote_dir: fid.clone(),
-                                        chunk_path: chunk_path.clone(),
-                                        chunk_name: chunk_name.to_string(),
-                                        streamer_name: info.streamer_name.clone(),
-                                    })
+                            if send_res.is_ok() {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(format!(
+                                        "{chunk_name} sealed. Pushed to cloud upload queue."
+                                    ))))
                                     .await;
-
-                                if send_res.is_ok() {
-                                    let _ = event_tx
-                                        .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{chunk_name} sealed. Pushed to Drive upload queue."
-                                        ))))
-                                        .await;
-                                } else {
-                                    let _ = event_tx
-                                        .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{chunk_name} sealed (saved locally)."
-                                        ))))
-                                        .await;
-                                }
-                            }
-                        }
-
-                        Self::sync_title_history_to_drive(
-                            &active_sessions,
-                            &channel_id,
-                            &session_folder_id,
-                            drive_opt.as_ref(),
-                            &event_tx,
-                        )
-                        .await;
-                    } else {
-                        while let Some(chunk_path) = pending_chunks.pop_front() {
-                            if let Some(chunk_name) =
-                                chunk_path.file_name().and_then(|n| n.to_str())
-                            {
+                            } else {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
                                         "{chunk_name} sealed (saved locally)."
@@ -1391,64 +1125,57 @@ impl EngineOrchestrator {
 
             let chat_path = session_dir.join("chat.jsonl");
             if chat_path.exists()
-                && let Some(ref drive) = drive_opt
+                && let Some(ref backend) = backend_opt
             {
-                if session_folder_id.is_none() {
-                    let current_subfolder_name = {
-                        let sessions = active_sessions.lock().await;
-                        sessions
-                            .get(&channel_id)
-                            .map(|s| s.folder_name())
-                            .unwrap_or_else(|| {
-                                ActiveSessionState {
-                                    start_timestamp: start_timestamp.clone(),
-                                    streamer_name: info.streamer_name.clone(),
-                                    current_title: info.title.clone(),
-                                    session_folder_id: None,
-                                    title_history: vec![],
-                                    title_history_file_id: None,
-                                }
-                                .folder_name()
-                            })
-                    };
-                    session_folder_id = Self::ensure_session_folder(
-                        drive,
-                        &root_name,
-                        &current_subfolder_name,
-                        &event_tx,
-                    )
-                    .await;
+                let on_progress: ProgressCallback = Box::new(|_, _, _| {});
+                match backend
+                    .upload_file_and_delete(&chat_path, &session_folder_name, on_progress)
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::clean(format!(
+                                "Uploaded & deleted 'chat.jsonl' for {channel_id}"
+                            ))))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::warn(format!(
+                                "Failed to upload 'chat.jsonl' for {channel_id}: {e}"
+                            ))))
+                            .await;
+                    }
                 }
+            }
 
-                Self::sync_title_history_to_drive(
-                    &active_sessions,
-                    &channel_id,
-                    &session_folder_id,
-                    drive_opt.as_ref(),
-                    &event_tx,
-                )
-                .await;
-
-                if let Some(ref fid) = session_folder_id {
-                    match drive
-                        .upload_file_resumable(&chat_path, fid, |_, _| {})
-                        .await
-                    {
-                        Ok(_) => {
-                            let _ = tokio::fs::remove_file(&chat_path).await;
-                            let _ = event_tx
-                                .send(AppEvent::Log(LogEntry::drive(format!(
-                                    "Uploaded 'chat.jsonl' for {channel_id}"
-                                ))))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = event_tx
-                                .send(AppEvent::Log(LogEntry::warn(format!(
-                                    "Failed to upload 'chat.jsonl' for {channel_id}: {e}"
-                                ))))
-                                .await;
-                        }
+            let history = {
+                let sessions = active_sessions.lock().await;
+                sessions
+                    .get(&channel_id)
+                    .map(|s| s.format_title_history())
+                    .unwrap_or_default()
+            };
+            if !history.is_empty()
+                && let Some(ref backend) = backend_opt
+            {
+                match backend
+                    .upload_text(&session_folder_name, "title_history.txt", &history)
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                "Uploaded 'title_history.txt' for {channel_id}"
+                            ))))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::warn(format!(
+                                "Failed to upload 'title_history.txt' for {channel_id}: {e}"
+                            ))))
+                            .await;
                     }
                 }
             }
@@ -1625,7 +1352,7 @@ impl EngineOrchestrator {
                     };
 
                     if is_recording {
-                        let rename_task = {
+                        let title_change = {
                             let mut sessions = self.active_sessions.lock().await;
                             if let Some(session) = sessions.get_mut(&channel.id) {
                                 if session.current_title != info.title {
@@ -1634,18 +1361,9 @@ impl EngineOrchestrator {
                                     let now_str =
                                         Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
                                     session.record_title_change(new_title.clone(), now_str);
-                                    let new_folder_name = session.folder_name();
-                                    let folder_id = session.session_folder_id.clone();
-                                    let history_file_id = session.title_history_file_id.clone();
+                                    let remote_dir = session.folder_name();
                                     let history_content = session.format_title_history();
-                                    Some((
-                                        old_title,
-                                        new_title,
-                                        new_folder_name,
-                                        folder_id,
-                                        history_file_id,
-                                        history_content,
-                                    ))
+                                    Some((old_title, new_title, remote_dir, history_content))
                                 } else {
                                     None
                                 }
@@ -1654,56 +1372,20 @@ impl EngineOrchestrator {
                             }
                         };
 
-                        if let Some((
-                            old_title,
-                            new_title,
-                            new_folder_name,
-                            folder_id,
-                            history_file_id,
-                            history_content,
-                        )) = rename_task
+                        if let Some((old_title, new_title, remote_dir, history_content)) =
+                            title_change
                         {
-                            if let (Some(ref fid), Some(drive)) = (folder_id, self.drive.as_ref()) {
-                                match drive.rename_folder(fid, &new_folder_name).await {
+                            if let Some(backend) = self.backend.as_ref() {
+                                match backend
+                                    .upload_text(&remote_dir, "title_history.txt", &history_content)
+                                    .await
+                                {
                                     Ok(_) => {
                                         let _ = self
                                             .event_tx
-                                            .send(AppEvent::Log(LogEntry::drive(format!(
-                                                "Stream title changed ('{}' -> '{}'). Renamed session folder for {} to '{}'",
-                                                old_title, new_title, channel.id, new_folder_name
-                                            ))))
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        let _ = self
-                                            .event_tx
-                                            .send(AppEvent::Log(LogEntry::warn(format!(
-                                                "Failed to rename Drive folder for {} to '{}': {}",
-                                                channel.id, new_folder_name, e
-                                            ))))
-                                            .await;
-                                    }
-                                }
-
-                                match drive
-                                    .upload_text_file(
-                                        fid,
-                                        "title_history.txt",
-                                        &history_content,
-                                        history_file_id.as_deref(),
-                                    )
-                                    .await
-                                {
-                                    Ok(file_id) => {
-                                        let mut sessions = self.active_sessions.lock().await;
-                                        if let Some(session) = sessions.get_mut(&channel.id) {
-                                            session.title_history_file_id = Some(file_id);
-                                        }
-                                        let _ = self
-                                            .event_tx
-                                            .send(AppEvent::Log(LogEntry::drive(format!(
-                                                "Updated 'title_history.txt' in Drive folder for {}",
-                                                channel.id
+                                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                                "Stream title changed ('{}' -> '{}'). Updated 'title_history.txt' for {}",
+                                                old_title, new_title, channel.id
                                             ))))
                                             .await;
                                     }
@@ -1721,8 +1403,8 @@ impl EngineOrchestrator {
                                 let _ = self
                                     .event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "Stream title changed for {} ('{}' -> '{}'). Pending folder name updated to '{}'",
-                                        channel.id, old_title, new_title, new_folder_name
+                                        "Stream title changed for {} ('{}' -> '{}')",
+                                        channel.id, old_title, new_title
                                     ))))
                                     .await;
                             }
@@ -1780,17 +1462,11 @@ impl EngineOrchestrator {
                             let mut sessions = self.active_sessions.lock().await;
                             sessions.insert(
                                 channel.id.clone(),
-                                ActiveSessionState {
+                                ActiveSessionState::new(
                                     start_timestamp,
-                                    streamer_name: info.streamer_name.clone(),
-                                    current_title: info.title.clone(),
-                                    session_folder_id: None,
-                                    title_history: vec![(
-                                        Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-                                        info.title.clone(),
-                                    )],
-                                    title_history_file_id: None,
-                                },
+                                    info.streamer_name.clone(),
+                                    info.title.clone(),
+                                ),
                             );
                         }
                         self.spawn_recording_session(channel.id.clone(), info, upload_tx.clone());
@@ -1929,10 +1605,10 @@ impl EngineOrchestrator {
     }
 
     pub async fn run(self: Arc<Self>) {
-        let concurrency = self.settings.google_drive.upload_concurrency;
+        let concurrency = self.settings.rclone.upload_concurrency;
         let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<UploadTask>(50);
         let upload_handle = Self::spawn_upload_consumer_with_concurrency(
-            self.drive.clone(),
+            self.backend.clone(),
             self.event_tx.clone(),
             upload_rx,
             concurrency,
@@ -2015,5 +1691,195 @@ impl EngineOrchestrator {
         let _ = self.event_tx.try_send(AppEvent::Log(LogEntry::info(
             "Engine graceful shutdown complete.",
         )));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_active_session_state_stable_folder_name() {
+        let mut session = ActiveSessionState::new(
+            "2026-09-29_120000".to_string(),
+            "Streamer".to_string(),
+            "Initial Title".to_string(),
+        );
+        let initial_folder = session.folder_name();
+        assert_eq!(
+            initial_folder,
+            "[2026-09-29_120000] Streamer - Initial Title"
+        );
+        assert_eq!(session.initial_title, "Initial Title");
+
+        session.record_title_change(
+            "Updated Title".to_string(),
+            "2026-09-29 12:05:00".to_string(),
+        );
+        assert_eq!(session.current_title, "Updated Title");
+        assert_eq!(session.folder_name(), initial_folder);
+    }
+
+    #[test]
+    fn test_active_session_state_title_history_formatting() {
+        let mut session = ActiveSessionState::new(
+            "2026-09-29_120000".to_string(),
+            "Streamer".to_string(),
+            "Title 1".to_string(),
+        );
+        session.title_history.clear();
+        session.record_title_change("Title 1".to_string(), "2026-09-29 12:00:00".to_string());
+        session.record_title_change("Title 2".to_string(), "2026-09-29 12:30:00".to_string());
+        session.record_title_change("Title 3".to_string(), "2026-09-29 13:00:00".to_string());
+
+        let history = session.format_title_history();
+        assert_eq!(
+            history,
+            "[2026-09-29 12:00:00] Title 1\n[2026-09-29 12:30:00] Title 2\n[2026-09-29 13:00:00] Title 3\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_upload_consumer_with_mock_backend() {
+        use crate::uploader::MockUploadBackend;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("chzzk_engine_test_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .expect("create tempdir");
+        let chunk_file = temp_dir.join("chunk_0000.ts");
+        tokio::fs::write(&chunk_file, b"test chunk content")
+            .await
+            .expect("write chunk");
+
+        let mock_backend = Arc::new(MockUploadBackend::new());
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+        let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(10);
+
+        let consumer_handle = EngineOrchestrator::spawn_upload_consumer(
+            Some(mock_backend.clone()),
+            event_tx,
+            upload_rx,
+        );
+
+        let task = UploadTask {
+            channel_id: "test_channel".to_string(),
+            session_folder_id: "[2026-09-29_120000] Streamer - Title".to_string(),
+            remote_dir: "[2026-09-29_120000] Streamer - Title".to_string(),
+            chunk_path: chunk_file.clone(),
+            chunk_name: "chunk_0000.ts".to_string(),
+            streamer_name: "Streamer".to_string(),
+        };
+
+        upload_tx.send(task).await.expect("send task");
+        drop(upload_tx);
+
+        consumer_handle.await.expect("join consumer");
+
+        // Verify file was uploaded
+        let uploads = mock_backend.uploads.lock().await;
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].0, chunk_file);
+        assert_eq!(uploads[0].1, "[2026-09-29_120000] Streamer - Title");
+
+        // Verify local file was deleted upon completion
+        assert!(!chunk_file.exists());
+
+        // Verify events were dispatched
+        let mut got_completed = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let AppEvent::UploadCompleted {
+                channel_id,
+                chunk_name,
+                ..
+            } = event
+            {
+                assert_eq!(channel_id, "test_channel");
+                assert_eq!(chunk_name, "chunk_0000.ts");
+                got_completed = true;
+            }
+        }
+        assert!(got_completed);
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_upload_consumer_without_backend_discards_gracefully() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("chzzk_engine_test_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .expect("create tempdir");
+        let chunk_file = temp_dir.join("chunk_0000.ts");
+        tokio::fs::write(&chunk_file, b"test").await.expect("write");
+
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+        let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(10);
+
+        let consumer_handle = EngineOrchestrator::spawn_upload_consumer(None, event_tx, upload_rx);
+
+        let task = UploadTask {
+            channel_id: "ch1".to_string(),
+            session_folder_id: "folder".to_string(),
+            remote_dir: "folder".to_string(),
+            chunk_path: chunk_file.clone(),
+            chunk_name: "chunk_0000.ts".to_string(),
+            streamer_name: "Streamer".to_string(),
+        };
+
+        upload_tx.send(task).await.expect("send");
+        drop(upload_tx);
+
+        consumer_handle.await.expect("join");
+        // Without backend, file is not deleted by consumer (remains local)
+        assert!(chunk_file.exists());
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_process_sealed_chunk_with_backend() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("chzzk_engine_test_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .expect("create tempdir");
+        let chunk_file = temp_dir.join("chunk_0001.ts");
+        tokio::fs::write(&chunk_file, b"12345678")
+            .await
+            .expect("write");
+
+        let (upload_tx, mut upload_rx) = tokio::sync::mpsc::channel(10);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(10);
+
+        EngineOrchestrator::process_sealed_chunk(
+            &chunk_file,
+            "remote_session_dir",
+            "ch1",
+            "Streamer",
+            &upload_tx,
+            &event_tx,
+            true,
+        )
+        .await;
+
+        let task = upload_rx.recv().await.expect("task received");
+        assert_eq!(task.channel_id, "ch1");
+        assert_eq!(task.remote_dir, "remote_session_dir");
+        assert_eq!(task.session_folder_id, "remote_session_dir");
+        assert_eq!(task.chunk_name, "chunk_0001.ts");
+
+        let sealed_event = event_rx.recv().await.expect("event received");
+        match sealed_event {
+            AppEvent::ChunkSealed {
+                chunk_name,
+                size_bytes,
+            } => {
+                assert_eq!(chunk_name, "chunk_0001.ts");
+                assert_eq!(size_bytes, 8);
+            }
+            other => panic!("Unexpected event: {other:?}"),
+        }
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }
