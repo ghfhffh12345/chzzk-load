@@ -184,20 +184,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.active_uploads = uploads;
 
     app.logs = VecDeque::from([
-        LogEntry::info("Google Drive authenticated successfully (root: 'Chzzk_Recordings')"),
+        LogEntry::cloud("Rclone remote 'gdrive:Chzzk_Recordings' verified successfully"),
         LogEntry::rec("Spawned FFmpeg segmenter (600s TS chunks) -> recordings/a9a34351_20260926"),
         LogEntry::rec("Direct CDN stream extracted: 1080p single-variant (p2p bypass)"),
-        LogEntry::drive("Session folder ready: 'Chzzk_Recordings/2026-09-26 하네 - 쌀먹쥐'"),
+        LogEntry::cloud("Remote folder ready: 'gdrive:Chzzk_Recordings/2026-09-26 하네 - 쌀먹쥐'"),
         LogEntry::chat("Connected to live chat WebSocket (kr-ss1.chat.naver.com)"),
         LogEntry::chat("Buffered 500 messages (64 KB). Flushed to chat.jsonl"),
-        LogEntry::rec("chunk_0140.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::rec("chunk_0140.ts sealed. Pushed to cloud upload queue."),
         LogEntry::clean("Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)"),
-        LogEntry::rec("chunk_0141.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::rec("chunk_0141.ts sealed. Pushed to cloud upload queue."),
         LogEntry::clean("Uploaded & deleted chunk_0141.ts (reclaimed 28.1 MB)"),
         LogEntry::rec("Spawned FFmpeg segmenter (600s TS chunks) -> recordings/b1a23456_20260926"),
-        LogEntry::drive("Initialized 'title_history.txt' in Drive folder for 너불"),
-        LogEntry::rec("chunk_0142.ts sealed. Pushed to Drive upload queue."),
-        LogEntry::rec("chunk_0048.ts sealed. Pushed to Drive upload queue."),
+        LogEntry::cloud("Initialized 'title_history.txt' on remote storage for 너불"),
+        LogEntry::rec("chunk_0142.ts sealed. Pushed to cloud upload queue."),
+        LogEntry::rec("chunk_0048.ts sealed. Pushed to cloud upload queue."),
         LogEntry::info("Monitored channels synced: 12 total, 5 live, 2 recording"),
     ]);
 

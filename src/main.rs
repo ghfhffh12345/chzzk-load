@@ -15,18 +15,17 @@ use tokio_util::sync::CancellationToken;
 use chzzk_load::app_path::resolve_path;
 use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::config::Settings;
-use chzzk_load::drive::auth::DriveAuth;
-use chzzk_load::drive::client::DriveClient;
 use chzzk_load::engine::EngineOrchestrator;
 use chzzk_load::tui::app::App;
 use chzzk_load::tui::ui::draw_ui;
 use chzzk_load::tui::{AppEvent, LogEntry};
+use chzzk_load::uploader::{RcloneBackend, UploadBackend};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "chzzk-load",
     version,
-    about = "Real-time Chzzk stream recording and Google Drive syncing"
+    about = "Real-time Chzzk stream recording and cloud storage syncing"
 )]
 pub struct Cli {
     #[arg(short, long, help = "Path to dedicated settings.json file")]
@@ -52,37 +51,36 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| resolve_path(&PathBuf::from("settings.json")));
 
     let settings = Settings::load_or_create_default(&config_path)?;
-    let creds_path = resolve_path(&PathBuf::from(&settings.google_drive.credentials_path));
-    let token_path = resolve_path(&PathBuf::from(&settings.google_drive.token_path));
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AppEvent>(1000);
 
-    // Initialize Google Drive Auth if credentials exist
-    let drive_client = if creds_path.exists() {
-        match DriveAuth::load_or_authorize(&creds_path, &token_path).await {
-            Ok(auth) => {
+    // Initialize cloud upload backend if remote_path is configured
+    let upload_backend: Option<Arc<dyn UploadBackend>> = if !settings.rclone.remote_path.is_empty()
+    {
+        let backend = Arc::new(RcloneBackend::new(settings.rclone.clone()));
+        match backend.check_connection().await {
+            Ok(()) => {
                 let _ = event_tx
-                    .send(AppEvent::Log(LogEntry::info(
-                        "Google Drive authenticated successfully",
-                    )))
+                    .send(AppEvent::Log(LogEntry::cloud(format!(
+                        "Rclone remote '{}' verified successfully",
+                        settings.rclone.remote_path
+                    ))))
                     .await;
-                Some(DriveClient::new(Arc::new(auth)))
             }
             Err(e) => {
                 let _ = event_tx
                     .send(AppEvent::Log(LogEntry::warn(format!(
-                        "Drive auth failed: {e}"
+                        "Rclone remote connection check failed: {e}"
                     ))))
                     .await;
-                None
             }
         }
+        Some(backend)
     } else {
         let _ = event_tx
-            .send(AppEvent::Log(LogEntry::info(format!(
-                "'{path}' not found; running in local-only recording mode",
-                path = creds_path.display()
-            ))))
+            .send(AppEvent::Log(LogEntry::cloud(
+                "'remote_path' is empty; running in local-only recording mode",
+            )))
             .await;
         None
     };
@@ -92,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings.clone(),
         chzzk,
-        drive_client,
+        upload_backend,
         event_tx.clone(),
         cancel_token.clone(),
     ));

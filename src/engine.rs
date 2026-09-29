@@ -1381,30 +1381,30 @@ impl EngineOrchestrator {
                                     .await
                                 {
                                     Ok(_) => {
+                                        let channel_id = &channel.id;
                                         let _ = self
                                             .event_tx
                                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                                "Stream title changed ('{}' -> '{}'). Updated 'title_history.txt' for {}",
-                                                old_title, new_title, channel.id
+                                                "Stream title changed ('{old_title}' -> '{new_title}'). Updated 'title_history.txt' for {channel_id}"
                                             ))))
                                             .await;
                                     }
                                     Err(e) => {
+                                        let channel_id = &channel.id;
                                         let _ = self
                                             .event_tx
                                             .send(AppEvent::Log(LogEntry::warn(format!(
-                                                "Failed to update 'title_history.txt' for {}: {}",
-                                                channel.id, e
+                                                "Failed to update 'title_history.txt' for {channel_id}: {e}"
                                             ))))
                                             .await;
                                     }
                                 }
                             } else {
+                                let channel_id = &channel.id;
                                 let _ = self
                                     .event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "Stream title changed for {} ('{}' -> '{}')",
-                                        channel.id, old_title, new_title
+                                        "Stream title changed for {channel_id} ('{old_title}' -> '{new_title}')"
                                     ))))
                                     .await;
                             }

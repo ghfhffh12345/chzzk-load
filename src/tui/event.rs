@@ -8,7 +8,7 @@ pub enum LogKind {
     Clean,
     Rec,
     Ffmpeg,
-    Drive,
+    Cloud,
     Poll,
     Chat,
 }
@@ -22,7 +22,7 @@ impl LogKind {
             LogKind::Clean => "CLEAN",
             LogKind::Rec => "REC",
             LogKind::Ffmpeg => "FFMPEG",
-            LogKind::Drive => "DRIVE",
+            LogKind::Cloud => "CLOUD",
             LogKind::Poll => "POLL",
             LogKind::Chat => "CHAT",
         }
@@ -67,8 +67,8 @@ impl LogEntry {
         Self::new(LogKind::Ffmpeg, message)
     }
 
-    pub fn drive(message: impl Into<String>) -> Self {
-        Self::new(LogKind::Drive, message)
+    pub fn cloud(message: impl Into<String>) -> Self {
+        Self::new(LogKind::Cloud, message)
     }
 
     pub fn poll(message: impl Into<String>) -> Self {
@@ -118,7 +118,7 @@ impl<T: Into<String>> From<T> for LogEntry {
                 "CLEAN" => LogKind::Clean,
                 "REC" => LogKind::Rec,
                 "FFMPEG" => LogKind::Ffmpeg,
-                "DRIVE" => LogKind::Drive,
+                "CLOUD" => LogKind::Cloud,
                 "POLL" => LogKind::Poll,
                 "CHAT" => LogKind::Chat,
                 _ => LogKind::Info,
@@ -239,6 +239,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_cloud_log_kind_and_entry() {
+        assert_eq!(LogKind::Cloud.as_str(), "CLOUD");
+        let entry = LogEntry::cloud("test message");
+        assert_eq!(entry.kind, LogKind::Cloud);
+        assert_eq!(entry.message, "test message");
+        assert_eq!(entry.to_string(), "[CLOUD] test message");
+    }
+
+    #[test]
     fn test_log_kind_as_str() {
         assert_eq!(LogKind::Info.as_str(), "INFO");
         assert_eq!(LogKind::Warn.as_str(), "WARN");
@@ -246,7 +255,7 @@ mod tests {
         assert_eq!(LogKind::Clean.as_str(), "CLEAN");
         assert_eq!(LogKind::Rec.as_str(), "REC");
         assert_eq!(LogKind::Ffmpeg.as_str(), "FFMPEG");
-        assert_eq!(LogKind::Drive.as_str(), "DRIVE");
+        assert_eq!(LogKind::Cloud.as_str(), "CLOUD");
         assert_eq!(LogKind::Poll.as_str(), "POLL");
         assert_eq!(LogKind::Chat.as_str(), "CHAT");
     }
@@ -262,7 +271,7 @@ mod tests {
             LogEntry::ffmpeg("msg"),
             LogEntry::new(LogKind::Ffmpeg, "msg")
         );
-        assert_eq!(LogEntry::drive("msg"), LogEntry::new(LogKind::Drive, "msg"));
+        assert_eq!(LogEntry::cloud("msg"), LogEntry::new(LogKind::Cloud, "msg"));
         assert_eq!(LogEntry::poll("msg"), LogEntry::new(LogKind::Poll, "msg"));
         assert_eq!(LogEntry::chat("msg"), LogEntry::new(LogKind::Chat, "msg"));
     }
@@ -294,7 +303,7 @@ mod tests {
             ("[CLEAN] deleted", LogKind::Clean, "deleted"),
             ("[REC] chunk sealed", LogKind::Rec, "chunk sealed"),
             ("[FFMPEG] stderr output", LogKind::Ffmpeg, "stderr output"),
-            ("[DRIVE] uploading", LogKind::Drive, "uploading"),
+            ("[CLOUD] uploading", LogKind::Cloud, "uploading"),
             ("[POLL] checking status", LogKind::Poll, "checking status"),
             ("[CHAT] message received", LogKind::Chat, "message received"),
             (

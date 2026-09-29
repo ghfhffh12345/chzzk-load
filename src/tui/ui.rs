@@ -12,7 +12,7 @@ pub fn log_kind_badge_and_style(kind: LogKind) -> (&'static str, Style) {
         LogKind::Clean => (" CLEAN  ", Style::default().fg(theme::GREEN)),
         LogKind::Rec => (" REC    ", Style::default().fg(theme::CYAN)),
         LogKind::Ffmpeg => (" FFMPEG ", Style::default().fg(theme::MAGENTA)),
-        LogKind::Drive => (" DRIVE  ", Style::default().fg(theme::BLUE)),
+        LogKind::Cloud => (" CLOUD  ", Style::default().fg(theme::BLUE)),
         LogKind::Poll => (" POLL   ", Style::default().fg(theme::MUTED_GRAY)),
         LogKind::Info => (" INFO   ", Style::default().fg(theme::MUTED_GRAY)),
         LogKind::Chat => (" CHAT   ", Style::default().fg(theme::CYAN)),

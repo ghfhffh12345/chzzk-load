@@ -1097,7 +1097,7 @@ fn test_log_kind_badge_and_style_mappings() {
             " FFMPEG ",
             Style::default().fg(theme::MAGENTA),
         ),
-        (LogKind::Drive, " DRIVE  ", Style::default().fg(theme::BLUE)),
+        (LogKind::Cloud, " CLOUD  ", Style::default().fg(theme::BLUE)),
         (
             LogKind::Poll,
             " POLL   ",
@@ -1139,7 +1139,7 @@ fn test_draw_ui_renders_all_log_kinds_without_brackets() {
     app.logs
         .push_back(LogEntry::new(LogKind::Ffmpeg, "Encoding details"));
     app.logs
-        .push_back(LogEntry::new(LogKind::Drive, "Uploading segment"));
+        .push_back(LogEntry::new(LogKind::Cloud, "Uploading segment"));
     app.logs
         .push_back(LogEntry::new(LogKind::Poll, "Channel poll"));
     app.logs
@@ -1166,7 +1166,7 @@ fn test_draw_ui_renders_all_log_kinds_without_brackets() {
     assert!(content.contains("Started rec"));
     assert!(content.contains("FFMPEG"));
     assert!(content.contains("Encoding details"));
-    assert!(content.contains("DRIVE"));
+    assert!(content.contains("CLOUD"));
     assert!(content.contains("Uploading segment"));
     assert!(content.contains("POLL"));
     assert!(content.contains("Channel poll"));

@@ -18,13 +18,15 @@ thiserror = "2.0"
 rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
-tiny_http = "0.12"
 url = "2.5"
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+[dev-dependencies]
+tiny_http = "0.12"
 
 [lib]
 name = "chzzk_load"

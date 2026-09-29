@@ -15,7 +15,7 @@ fn test_cli_help_flag() {
         "Help text should mention binary name"
     );
     assert!(
-        stdout.contains("Real-time Chzzk stream recording and Google Drive syncing"),
+        stdout.contains("Real-time Chzzk stream recording and cloud storage syncing"),
         "Help text should contain description"
     );
     assert!(
