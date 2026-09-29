@@ -533,6 +533,22 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         }
     });
 
+    let hls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hls_port = hls_listener.local_addr().unwrap().port();
+    let hls_handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = hls_listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = stream.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
     let mock_backend = Arc::new(MockUploadBackend::new());
     let mut settings = Settings::default();
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
@@ -571,14 +587,15 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         live_id: Some(99995),
         streamer_name: "IncStreamer".to_string(),
         title: "Inc Stream Title".to_string(),
-        hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
+        hls_url: format!("http://127.0.0.1:{hls_port}/dummy.m3u8"),
         chat_channel_id: Some("chat_ch_inc".to_string()),
     };
 
     orchestrator.spawn_recording_session("chan_chat_inc".to_string(), info, upload_tx);
 
     let mut saw_chunk_uploaded = false;
-    let timeout = tokio::time::sleep(Duration::from_secs(6));
+    let mut saw_recording_ended = false;
+    let timeout = tokio::time::sleep(Duration::from_secs(10));
     tokio::pin!(timeout);
 
     loop {
@@ -589,6 +606,9 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
                     cancel_token.cancel();
                 }
                 if matches!(ev, AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_chat_inc") {
+                    saw_recording_ended = true;
+                }
+                if saw_chunk_uploaded && saw_recording_ended {
                     break;
                 }
             }
@@ -614,6 +634,7 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     );
 
     consumer_handle.abort();
+    hls_handle.abort();
     let _ = ws_handle.await;
     let _ = fs::remove_dir_all(&temp_dir);
 }
