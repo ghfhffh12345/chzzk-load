@@ -606,6 +606,7 @@ async fn test_engine_orchestrator_upload_consumer() {
         .send(UploadTask {
             channel_id: "chan_test".to_string(),
             session_folder_id: "folder_abc".to_string(),
+            remote_dir: "folder_abc".to_string(),
             chunk_path: chunk_path.clone(),
             chunk_name: "chunk_0000.ts".to_string(),
             streamer_name: "Streamer 1".to_string(),
@@ -694,6 +695,7 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
         .send(UploadTask {
             channel_id: "chan_fail".to_string(),
             session_folder_id: "folder_xyz".to_string(),
+            remote_dir: "folder_xyz".to_string(),
             chunk_path: chunk_path.clone(),
             chunk_name: "chunk_fail.ts".to_string(),
             streamer_name: "StreamerFail".to_string(),
@@ -1302,6 +1304,7 @@ async fn test_engine_orchestrator_concurrent_uploads() {
         .send(UploadTask {
             channel_id: "chan_1".to_string(),
             session_folder_id: "folder_1".to_string(),
+            remote_dir: "folder_1".to_string(),
             chunk_path: chunk_path1.clone(),
             chunk_name: "chunk_chan1.ts".to_string(),
             streamer_name: "Streamer 1".to_string(),
@@ -1313,6 +1316,7 @@ async fn test_engine_orchestrator_concurrent_uploads() {
         .send(UploadTask {
             channel_id: "chan_2".to_string(),
             session_folder_id: "folder_2".to_string(),
+            remote_dir: "folder_2".to_string(),
             chunk_path: chunk_path2.clone(),
             chunk_name: "chunk_chan2.ts".to_string(),
             streamer_name: "Streamer 2".to_string(),
@@ -2419,6 +2423,7 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
         .send(UploadTask {
             channel_id: "chan_same".to_string(),
             session_folder_id: "folder_same".to_string(),
+            remote_dir: "folder_same".to_string(),
             chunk_path: chunk_path1.clone(),
             chunk_name: "chunk_0000.ts".to_string(),
             streamer_name: "SameStreamer".to_string(),
@@ -2430,6 +2435,7 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
         .send(UploadTask {
             channel_id: "chan_same".to_string(),
             session_folder_id: "folder_same".to_string(),
+            remote_dir: "folder_same".to_string(),
             chunk_path: chunk_path2.clone(),
             chunk_name: "chunk_0001.ts".to_string(),
             streamer_name: "SameStreamer".to_string(),
@@ -3867,6 +3873,7 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
         .send(UploadTask {
             channel_id: channel_id.to_string(),
             session_folder_id: "folder_clean_123".to_string(),
+            remote_dir: "folder_clean_123".to_string(),
             chunk_path: chunk_path.clone(),
             chunk_name: "chunk_0000.ts".to_string(),
             streamer_name: "Streamer Clean".to_string(),
