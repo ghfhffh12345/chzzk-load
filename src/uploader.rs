@@ -2,11 +2,16 @@ use std::path::{Path, PathBuf};
 
 use crate::drive::client::DriveClient;
 
+pub mod backend;
+
+pub use backend::{BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend};
+
 /// Represents an upload task for a single video chunk or metadata file.
 #[derive(Debug, Clone)]
 pub struct UploadTask {
     pub channel_id: String,
     pub session_folder_id: String,
+    pub remote_dir: String,
     pub chunk_path: PathBuf,
     pub chunk_name: String,
     pub streamer_name: String,

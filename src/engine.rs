@@ -262,6 +262,7 @@ impl EngineOrchestrator {
                                         chunk_path,
                                         chunk_name: name,
                                         streamer_name: streamer,
+                                        ..
                                     } = task;
 
                                     let tx = event_tx.clone();
@@ -554,6 +555,7 @@ impl EngineOrchestrator {
                     .send(UploadTask {
                         channel_id: channel_id.to_string(),
                         session_folder_id: folder_id.clone(),
+                        remote_dir: folder_id.clone(),
                         chunk_path: chunk_path.to_path_buf(),
                         chunk_name: chunk_name.to_string(),
                         streamer_name: streamer_name.to_string(),
@@ -996,6 +998,7 @@ impl EngineOrchestrator {
                                             .send(UploadTask {
                                                 channel_id: channel_id.to_string(),
                                                 session_folder_id: fid.clone(),
+                                                remote_dir: fid.clone(),
                                                 chunk_path: chunk_path.clone(),
                                                 chunk_name: chunk_name.to_string(),
                                                 streamer_name: info.streamer_name.clone(),
@@ -1135,6 +1138,7 @@ impl EngineOrchestrator {
                                             .send(UploadTask {
                                                 channel_id: channel_id.to_string(),
                                                 session_folder_id: fid.clone(),
+                                                remote_dir: fid.clone(),
                                                 chunk_path: chunk_path.clone(),
                                                 chunk_name: chunk_name.to_string(),
                                                 streamer_name: info.streamer_name.clone(),
@@ -1319,6 +1323,7 @@ impl EngineOrchestrator {
                                     .send(UploadTask {
                                         channel_id: channel_id.to_string(),
                                         session_folder_id: fid.clone(),
+                                        remote_dir: fid.clone(),
                                         chunk_path: chunk_path.clone(),
                                         chunk_name: chunk_name.to_string(),
                                         streamer_name: info.streamer_name.clone(),
