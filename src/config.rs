@@ -58,37 +58,34 @@ impl Default for GeneralConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GoogleDriveConfig {
-    #[serde(default = "default_credentials_path")]
-    pub credentials_path: String,
-    #[serde(default = "default_token_path")]
-    pub token_path: String,
-    #[serde(default = "default_root_folder")]
-    pub root_folder_name: String,
+pub struct RcloneConfig {
+    #[serde(default = "default_remote_path")]
+    pub remote_path: String,
     #[serde(default = "default_upload_concurrency")]
     pub upload_concurrency: usize,
+    #[serde(default = "default_rclone_bin")]
+    pub rclone_bin: String,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
 }
 
-fn default_credentials_path() -> String {
-    "credentials.json".to_string()
-}
-fn default_token_path() -> String {
-    "token.json".to_string()
-}
-fn default_root_folder() -> String {
-    "Chzzk_Recordings".to_string()
+fn default_remote_path() -> String {
+    "gdrive:Chzzk_Recordings".to_string()
 }
 fn default_upload_concurrency() -> usize {
     3
 }
+fn default_rclone_bin() -> String {
+    "rclone".to_string()
+}
 
-impl Default for GoogleDriveConfig {
+impl Default for RcloneConfig {
     fn default() -> Self {
         Self {
-            credentials_path: default_credentials_path(),
-            token_path: default_token_path(),
-            root_folder_name: default_root_folder(),
+            remote_path: default_remote_path(),
             upload_concurrency: default_upload_concurrency(),
+            rclone_bin: default_rclone_bin(),
+            extra_args: Vec::new(),
         }
     }
 }
@@ -107,16 +104,31 @@ pub struct ChannelConfig {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GoogleDriveCompat {
+    #[serde(default)]
+    pub credentials_path: String,
+    #[serde(default)]
+    pub token_path: String,
+    #[serde(default)]
+    pub root_folder_name: String,
+    #[serde(default = "default_upload_concurrency")]
+    pub upload_concurrency: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     #[serde(default)]
     pub general: GeneralConfig,
     #[serde(default)]
-    pub google_drive: GoogleDriveConfig,
+    pub rclone: RcloneConfig,
     #[serde(default)]
     pub chzzk: ChzzkConfig,
     #[serde(default = "default_channels")]
     pub channels: Vec<ChannelConfig>,
+    #[doc(hidden)]
+    #[serde(default, skip_serializing)]
+    pub google_drive: GoogleDriveCompat,
 }
 
 fn default_channels() -> Vec<ChannelConfig> {
@@ -130,9 +142,10 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             general: GeneralConfig::default(),
-            google_drive: GoogleDriveConfig::default(),
+            rclone: RcloneConfig::default(),
             chzzk: ChzzkConfig::default(),
             channels: default_channels(),
+            google_drive: GoogleDriveCompat::default(),
         }
     }
 }
