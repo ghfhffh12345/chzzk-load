@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use crate::drive::client::DriveClient;
 
 pub mod backend;
+pub mod rclone;
 
 pub use backend::{BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend};
+pub use rclone::{RcloneBackend, RcloneStats, format_destination, parse_rclone_log_line};
 
 /// Represents an upload task for a single video chunk or metadata file.
 #[derive(Debug, Clone)]
