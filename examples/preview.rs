@@ -189,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogEntry::rec("Direct CDN stream extracted: 1080p single-variant (p2p bypass)"),
         LogEntry::cloud("Remote folder ready: 'gdrive:Chzzk_Recordings/2026-09-26 하네 - 쌀먹쥐'"),
         LogEntry::chat("Connected to live chat WebSocket (kr-ss1.chat.naver.com)"),
-        LogEntry::chat("Buffered 500 messages (64 KB). Flushed to chat.jsonl"),
+        LogEntry::chat("Buffered 500 messages (64 KB). Flushed to chat_0000.jsonl"),
         LogEntry::rec("chunk_0140.ts sealed. Pushed to cloud upload queue."),
         LogEntry::clean("Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)"),
         LogEntry::rec("chunk_0141.ts sealed. Pushed to cloud upload queue."),
@@ -309,7 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 chat_flush_cycle += 1;
                 if chat_flush_cycle % 5 == 0 {
-                    app.logs.push_back(LogEntry::chat("Buffered 500 messages (64 KB). Flushed to chat.jsonl"));
+                    app.logs.push_back(LogEntry::chat("Buffered 500 messages (64 KB). Flushed to chat_0000.jsonl"));
                 }
                 needs_redraw = true;
             }

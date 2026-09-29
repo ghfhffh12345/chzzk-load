@@ -189,7 +189,8 @@ fn extract_cmd(val: &serde_json::Value) -> Option<u32> {
 pub struct ChzzkChatClient {
     chat_channel_id: String,
     access_token: String,
-    target_path: PathBuf,
+    session_dir: PathBuf,
+    chunk_duration: Duration,
     flush_interval: Duration,
     cancel_token: CancellationToken,
     custom_ws_url: Option<String>,
@@ -200,14 +201,16 @@ impl ChzzkChatClient {
     pub fn new(
         chat_channel_id: impl Into<String>,
         access_token: impl Into<String>,
-        target_path: impl Into<PathBuf>,
+        session_dir: impl Into<PathBuf>,
+        chunk_duration: Duration,
         flush_interval: Duration,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
             chat_channel_id: chat_channel_id.into(),
             access_token: access_token.into(),
-            target_path: target_path.into(),
+            session_dir: session_dir.into(),
+            chunk_duration,
             flush_interval,
             cancel_token,
             custom_ws_url: None,
@@ -231,9 +234,14 @@ impl ChzzkChatClient {
         &self.access_token
     }
 
-    /// Returns a reference to the target output file path.
-    pub fn target_path(&self) -> &Path {
-        &self.target_path
+    /// Returns a reference to the session directory.
+    pub fn session_dir(&self) -> &Path {
+        &self.session_dir
+    }
+
+    /// Returns the chunk duration.
+    pub fn chunk_duration(&self) -> Duration {
+        self.chunk_duration
     }
 
     /// Returns the flush interval duration.
@@ -242,12 +250,22 @@ impl ChzzkChatClient {
     }
 
     /// Connects to the chat WebSocket server, handles handshake and heartbeats,
-    /// buffers incoming chat messages, and terminates upon cancellation.
+    /// buffers incoming chat messages, rotates output files on interval, and terminates upon cancellation.
     ///
-    /// Optionally sends the current captured message count to `on_stats`.
+    /// Optionally sends the current captured message count to `on_stats`,
+    /// and dispatches sealed chunk file paths to `sealed_tx`.
     /// Returns the total number of messages written to disk.
-    pub async fn run(&self, on_stats: Option<tokio::sync::mpsc::Sender<u64>>) -> Result<u64> {
-        let mut writer = ChatWriter::new(self.target_path.clone(), self.flush_interval, 500);
+    pub async fn run(
+        &self,
+        on_stats: Option<tokio::sync::mpsc::Sender<u64>>,
+        sealed_tx: Option<tokio::sync::mpsc::Sender<PathBuf>>,
+    ) -> Result<u64> {
+        let mut writer = ChatWriter::new_rotating(
+            self.session_dir.clone(),
+            self.chunk_duration,
+            self.flush_interval,
+            500,
+        );
 
         let ws_url = match &self.custom_ws_url {
             Some(url) => url.clone(),
@@ -370,7 +388,12 @@ impl ChzzkChatClient {
                 tokio::time::Instant::now() + Duration::from_secs(20),
                 Duration::from_secs(20),
             );
-            let mut flush_timer = tokio::time::interval(Duration::from_millis(200));
+            let check_interval = self
+                .flush_interval
+                .min(self.chunk_duration)
+                .min(Duration::from_millis(200))
+                .max(Duration::from_millis(10));
+            let mut flush_timer = tokio::time::interval(check_interval);
 
             'session: loop {
                 tokio::select! {
@@ -389,6 +412,11 @@ impl ChzzkChatClient {
                     }
                     _ = flush_timer.tick() => {
                         let _ = writer.maybe_flush_timer().await;
+                        if let (Ok(Some(sealed_path)), Some(tx)) =
+                            (writer.maybe_rotate().await, &sealed_tx)
+                        {
+                            let _ = tx.send(sealed_path).await;
+                        }
                     }
                     msg = ws_reader.next() => {
                         match msg {
@@ -445,7 +473,10 @@ impl ChzzkChatClient {
             }
         }
 
-        let total = writer.flush_and_close().await?;
+        let (total, final_sealed) = writer.flush_and_close().await?;
+        if let (Some(final_path), Some(tx)) = (final_sealed, &sealed_tx) {
+            let _ = tx.send(final_path).await;
+        }
         if let Some(ref tx) = on_stats {
             let _ = tx.try_send(total);
         }

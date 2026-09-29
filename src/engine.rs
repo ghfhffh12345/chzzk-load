@@ -609,14 +609,78 @@ impl EngineOrchestrator {
                 tokens.insert(channel_id.clone(), session_cancel.clone());
             }
 
+            let (chat_sealed_tx, mut chat_sealed_rx) = tokio::sync::mpsc::channel::<PathBuf>(32);
+            let chat_forward_handle = {
+                let upload_tx = upload_tx.clone();
+                let event_tx = event_tx.clone();
+                let channel_id = channel_id.clone();
+                let session_folder = session_folder_name.clone();
+                let streamer = info.streamer_name.clone();
+                let backend_active = backend_opt.is_some();
+
+                tokio::spawn(async move {
+                    while let Some(chat_path) = chat_sealed_rx.recv().await {
+                        let chunk_name = match chat_path.file_name().and_then(|n| n.to_str()) {
+                            Some(n) => n.to_string(),
+                            None => continue,
+                        };
+                        let size = tokio::fs::metadata(&chat_path)
+                            .await
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+
+                        let _ = event_tx
+                            .send(AppEvent::ChunkSealed {
+                                chunk_name: chunk_name.clone(),
+                                size_bytes: size,
+                            })
+                            .await;
+
+                        if backend_active {
+                            let send_res = upload_tx
+                                .send(UploadTask {
+                                    channel_id: channel_id.clone(),
+                                    session_folder_id: session_folder.clone(),
+                                    remote_dir: session_folder.clone(),
+                                    chunk_path: chat_path,
+                                    chunk_name: chunk_name.clone(),
+                                    streamer_name: streamer.clone(),
+                                })
+                                .await;
+
+                            if send_res.is_ok() {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(format!(
+                                        "{chunk_name} sealed. Pushed to cloud upload queue."
+                                    ))))
+                                    .await;
+                            } else {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(format!(
+                                        "{chunk_name} sealed (saved locally)."
+                                    ))))
+                                    .await;
+                            }
+                        } else {
+                            let _ = event_tx
+                                .send(AppEvent::Log(LogEntry::rec(format!(
+                                    "{chunk_name} sealed (saved locally)."
+                                ))))
+                                .await;
+                        }
+                    }
+                })
+            };
+
             let chat_session_cancel = session_cancel.clone();
             let chat_task = if settings.general.record_chat {
                 if let Some(chat_cid) = info.chat_channel_id.clone() {
                     let chzzk_chat = chzzk.clone();
                     let event_tx_chat = event_tx.clone();
                     let chat_cid_id = channel_id.clone();
-                    let chat_target_path = session_dir.join("chat.jsonl");
+                    let chat_session_dir = session_dir.clone();
                     let flush_sec = settings.general.chat_flush_interval_seconds;
+                    let chat_chunk_sealed_tx = chat_sealed_tx.clone();
 
                     Some(tokio::spawn(async move {
                         let access_token = tokio::select! {
@@ -657,10 +721,13 @@ impl EngineOrchestrator {
                             }
                         });
 
+                        let chunk_dur =
+                            Duration::from_secs(settings.general.chunk_duration_seconds);
                         let mut client = ChzzkChatClient::new(
                             chat_cid,
                             access_token,
-                            chat_target_path,
+                            chat_session_dir,
+                            chunk_dur,
                             Duration::from_secs(flush_sec),
                             chat_session_cancel,
                         );
@@ -674,7 +741,7 @@ impl EngineOrchestrator {
                             ))))
                             .await;
 
-                        match client.run(Some(stats_tx)).await {
+                        match client.run(Some(stats_tx), Some(chat_chunk_sealed_tx)).await {
                             Ok(total_msgs) => {
                                 let _ = event_tx_chat
                                     .send(AppEvent::Log(LogEntry::chat(format!(
@@ -699,6 +766,7 @@ impl EngineOrchestrator {
             } else {
                 None
             };
+            drop(chat_sealed_tx);
 
             let output_pattern = session_dir.join("chunk_%04d.ts");
             let chunk_dur = settings.general.chunk_duration_seconds;
@@ -783,9 +851,10 @@ impl EngineOrchestrator {
                     {
                         chat_handle.abort();
                     }
-                    let chat_file = session_dir.join("chat.jsonl");
-                    if tokio::fs::try_exists(&chat_file).await.unwrap_or(false) {
-                        let _ = tokio::fs::remove_file(&chat_file).await;
+                    if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
+                        while let Ok(Some(entry)) = rd.next_entry().await {
+                            let _ = tokio::fs::remove_file(entry.path()).await;
+                        }
                     }
                     let _ = tokio::fs::remove_dir(&session_dir).await;
                     let mut active = active_recordings.lock().await;
@@ -1010,10 +1079,6 @@ impl EngineOrchestrator {
                 }
 
                 // Clean up session directory and any empty/partial files
-                let chat_file = session_dir.join("chat.jsonl");
-                if tokio::fs::try_exists(&chat_file).await.unwrap_or(false) {
-                    let _ = tokio::fs::remove_file(&chat_file).await;
-                }
                 if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
                     while let Ok(Some(entry)) = rd.next_entry().await {
                         let _ = tokio::fs::remove_file(entry.path()).await;
@@ -1122,32 +1187,7 @@ impl EngineOrchestrator {
             {
                 chat_handle.abort();
             }
-
-            let chat_path = session_dir.join("chat.jsonl");
-            if chat_path.exists()
-                && let Some(ref backend) = backend_opt
-            {
-                let on_progress: ProgressCallback = Box::new(|_, _, _| {});
-                match backend
-                    .upload_file_and_delete(&chat_path, &session_folder_name, on_progress)
-                    .await
-                {
-                    Ok(_) => {
-                        let _ = event_tx
-                            .send(AppEvent::Log(LogEntry::clean(format!(
-                                "Uploaded & deleted 'chat.jsonl' for {channel_id}"
-                            ))))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = event_tx
-                            .send(AppEvent::Log(LogEntry::warn(format!(
-                                "Failed to upload 'chat.jsonl' for {channel_id}: {e}"
-                            ))))
-                            .await;
-                    }
-                }
-            }
+            let _ = tokio::time::timeout(Duration::from_secs(2), chat_forward_handle).await;
 
             let history = {
                 let sessions = active_sessions.lock().await;
