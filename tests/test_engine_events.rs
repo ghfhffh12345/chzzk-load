@@ -3,55 +3,113 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Response, Server, StatusCode};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::config::{ChannelConfig, Settings};
-use chzzk_load::drive::auth::{DriveAuth, StoredToken};
-use chzzk_load::drive::client::DriveClient;
 use chzzk_load::engine::{ActiveSessionState, EngineOrchestrator};
 use chzzk_load::tui::event::{AppEvent, LogEntry};
-use chzzk_load::uploader::UploadTask;
+use chzzk_load::uploader::{
+    BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend, UploadTask,
+};
 
-async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
-    let cred_path = temp_dir.join("mock_credentials.json");
-    let token_path = temp_dir.join("mock_token.json");
+struct ConcurrencyMockBackend {
+    task2_started_tx: mpsc::Sender<()>,
+    allow_task1_finish_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<()>>>,
+}
 
-    let cred_json = r#"{
-        "installed": {
-            "client_id": "mock_client_id",
-            "client_secret": "mock_client_secret",
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token"
-        }
-    }"#;
-    fs::write(&cred_path, cred_json).unwrap();
+impl UploadBackend for ConcurrencyMockBackend {
+    fn upload_file_and_delete<'a>(
+        &'a self,
+        local_path: &'a Path,
+        _remote_dir: &'a str,
+        _on_progress: ProgressCallback,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(async move {
+            let file_name = local_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if file_name.contains("chan2") {
+                let _ = self.task2_started_tx.send(()).await;
+            } else if file_name.contains("chan1") {
+                let mut rx = self.allow_task1_finish_rx.lock().await;
+                let _ = rx.recv().await;
+            }
+            let len = tokio::fs::metadata(local_path).await?.len();
+            tokio::fs::remove_file(local_path).await?;
+            Ok(len)
+        })
+    }
 
-    let future_expiry = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3600;
+    fn upload_text<'a>(
+        &'a self,
+        _remote_dir: &'a str,
+        _file_name: &'a str,
+        _content: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move { Ok(()) })
+    }
 
-    let token_data = StoredToken {
-        access_token: "mock_test_token_xyz".to_string(),
-        refresh_token: Some("mock_refresh_xyz".to_string()),
-        expires_at_epoch_sec: future_expiry,
-    };
-    fs::write(
-        &token_path,
-        serde_json::to_string_pretty(&token_data).unwrap(),
-    )
-    .unwrap();
+    fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move { Ok(()) })
+    }
+}
 
-    let auth = DriveAuth::load_or_authorize(&cred_path, &token_path)
-        .await
-        .expect("Failed to initialize mock DriveAuth");
+struct SerialMockBackend {
+    task1_in_flight: Arc<AtomicBool>,
+    task1_started_tx: Option<mpsc::Sender<()>>,
+    task2_unexpected_started_tx: mpsc::Sender<()>,
+    allow_task1_finish_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<()>>>,
+}
 
-    Arc::new(auth)
+impl UploadBackend for SerialMockBackend {
+    fn upload_file_and_delete<'a>(
+        &'a self,
+        local_path: &'a Path,
+        _remote_dir: &'a str,
+        _on_progress: ProgressCallback,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(async move {
+            let file_name = local_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if file_name.contains("0001") {
+                if self.task1_in_flight.load(Ordering::SeqCst) {
+                    let _ = self.task2_unexpected_started_tx.send(()).await;
+                }
+            } else if file_name.contains("0000") {
+                self.task1_in_flight.store(true, Ordering::SeqCst);
+                if let Some(ref tx) = self.task1_started_tx {
+                    let _ = tx.send(()).await;
+                }
+                let mut rx = self.allow_task1_finish_rx.lock().await;
+                let _ = rx.recv().await;
+                self.task1_in_flight.store(false, Ordering::SeqCst);
+            }
+            let len = tokio::fs::metadata(local_path).await?.len();
+            tokio::fs::remove_file(local_path).await?;
+            Ok(len)
+        })
+    }
+
+    fn upload_text<'a>(
+        &'a self,
+        _remote_dir: &'a str,
+        _file_name: &'a str,
+        _content: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move { Ok(()) })
+    }
 }
 
 #[tokio::test]
@@ -551,47 +609,12 @@ async fn test_engine_orchestrator_upload_consumer() {
     let temp_dir = std::env::temp_dir().join(format!("test_orch_upload_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{port}"),
-        format!("http://127.0.0.1:{port}"),
-    );
-
-    let upload_session_url = format!("http://127.0.0.1:{port}/resumable_upload_session");
-    let session_url_clone = upload_session_url.clone();
-
-    std::thread::spawn(move || {
-        // 1. Init resumable upload request
-        if let Ok(req) = server.recv() {
-            assert_eq!(req.method().as_str(), "POST");
-            let response = Response::from_string("").with_header(
-                Header::from_bytes(&b"Location"[..], session_url_clone.as_bytes()).unwrap(),
-            );
-            let _ = req.respond(response);
-        }
-
-        // 2. Stream byte chunk upload
-        if let Ok(req) = server.recv() {
-            assert_eq!(req.method().as_str(), "PUT");
-            let response_body = serde_json::json!({
-                "id": "file_uploaded_test_123",
-                "name": "chunk_0000.ts"
-            });
-            let response = Response::from_string(response_body.to_string()).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = req.respond(response);
-        }
-    });
-
+    let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
 
     let _consumer_handle =
-        EngineOrchestrator::spawn_upload_consumer(Some(client), event_tx, upload_rx);
+        EngineOrchestrator::spawn_upload_consumer(Some(mock_backend.clone()), event_tx, upload_rx);
 
     // Create a local chunk file
     let chunk_path = temp_dir.join("chunk_0000.ts");
@@ -639,7 +662,7 @@ async fn test_engine_orchestrator_upload_consumer() {
                 assert_eq!(reclaimed_bytes, 1024 * 1024);
                 got_completed = true;
             }
-            AppEvent::Log(msg) if msg.contains("[CLEAN] Uploaded & deleted chunk_0000.ts") => {
+            AppEvent::Log(msg) if msg.contains("Uploaded & deleted chunk_0000.ts") => {
                 got_clean_log = true;
                 break;
             }
@@ -652,6 +675,11 @@ async fn test_engine_orchestrator_upload_consumer() {
     // File must have been deleted locally
     assert!(!chunk_path.exists());
 
+    let uploads = mock_backend.uploads.lock().await;
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0].0, chunk_path);
+    assert_eq!(uploads[0].1, "folder_abc");
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -660,27 +688,14 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
     let temp_dir = std::env::temp_dir().join(format!("test_orch_fail_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{port}"),
-        format!("http://127.0.0.1:{port}"),
-    );
-
-    std::thread::spawn(move || {
-        while let Ok(req) = server.recv() {
-            let response = Response::from_string("server error").with_status_code(StatusCode(500));
-            let _ = req.respond(response);
-        }
-    });
+    let mock_backend = Arc::new(MockUploadBackend::default());
+    mock_backend.should_fail.store(true, Ordering::SeqCst);
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
 
     let _consumer_handle =
-        EngineOrchestrator::spawn_upload_consumer(Some(client), event_tx, upload_rx);
+        EngineOrchestrator::spawn_upload_consumer(Some(mock_backend), event_tx, upload_rx);
 
     // Create a local chunk file
     let chunk_path = temp_dir.join("chunk_fail.ts");
@@ -707,7 +722,7 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
     let mut got_error_log = false;
     while let Some(ev) = event_rx.recv().await {
         if let AppEvent::Log(msg) = ev
-            && msg.contains("[ERROR] Upload failed for chunk_fail.ts")
+            && msg.contains("Upload failed for chunk_fail.ts")
         {
             got_error_log = true;
             break;
@@ -732,22 +747,18 @@ async fn test_process_sealed_chunk_no_drive_saves_locally() {
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
-    let mut session_folder_id: Option<String> = None;
 
     EngineOrchestrator::process_sealed_chunk(
         &chunk_path,
-        &mut session_folder_id,
-        None,
-        "ChzzkRecordings",
         "Streamer - Title",
         "chan_local",
         "Streamer",
         &upload_tx,
         &event_tx,
+        false,
     )
     .await;
 
-    assert!(session_folder_id.is_none());
     assert!(upload_rx.try_recv().is_err());
 
     let mut got_chunk_sealed = false;
@@ -782,82 +793,39 @@ async fn test_process_sealed_chunk_retry_drive_success() {
         std::env::temp_dir().join(format!("test_chunk_retry_ok_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    // Spawn server responding to root folder query and subfolder query
-    std::thread::spawn(move || {
-        // 1. Root folder query
-        if let Ok(req) = server.recv() {
-            let body = serde_json::json!({
-                "files": [{"id": "root_123", "name": "ChzzkRecordings"}]
-            });
-            let response = Response::from_string(body.to_string()).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = req.respond(response);
-        }
-
-        // 2. Subfolder query
-        if let Ok(req) = server.recv() {
-            let body = serde_json::json!({
-                "files": [{"id": "sub_456", "name": "Subfolder"}]
-            });
-            let response = Response::from_string(body.to_string()).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = req.respond(response);
-        }
-    });
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{port}"),
-        format!("http://127.0.0.1:{port}"),
-    );
-
     let chunk_path = temp_dir.join("chunk_0001.ts");
     fs::write(&chunk_path, b"test chunk content").unwrap();
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
-    let mut session_folder_id: Option<String> = None;
 
     EngineOrchestrator::process_sealed_chunk(
         &chunk_path,
-        &mut session_folder_id,
-        Some(&drive),
-        "ChzzkRecordings",
         "Subfolder",
         "chan_sub",
         "StreamerSub",
         &upload_tx,
         &event_tx,
+        true,
     )
     .await;
 
-    assert_eq!(session_folder_id, Some("sub_456".to_string()));
-
     // Verify task in upload_tx
     let task = upload_rx.recv().await.expect("Expected UploadTask");
-    assert_eq!(task.session_folder_id, "sub_456");
+    assert_eq!(task.remote_dir, "Subfolder");
     assert_eq!(task.chunk_name, "chunk_0001.ts");
+    assert_eq!(task.channel_id, "chan_sub");
+    assert_eq!(task.streamer_name, "StreamerSub");
 
     let mut got_pushed_log = false;
-    let mut got_drive_ready_log = false;
-
     while let Ok(ev) = event_rx.try_recv() {
-        if let AppEvent::Log(msg) = ev {
-            if msg == "[REC] chunk_0001.ts sealed. Pushed to Drive upload queue." {
-                got_pushed_log = true;
-            }
-            if msg.contains("[DRIVE] Session folder ready:") {
-                got_drive_ready_log = true;
-            }
+        if let AppEvent::Log(msg) = ev
+            && msg == "[REC] chunk_0001.ts sealed. Pushed to cloud upload queue."
+        {
+            got_pushed_log = true;
         }
     }
 
-    assert!(got_drive_ready_log);
     assert!(got_pushed_log);
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -869,61 +837,33 @@ async fn test_process_sealed_chunk_retry_drive_failure() {
         std::env::temp_dir().join(format!("test_chunk_retry_fail_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(req) = server.recv() {
-            let response =
-                Response::from_string("internal error").with_status_code(StatusCode(500));
-            let _ = req.respond(response);
-        }
-    });
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{port}"),
-        format!("http://127.0.0.1:{port}"),
-    );
-
     let chunk_path = temp_dir.join("chunk_0002.ts");
     fs::write(&chunk_path, b"test video data").unwrap();
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
-    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
-    let mut session_folder_id: Option<String> = None;
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+    drop(upload_rx);
 
     EngineOrchestrator::process_sealed_chunk(
         &chunk_path,
-        &mut session_folder_id,
-        Some(&drive),
-        "ChzzkRecordings",
         "Subfolder",
         "chan_fail_test",
         "StreamerFail",
         &upload_tx,
         &event_tx,
+        true,
     )
     .await;
 
-    assert!(session_folder_id.is_none());
-    assert!(upload_rx.try_recv().is_err());
-
     let mut got_saved_locally_log = false;
-    let mut got_warn_log = false;
-
     while let Ok(ev) = event_rx.try_recv() {
-        if let AppEvent::Log(msg) = ev {
-            if msg == "[REC] chunk_0002.ts sealed (saved locally)." {
-                got_saved_locally_log = true;
-            }
-            if msg.contains("[WARN] Failed to access Drive root folder:") {
-                got_warn_log = true;
-            }
+        if let AppEvent::Log(msg) = ev
+            && msg == "[REC] chunk_0002.ts sealed (saved locally)."
+        {
+            got_saved_locally_log = true;
         }
     }
 
-    assert!(got_warn_log);
     assert!(got_saved_locally_log);
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -940,34 +880,26 @@ async fn test_process_sealed_chunk_existing_folder_id_skips_retry() {
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
-    let mut session_folder_id = Some("already_ready_folder_999".to_string());
 
     EngineOrchestrator::process_sealed_chunk(
         &chunk_path,
-        &mut session_folder_id,
-        None,
-        "ChzzkRecordings",
         "Subfolder",
         "chan_exist",
         "StreamerExist",
         &upload_tx,
         &event_tx,
+        true,
     )
     .await;
 
-    assert_eq!(
-        session_folder_id,
-        Some("already_ready_folder_999".to_string())
-    );
-
     let task = upload_rx.recv().await.expect("Expected UploadTask");
-    assert_eq!(task.session_folder_id, "already_ready_folder_999");
+    assert_eq!(task.remote_dir, "Subfolder");
     assert_eq!(task.chunk_name, "chunk_0003.ts");
 
     let mut got_pushed_log = false;
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(msg) = ev
-            && msg == "[REC] chunk_0003.ts sealed. Pushed to Drive upload queue."
+            && msg == "[REC] chunk_0003.ts sealed. Pushed to cloud upload queue."
         {
             got_pushed_log = true;
         }
@@ -1217,79 +1149,19 @@ async fn test_engine_orchestrator_concurrent_uploads() {
         std::env::temp_dir().join(format!("test_orch_concurrent_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{port}"),
-        format!("http://127.0.0.1:{port}"),
-    );
-
     let (task2_started_tx, mut task2_started_rx) = mpsc::channel::<()>(1);
-    let (allow_task1_finish_tx, mut allow_task1_finish_rx) = mpsc::channel::<()>(1);
+    let (allow_task1_finish_tx, allow_task1_finish_rx) = mpsc::channel::<()>(1);
 
-    std::thread::spawn(move || {
-        let mut put_reqs = Vec::new();
-        // 4 requests expected: 2 POST inits + 2 PUT uploads
-        for _ in 0..4 {
-            if let Ok(mut req) = server.recv() {
-                if req.method().as_str() == "POST" {
-                    let mut body = String::new();
-                    req.as_reader().read_to_string(&mut body).unwrap();
-                    let chunk_id = if body.contains("chunk_chan1.ts") {
-                        "1"
-                    } else {
-                        "2"
-                    };
-                    if chunk_id == "2" {
-                        let _ = task2_started_tx.try_send(());
-                    }
-                    let session_url =
-                        format!("http://127.0.0.1:{port}/resumable_session_{chunk_id}");
-                    let response = Response::empty(200).with_header(
-                        Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
-                    );
-                    let _ = req.respond(response);
-                } else if req.method().as_str() == "PUT" {
-                    if req.url().contains("resumable_session_1") {
-                        // Hold PUT for chunk 1 until chunk 2 has started!
-                        put_reqs.push(req);
-                    } else {
-                        // Chunk 2 PUT
-                        let mock_body = serde_json::json!({
-                            "id": "file_2",
-                            "name": "chunk_chan2.ts"
-                        });
-                        let response = Response::from_string(mock_body.to_string()).with_header(
-                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                                .unwrap(),
-                        );
-                        let _ = req.respond(response);
-                    }
-                }
-            }
-        }
-
-        // Wait for signal that task 2 was verified running concurrently before releasing task 1
-        let _ = allow_task1_finish_rx.blocking_recv();
-        for req in put_reqs {
-            let mock_body = serde_json::json!({
-                "id": "file_1",
-                "name": "chunk_chan1.ts"
-            });
-            let response = Response::from_string(mock_body.to_string()).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = req.respond(response);
-        }
+    let backend: Arc<dyn UploadBackend> = Arc::new(ConcurrencyMockBackend {
+        task2_started_tx,
+        allow_task1_finish_rx: Arc::new(tokio::sync::Mutex::new(allow_task1_finish_rx)),
     });
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
 
     let _consumer_handle = EngineOrchestrator::spawn_upload_consumer_with_concurrency(
-        Some(client),
+        Some(backend),
         event_tx,
         upload_rx,
         2,
@@ -1324,7 +1196,7 @@ async fn test_engine_orchestrator_concurrent_uploads() {
         .await
         .unwrap();
 
-    // Verify task 2 starts POST request while task 1 is still in flight (holding PUT 1)!
+    // Verify task 2 starts while task 1 is still in flight
     let task2_started =
         tokio::time::timeout(std::time::Duration::from_secs(3), task2_started_rx.recv()).await;
     assert!(
@@ -1366,12 +1238,6 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
     let chzzk_server = Server::http("127.0.0.1:0").unwrap();
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
 
-    let drive_server = Server::http("127.0.0.1:0").unwrap();
-    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
-
-    let renamed_new_name = Arc::new(std::sync::Mutex::new(None));
-    let renamed_clone = renamed_new_name.clone();
-
     std::thread::spawn(move || {
         // Poll 1: Initial title "Initial Stream Title"
         if let Ok(request) = chzzk_server.recv() {
@@ -1395,7 +1261,7 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
             let _ = request.respond(response);
         }
 
-        // Poll 2: Streamer changes title to "Updated Stream Title"
+        // Poll 2: Streamer changes title to "Updated Stream Title? Playing Now?"
         if let Ok(request) = chzzk_server.recv() {
             let mock_body = r#"{
                 "code": 200,
@@ -1418,50 +1284,6 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
         }
     });
 
-    std::thread::spawn(move || {
-        // Handle Drive requests: Expect a PATCH to /drive/v3/files/session_folder_777 and any title_history calls
-        while let Ok(mut req) = drive_server.recv() {
-            let method = req.method().as_str().to_string();
-            let url = req.url().to_string();
-
-            if method == "PATCH" && url.contains("/drive/v3/files/session_folder_777") {
-                let mut body = String::new();
-                req.as_reader().read_to_string(&mut body).unwrap();
-                let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-                let name = parsed["name"].as_str().unwrap().to_string();
-                *renamed_clone.lock().unwrap() = Some(name.clone());
-
-                let resp_body = serde_json::json!({
-                    "id": "session_folder_777",
-                    "name": name
-                });
-                let response = Response::from_string(resp_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if method == "GET" && url.contains("/drive/v3/files") {
-                let resp_body = serde_json::json!({ "files": [] });
-                let response = Response::from_string(resp_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if (method == "POST" && url.contains("/drive/v3/files"))
-                || (method == "PATCH" && url.contains("/upload/drive/v3/files"))
-            {
-                let resp_body =
-                    serde_json::json!({ "id": "hist_123", "name": "title_history.txt" });
-                let response = Response::from_string(resp_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else {
-                let response = Response::from_string(r#"{"error":"Not handled"}"#)
-                    .with_status_code(StatusCode(400));
-                let _ = req.respond(response);
-            }
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_rename_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1480,18 +1302,14 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
     let chzzk =
         ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
 
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{drive_port}"),
-        format!("http://127.0.0.1:{drive_port}"),
-    );
-
+    let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, Some(drive), event_tx);
+    let orchestrator =
+        EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
-    // Initialize active recording state with existing session folder
+    // Initialize active recording state
     {
         let active = orchestrator.active_recordings();
         active.lock().await.insert("chan_rename".to_string());
@@ -1499,34 +1317,27 @@ async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
         let sessions = orchestrator.active_sessions();
         sessions.lock().await.insert(
             "chan_rename".to_string(),
-            chzzk_load::engine::ActiveSessionState {
-                start_timestamp: "2026-09-22_1000".to_string(),
-                streamer_name: "RenameStreamer".to_string(),
-                current_title: "Initial Stream Title".to_string(),
-                session_folder_id: Some("session_folder_777".to_string()),
-                ..Default::default()
-            },
+            chzzk_load::engine::ActiveSessionState::new(
+                "2026-09-22_1000".to_string(),
+                "RenameStreamer".to_string(),
+                "Initial Stream Title".to_string(),
+            ),
         );
     }
 
-    // Poll 1: Channel is polled with same initial title (no rename expected)
+    // Poll 1: Channel is polled with same initial title (no title history upload expected)
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(renamed_new_name.lock().unwrap().is_none());
+    assert!(mock_backend.texts.lock().await.is_empty());
 
-    // Poll 2: Streamer changed title to "Updated Stream Title" (triggers Drive folder rename)
+    // Poll 2: Streamer changed title to "Updated Stream Title? Playing Now?"
     orchestrator.poll_channels_once(&upload_tx).await;
 
-    // Verify Drive rename request was made
-    let renamed = renamed_new_name.lock().unwrap().clone();
-    assert!(
-        renamed.is_some(),
-        "Drive PATCH rename request was not received!"
-    );
-    let new_folder_name = renamed.unwrap();
-    assert!(
-        new_folder_name.contains("RenameStreamer - Updated Stream Title? Playing Now?"),
-        "Expected folder name to contain 'RenameStreamer - Updated Stream Title? Playing Now?', got: {new_folder_name}"
-    );
+    // Verify backend received title_history.txt upload
+    let texts = mock_backend.texts.lock().await;
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].1, "title_history.txt");
+    assert!(texts[0].2.contains("Initial Stream Title"));
+    assert!(texts[0].2.contains("Updated Stream Title? Playing Now?"));
 
     // Verify ChannelUpdate event had new title
     let mut got_updated_title_event = false;
@@ -1550,12 +1361,6 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
     let chzzk_server = Server::http("127.0.0.1:0").unwrap();
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
 
-    let drive_server = Server::http("127.0.0.1:0").unwrap();
-    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
-
-    let uploaded_history_content = Arc::new(std::sync::Mutex::new(None));
-    let history_clone = uploaded_history_content.clone();
-
     std::thread::spawn(move || {
         // Poll 1: Initial title "Initial Stream Title"
         if let Ok(request) = chzzk_server.recv() {
@@ -1602,66 +1407,6 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
         }
     });
 
-    std::thread::spawn(move || {
-        while let Ok(mut req) = drive_server.recv() {
-            let method = req.method().as_str().to_string();
-            let url = req.url().to_string();
-
-            if method == "PATCH" && url.contains("/drive/v3/files/session_folder_777") {
-                // Folder rename
-                let resp_body = serde_json::json!({
-                    "id": "session_folder_777",
-                    "name": "Renamed"
-                });
-                let response = Response::from_string(resp_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if method == "GET"
-                && url.contains("/drive/v3/files")
-                && url.contains("title_history.txt")
-            {
-                // Check if title_history.txt exists
-                let resp_body = serde_json::json!({ "files": [] });
-                let response = Response::from_string(resp_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if method == "POST" && url.contains("/drive/v3/files") {
-                // Create title_history.txt metadata
-                let resp_body = serde_json::json!({
-                    "id": "title_history_file_555",
-                    "name": "title_history.txt"
-                });
-                let response = Response::from_string(resp_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if method == "PATCH"
-                && url.contains("/upload/drive/v3/files/title_history_file_555")
-            {
-                // Media upload PATCH
-                let mut body = String::new();
-                req.as_reader().read_to_string(&mut body).unwrap();
-                *history_clone.lock().unwrap() = Some(body.clone());
-
-                let resp_body = serde_json::json!({
-                    "id": "title_history_file_555",
-                    "name": "title_history.txt"
-                });
-                let response = Response::from_string(resp_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-                break;
-            } else {
-                let response = Response::from_string(r#"{"error":"Not handled"}"#)
-                    .with_status_code(StatusCode(400));
-                let _ = req.respond(response);
-            }
-        }
-    });
-
     let temp_dir =
         std::env::temp_dir().join(format!("test_orch_history_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
@@ -1681,16 +1426,12 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
     let chzzk =
         ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
 
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{drive_port}"),
-        format!("http://127.0.0.1:{drive_port}"),
-    );
-
+    let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, Some(drive), event_tx);
+    let orchestrator =
+        EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
     {
         let active = orchestrator.active_recordings();
@@ -1702,30 +1443,27 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
             chzzk_load::engine::ActiveSessionState {
                 start_timestamp: "2026-09-22_1000".to_string(),
                 streamer_name: "RenameStreamer".to_string(),
+                initial_title: "Initial Stream Title".to_string(),
                 current_title: "Initial Stream Title".to_string(),
-                session_folder_id: Some("session_folder_777".to_string()),
                 title_history: vec![(
                     "2026-09-22 10:00:00".to_string(),
                     "Initial Stream Title".to_string(),
                 )],
-                title_history_file_id: None,
             },
         );
     }
 
-    // Poll 1: Channel is polled with same initial title (no rename or history upload)
+    // Poll 1: Channel is polled with same initial title (no history upload)
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(uploaded_history_content.lock().unwrap().is_none());
+    assert!(mock_backend.texts.lock().await.is_empty());
 
-    // Poll 2: Streamer changed title to "Updated Stream Title" (triggers Drive upload of title_history.txt)
+    // Poll 2: Streamer changed title to "Updated Stream Title"
     orchestrator.poll_channels_once(&upload_tx).await;
 
-    let content_opt = uploaded_history_content.lock().unwrap().clone();
-    assert!(
-        content_opt.is_some(),
-        "title_history.txt upload was not received by Drive mock!"
-    );
-    let content = content_opt.unwrap();
+    let texts = mock_backend.texts.lock().await;
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].1, "title_history.txt");
+    let content = &texts[0].2;
     assert!(content.contains("[2026-09-22 10:00:00] Initial Stream Title"));
     assert!(content.contains("Updated Stream Title? Playing Now?"));
 
@@ -1733,10 +1471,6 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
         let sessions = orchestrator.active_sessions();
         let guard = sessions.lock().await;
         let session = guard.get("chan_rename").unwrap();
-        assert_eq!(
-            session.title_history_file_id,
-            Some("title_history_file_555".to_string())
-        );
         assert_eq!(session.title_history.len(), 2);
     }
 
@@ -1771,7 +1505,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
             let _ = request.respond(response);
         }
 
-        // Poll 2: Title changes to "Early Title 2" before folder is created
+        // Poll 2: Title changes to "Early Title 2"
         if let Ok(request) = chzzk_server.recv() {
             let mock_body = r#"{
                 "code": 200,
@@ -1816,7 +1550,6 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
 
-    // Initialize active recording state before Drive folder is created
     {
         let active = orchestrator.active_recordings();
         active.lock().await.insert("chan_pre".to_string());
@@ -1824,13 +1557,11 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         let sessions = orchestrator.active_sessions();
         sessions.lock().await.insert(
             "chan_pre".to_string(),
-            chzzk_load::engine::ActiveSessionState {
-                start_timestamp: "2026-09-22_1000".to_string(),
-                streamer_name: "PreStreamer".to_string(),
-                current_title: "Early Title 1".to_string(),
-                session_folder_id: None,
-                ..Default::default()
-            },
+            chzzk_load::engine::ActiveSessionState::new(
+                "2026-09-22_1000".to_string(),
+                "PreStreamer".to_string(),
+                "Early Title 1".to_string(),
+            ),
         );
     }
 
@@ -1842,10 +1573,9 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         let guard = sessions.lock().await;
         let session = guard.get("chan_pre").expect("Session should exist");
         assert_eq!(session.current_title, "Early Title 1");
-        assert!(session.session_folder_id.is_none());
     }
 
-    // Poll 2: Title changes to Early Title 2 before folder creation
+    // Poll 2: Title changes to Early Title 2
     orchestrator.poll_channels_once(&upload_tx).await;
 
     {
@@ -1853,19 +1583,18 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         let guard = sessions.lock().await;
         let session = guard.get("chan_pre").expect("Session should exist");
         assert_eq!(session.current_title, "Early Title 2? Pending?");
-        assert!(session.session_folder_id.is_none());
     }
 
-    let mut got_pending_log = false;
+    let mut got_title_change_log = false;
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(msg) = ev
-            && msg.contains("Pending folder name updated")
+            && msg.contains("Stream title changed for chan_pre")
             && msg.contains("Early Title 2? Pending?")
         {
-            got_pending_log = true;
+            got_title_change_log = true;
         }
     }
-    assert!(got_pending_log, "Expected pending folder name log message");
+    assert!(got_title_change_log, "Expected title change log message");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2000,8 +1729,8 @@ fn test_active_session_state_folder_name_preserves_question_marks() {
     let session = ActiveSessionState {
         start_timestamp: "2026-09-22_2200".to_string(),
         streamer_name: "Streamer?Name".to_string(),
+        initial_title: "Is this live? Yes! Special: 100% <Stream>".to_string(),
         current_title: "Is this live? Yes! Special: 100% <Stream>".to_string(),
-        session_folder_id: None,
         ..Default::default()
     };
 
@@ -2022,8 +1751,8 @@ fn test_active_session_state_folder_name_formatting_and_sanitization() {
     let session = ActiveSessionState {
         start_timestamp: "2026-09-22_1530".to_string(),
         streamer_name: "  Chzzk Streamer / Channel  ".to_string(),
+        initial_title: "What's Next? Let's Play | Ep. 1 *Final*".to_string(),
         current_title: "What's Next? Let's Play | Ep. 1 *Final*".to_string(),
-        session_folder_id: Some("folder_123".to_string()),
         ..Default::default()
     };
 
@@ -2155,69 +1884,7 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
     ));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let drive_server = Server::http("127.0.0.1:0").unwrap();
-    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
-
-    let upload_url = format!("http://127.0.0.1:{drive_port}/resumable_chunk_upload");
-    let upload_url_clone = upload_url.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(req) = drive_server.recv() {
-            let path = req.url().to_string();
-            if req.method().as_str() == "GET" && path.contains("/drive/v3/files") {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "files": [{ "id": "mock_folder_111", "name": "Chzzk_Recordings" }]
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
-                let response = Response::empty(200).with_header(
-                    Header::from_bytes(&b"Location"[..], upload_url_clone.as_bytes()).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "PUT" && path.contains("resumable_chunk_upload") {
-                // Simulate an upload that takes 11 seconds (exceeding old 10s timeout)
-                std::thread::sleep(std::time::Duration::from_millis(11000));
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "id": "uploaded_chunk_id",
-                        "name": "chunk_0000.ts"
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "POST" && path.contains("/drive/v3/files") {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "id": "mock_subfolder_222",
-                        "name": "mock_subfolder"
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else {
-                let response = Response::empty(200);
-                let _ = req.respond(response);
-            }
-        }
-    });
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{drive_port}"),
-        format!("http://127.0.0.1:{drive_port}"),
-    );
+    let mock_backend = Arc::new(MockUploadBackend::default());
 
     let settings = Settings {
         general: chzzk_load::config::GeneralConfig {
@@ -2241,7 +1908,7 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings,
         chzzk,
-        Some(drive_client),
+        Some(mock_backend.clone()),
         event_tx,
         cancel_token.clone(),
     ));
@@ -2300,20 +1967,15 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
         got_completed
     });
 
-    // Await run_handle with 20-second timeout (allowing 11s upload + cleanup)
-    let res = tokio::time::timeout(std::time::Duration::from_secs(20), run_handle).await;
+    let res = tokio::time::timeout(std::time::Duration::from_secs(10), run_handle).await;
     assert!(
         res.is_ok(),
         "Engine run_handle timed out before completing graceful shutdown!"
     );
 
-    // CRITICAL: At the exact moment EngineOrchestrator::run() finishes, the chunk upload
-    // MUST have completed and the chunk must already be deleted from local disk!
-    // In the broken code, EngineOrchestrator::run() prematurely exits at 10 seconds,
-    // leaving the chunk still on disk and still uploading when the engine shuts down.
     assert!(
         !chunk_path.exists(),
-        "Chunk file must already be uploaded and deleted when EngineOrchestrator::run completes! (Engine shut down prematurely while upload was still in progress)"
+        "Chunk file must already be uploaded and deleted when EngineOrchestrator::run completes!"
     );
 
     let got_completed = drain_handle.await.unwrap_or(false);
@@ -2331,76 +1993,14 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
         std::env::temp_dir().join(format!("test_orch_serial_chan_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{port}"),
-        format!("http://127.0.0.1:{port}"),
-    );
-
     let (task2_unexpected_started_tx, mut task2_unexpected_started_rx) = mpsc::channel::<()>(1);
-    let (allow_task1_finish_tx, mut allow_task1_finish_rx) = mpsc::channel::<()>(1);
+    let (allow_task1_finish_tx, allow_task1_finish_rx) = mpsc::channel::<()>(1);
 
-    let put_task1_slot: Arc<std::sync::Mutex<Option<tiny_http::Request>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    let put_task1_slot_clone = put_task1_slot.clone();
-
-    std::thread::spawn(move || {
-        let _ = allow_task1_finish_rx.blocking_recv();
-        for _ in 0..100 {
-            let maybe_req = put_task1_slot_clone.lock().unwrap().take();
-            if let Some(r) = maybe_req {
-                let mock_body = serde_json::json!({
-                    "id": "file_task1",
-                    "name": "chunk_0000.ts"
-                });
-                let response = Response::from_string(mock_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = r.respond(response);
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    });
-
-    std::thread::spawn(move || {
-        // Process requests from client
-        while let Ok(mut req) = server.recv() {
-            if req.method().as_str() == "POST" {
-                let mut body = String::new();
-                req.as_reader().read_to_string(&mut body).unwrap();
-                let is_task2 = body.contains("chunk_0001.ts");
-                if is_task2 {
-                    // Task 2 started while Task 1 is still in flight!
-                    let _ = task2_unexpected_started_tx.try_send(());
-                }
-
-                let chunk_id = if is_task2 { "2" } else { "1" };
-                let session_url = format!("http://127.0.0.1:{port}/serial_session_{chunk_id}");
-                let response = Response::empty(200).with_header(
-                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "PUT" {
-                if req.url().contains("serial_session_1") {
-                    // Task 1 PUT arrived; hold it in slot without blocking the server loop
-                    *put_task1_slot.lock().unwrap() = Some(req);
-                } else if req.url().contains("serial_session_2") {
-                    let mock_body = serde_json::json!({
-                        "id": "file_task2",
-                        "name": "chunk_0001.ts"
-                    });
-                    let response = Response::from_string(mock_body.to_string()).with_header(
-                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                    );
-                    let _ = req.respond(response);
-                    break;
-                }
-            }
-        }
+    let backend: Arc<dyn UploadBackend> = Arc::new(SerialMockBackend {
+        task1_in_flight: Arc::new(AtomicBool::new(false)),
+        task1_started_tx: None,
+        task2_unexpected_started_tx,
+        allow_task1_finish_rx: Arc::new(tokio::sync::Mutex::new(allow_task1_finish_rx)),
     });
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
@@ -2408,7 +2008,7 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
 
     // Concurrency is set to 3, but both tasks belong to the SAME channel
     let _consumer_handle = EngineOrchestrator::spawn_upload_consumer_with_concurrency(
-        Some(client),
+        Some(backend),
         event_tx,
         upload_rx,
         3,
@@ -2444,7 +2044,6 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
         .unwrap();
 
     // Check if task 2 was prematurely started while task 1 is in-flight.
-    // If it started, task2_unexpected_started_rx will receive a signal within 500ms.
     let task2_started_prematurely = tokio::time::timeout(
         std::time::Duration::from_millis(500),
         task2_unexpected_started_rx.recv(),
@@ -2522,116 +2121,16 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
     ));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let drive_server = Server::http("127.0.0.1:0").unwrap();
-    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
-
     let (task2_unexpected_started_tx, mut task2_unexpected_started_rx) = mpsc::channel::<()>(1);
     let (chunk0_in_flight_tx, mut chunk0_in_flight_rx) = mpsc::channel::<()>(1);
-    let (allow_chunk0_finish_tx, mut allow_chunk0_finish_rx) = mpsc::channel::<()>(1);
+    let (allow_chunk0_finish_tx, allow_chunk0_finish_rx) = mpsc::channel::<()>(1);
 
-    let put_chunk0_slot: Arc<std::sync::Mutex<Option<tiny_http::Request>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    let put_chunk0_slot_clone = put_chunk0_slot.clone();
-
-    std::thread::spawn(move || {
-        let _ = allow_chunk0_finish_rx.blocking_recv();
-        for _ in 0..100 {
-            let maybe_req = put_chunk0_slot_clone.lock().unwrap().take();
-            if let Some(r) = maybe_req {
-                let mock_body = serde_json::json!({
-                    "id": "uploaded_chunk0_id",
-                    "name": "chunk_0000.ts"
-                });
-                let response = Response::from_string(mock_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = r.respond(response);
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+    let backend: Arc<dyn UploadBackend> = Arc::new(SerialMockBackend {
+        task1_in_flight: Arc::new(AtomicBool::new(false)),
+        task1_started_tx: Some(chunk0_in_flight_tx),
+        task2_unexpected_started_tx,
+        allow_task1_finish_rx: Arc::new(tokio::sync::Mutex::new(allow_chunk0_finish_rx)),
     });
-
-    let chunk0_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let chunk0_active_server = chunk0_active.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(mut req) = drive_server.recv() {
-            let path = req.url().to_string();
-            if req.method().as_str() == "GET" && path.contains("/drive/v3/files") {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "files": [{ "id": "mock_folder_111", "name": "Chzzk_Recordings" }]
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
-                let mut body = String::new();
-                req.as_reader().read_to_string(&mut body).unwrap();
-                let is_task2 = body.contains("chunk_0001.ts");
-                if is_task2 && chunk0_active_server.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = task2_unexpected_started_tx.try_send(());
-                }
-
-                let session_id = if is_task2 {
-                    "session_chunk_1"
-                } else {
-                    "session_chunk_0"
-                };
-                let session_url = format!("http://127.0.0.1:{drive_port}/{session_id}");
-                let response = Response::empty(200).with_header(
-                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "PUT" {
-                if path.contains("session_chunk_0") {
-                    chunk0_active_server.store(true, std::sync::atomic::Ordering::SeqCst);
-                    let _ = chunk0_in_flight_tx.try_send(());
-                    *put_chunk0_slot.lock().unwrap() = Some(req);
-                } else if path.contains("session_chunk_1") {
-                    if chunk0_active_server.load(std::sync::atomic::Ordering::SeqCst) {
-                        let _ = task2_unexpected_started_tx.try_send(());
-                    }
-                    let response = Response::from_string(
-                        serde_json::json!({
-                            "id": "uploaded_chunk1_id",
-                            "name": "chunk_0001.ts"
-                        })
-                        .to_string(),
-                    )
-                    .with_header(
-                        Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                    );
-                    let _ = req.respond(response);
-                }
-            } else if req.method().as_str() == "POST" && path.contains("/drive/v3/files") {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "id": "mock_subfolder_222",
-                        "name": "mock_subfolder"
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else {
-                let response = Response::empty(200);
-                let _ = req.respond(response);
-            }
-        }
-    });
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{drive_port}"),
-        format!("http://127.0.0.1:{drive_port}"),
-    );
 
     let settings = Settings {
         general: chzzk_load::config::GeneralConfig {
@@ -2655,7 +2154,7 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings,
         chzzk,
-        Some(drive_client),
+        Some(backend),
         event_tx,
         cancel_token.clone(),
     ));
@@ -2696,7 +2195,7 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
     fs::write(&chunk_path0, b"TEST_CHUNK_0_DATA").unwrap();
     fs::write(&chunk_path1, b"TEST_CHUNK_1_DATA").unwrap();
 
-    // Wait until chunk 0 starts uploading and reaches in-flight state (PUT request held)
+    // Wait until chunk 0 starts uploading and reaches in-flight state
     let in_flight = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         chunk0_in_flight_rx.recv(),
@@ -2704,16 +2203,15 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
     .await;
     assert!(
         in_flight.is_ok(),
-        "chunk_0000.ts should have started uploading and reached in-flight PUT"
+        "chunk_0000.ts should have started uploading and reached in-flight"
     );
 
     // Cancel while chunk 0 is actively uploading and chunk 1 is pending as final chunk
     cancel_token.cancel();
 
     // Verify chunk 1 is NOT started prematurely while chunk 0 is still in flight.
-    // FFmpeg stop takes up to 3.5s to exit cleanly and seal the final chunk.
     let task2_started_prematurely = tokio::time::timeout(
-        std::time::Duration::from_millis(4000),
+        std::time::Duration::from_millis(1500),
         task2_unexpected_started_rx.recv(),
     )
     .await;
@@ -2724,7 +2222,6 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
     );
 
     // Allow chunk 0 to finish
-    chunk0_active.store(false, std::sync::atomic::Ordering::SeqCst);
     let _ = allow_chunk0_finish_tx.send(()).await;
 
     // Await run_handle
@@ -2789,67 +2286,7 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
     let temp_dir = std::env::temp_dir().join(format!("test_orch_multi_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let drive_server = Server::http("127.0.0.1:0").unwrap();
-    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(mut req) = drive_server.recv() {
-            let path = req.url().to_string();
-            if req.method().as_str() == "GET" && path.contains("/drive/v3/files") {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "files": [{ "id": "mock_root_folder", "name": "Chzzk_Recordings" }]
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
-                let mut body = String::new();
-                req.as_reader().read_to_string(&mut body).unwrap();
-                let session_url = format!("http://127.0.0.1:{drive_port}/resumable_session");
-                let response = Response::empty(200).with_header(
-                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "PUT" {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "id": "uploaded_chunk_id",
-                        "name": "chunk.ts"
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "POST" && path.contains("/drive/v3/files") {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "id": "mock_subfolder_id",
-                        "name": "mock_subfolder"
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else {
-                let response = Response::empty(200);
-                let _ = req.respond(response);
-            }
-        }
-    });
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{drive_port}"),
-        format!("http://127.0.0.1:{drive_port}"),
-    );
+    let mock_backend = Arc::new(MockUploadBackend::default());
 
     let settings = Settings {
         general: chzzk_load::config::GeneralConfig {
@@ -2879,7 +2316,7 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings,
         chzzk,
-        Some(drive_client),
+        Some(mock_backend.clone()),
         event_tx,
         cancel_token.clone(),
     ));
@@ -2969,6 +2406,34 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
         "chan_multi_2 chunk 0 should be uploaded"
     );
 
+    let uploads = mock_backend.uploads.lock().await;
+    assert!(
+        uploads
+            .iter()
+            .any(
+                |(p, _)| p.file_name().and_then(|n| n.to_str()) == Some("chunk_0000.ts")
+                    && p.to_string_lossy().contains("chan_multi_1")
+            ),
+        "chan_multi_1 chunk_0000.ts must be recorded in mock_backend uploads"
+    );
+    assert!(
+        uploads
+            .iter()
+            .any(
+                |(p, _)| p.file_name().and_then(|n| n.to_str()) == Some("chunk_0000.ts")
+                    && p.to_string_lossy().contains("chan_multi_2")
+            ),
+        "chan_multi_2 chunk_0000.ts must be recorded in mock_backend uploads"
+    );
+    assert!(
+        !d1_c0.exists(),
+        "chan_multi_1 chunk_0000.ts must be deleted locally"
+    );
+    assert!(
+        !d2_c0.exists(),
+        "chan_multi_2 chunk_0000.ts must be deleted locally"
+    );
+
     cancel_token.cancel();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run_handle).await;
     let _ = fs::remove_dir_all(&temp_dir);
@@ -2999,90 +2464,10 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_driv
         }
     });
 
-    let drive_server = Server::http("127.0.0.1:0").unwrap();
-    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
-
-    let folder_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let folder_attempts_clone = folder_attempts.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(mut req) = drive_server.recv() {
-            let path = req.url().to_string();
-            if req.method().as_str() == "GET" && path.contains("/drive/v3/files") {
-                // If searching for subfolder, fail with 429 on first 6 attempts (exceeding single-call retries)
-                if !path.contains("Chzzk_Recordings") {
-                    let attempt =
-                        folder_attempts_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    if attempt < 6 {
-                        let response = Response::from_string(
-                            "{\"error\":{\"code\":429,\"message\":\"Rate Limit\"}}",
-                        )
-                        .with_status_code(StatusCode(429))
-                        .with_header(
-                            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                                .unwrap(),
-                        );
-                        let _ = req.respond(response);
-                        continue;
-                    }
-                }
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "files": [{ "id": "mock_root_folder", "name": "Chzzk_Recordings" }]
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "POST" && path.contains("uploadType=resumable") {
-                let mut body = String::new();
-                req.as_reader().read_to_string(&mut body).unwrap();
-                let session_url = format!("http://127.0.0.1:{drive_port}/resumable_session");
-                let response = Response::empty(200).with_header(
-                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "PUT" {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "id": "uploaded_chunk_id",
-                        "name": "chunk.ts"
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else if req.method().as_str() == "POST" && path.contains("/drive/v3/files") {
-                let response = Response::from_string(
-                    serde_json::json!({
-                        "id": "mock_subfolder_id",
-                        "name": "mock_subfolder"
-                    })
-                    .to_string(),
-                )
-                .with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = req.respond(response);
-            } else {
-                let response = Response::empty(200);
-                let _ = req.respond(response);
-            }
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_retry_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{drive_port}"),
-        format!("http://127.0.0.1:{drive_port}"),
-    );
+    let mock_backend = Arc::new(MockUploadBackend::default());
 
     let settings = Settings {
         general: chzzk_load::config::GeneralConfig {
@@ -3106,7 +2491,7 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_driv
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings,
         chzzk,
-        Some(drive_client),
+        Some(mock_backend.clone()),
         event_tx,
         cancel_token.clone(),
     ));
@@ -3153,7 +2538,7 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_driv
     fs::write(&c0, b"CHUNK_0_DATA").unwrap();
     fs::write(&c1, b"CHUNK_1_DATA").unwrap();
 
-    // Check if chunk_0000.ts completes upload despite the initial rate limit failures!
+    // Check if chunk_0000.ts completes upload
     let mut chunk_0_uploaded = false;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
     while tokio::time::Instant::now() < deadline {
@@ -3166,10 +2551,16 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_driv
         }
     }
 
+    assert!(chunk_0_uploaded, "chunk_0000.ts must be uploaded");
+
+    let uploads = mock_backend.uploads.lock().await;
     assert!(
-        chunk_0_uploaded,
-        "chunk_0000.ts must be uploaded after folder creation recovers from 429"
+        uploads
+            .iter()
+            .any(|(p, _)| p.file_name().and_then(|n| n.to_str()) == Some("chunk_0000.ts")),
+        "chunk_0000.ts must be recorded in mock_backend uploads"
     );
+    assert!(!c0.exists(), "chunk_0000.ts must be deleted locally");
 
     cancel_token.cancel();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run_handle).await;
@@ -3827,47 +3218,13 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
     let chunk_path = session_dir.join("chunk_0000.ts");
     fs::write(&chunk_path, vec![0u8; 1024 * 1024]).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{port}"),
-        format!("http://127.0.0.1:{port}"),
-    );
-
-    let upload_session_url = format!("http://127.0.0.1:{port}/resumable_upload_session");
-    let session_url_clone = upload_session_url.clone();
-
-    std::thread::spawn(move || {
-        // 1. Init resumable upload request
-        if let Ok(req) = server.recv() {
-            assert_eq!(req.method().as_str(), "POST");
-            let response = Response::from_string("").with_header(
-                Header::from_bytes(&b"Location"[..], session_url_clone.as_bytes()).unwrap(),
-            );
-            let _ = req.respond(response);
-        }
-
-        // 2. Stream byte chunk upload
-        if let Ok(req) = server.recv() {
-            assert_eq!(req.method().as_str(), "PUT");
-            let response_body = serde_json::json!({
-                "id": "file_uploaded_test_999",
-                "name": "chunk_0000.ts"
-            });
-            let response = Response::from_string(response_body.to_string()).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = req.respond(response);
-        }
-    });
+    let mock_backend = Arc::new(MockUploadBackend::default());
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
 
     let _consumer_handle =
-        EngineOrchestrator::spawn_upload_consumer(Some(client), event_tx, upload_rx);
+        EngineOrchestrator::spawn_upload_consumer(Some(mock_backend.clone()), event_tx, upload_rx);
 
     upload_tx
         .send(UploadTask {
@@ -3905,6 +3262,10 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
         got_clean_log,
         "Expected log message indicating session folder cleanup"
     );
+
+    let uploads = mock_backend.uploads.lock().await;
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(uploads[0].0, chunk_path);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

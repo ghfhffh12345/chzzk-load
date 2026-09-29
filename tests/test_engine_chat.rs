@@ -1,8 +1,7 @@
 use std::fs;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tiny_http::{Header, Response, Server};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -10,49 +9,9 @@ use tokio_util::sync::CancellationToken;
 use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::chzzk::models::LiveStreamInfo;
 use chzzk_load::config::{ChannelConfig, Settings};
-use chzzk_load::drive::auth::{DriveAuth, StoredToken};
-use chzzk_load::drive::client::DriveClient;
 use chzzk_load::engine::EngineOrchestrator;
 use chzzk_load::tui::event::AppEvent;
-use chzzk_load::uploader::UploadTask;
-
-async fn create_mock_drive_auth(temp_dir: &Path) -> Arc<DriveAuth> {
-    let cred_path = temp_dir.join("mock_credentials.json");
-    let token_path = temp_dir.join("mock_token.json");
-
-    let cred_json = r#"{
-        "installed": {
-            "client_id": "mock_client_id",
-            "client_secret": "mock_client_secret",
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token"
-        }
-    }"#;
-    fs::write(&cred_path, cred_json).unwrap();
-
-    let future_expiry = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3600;
-
-    let token_data = StoredToken {
-        access_token: "mock_test_token_xyz".to_string(),
-        refresh_token: Some("mock_refresh_xyz".to_string()),
-        expires_at_epoch_sec: future_expiry,
-    };
-    fs::write(
-        &token_path,
-        serde_json::to_string_pretty(&token_data).unwrap(),
-    )
-    .unwrap();
-
-    let auth = DriveAuth::load_or_authorize(&cred_path, &token_path)
-        .await
-        .expect("Failed to initialize mock DriveAuth");
-
-    Arc::new(auth)
-}
+use chzzk_load::uploader::{MockUploadBackend, UploadTask};
 
 async fn spawn_mock_chat_ws_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -400,16 +359,13 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
 }
 
 #[tokio::test]
-async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() {
+async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled() {
     let temp_dir =
         std::env::temp_dir().join(format!("test_eng_chat_drive_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let chzzk_server = Server::http("127.0.0.1:0").unwrap();
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    let drive_server = Server::http("127.0.0.1:0").unwrap();
-    let drive_port = drive_server.server_addr().to_ip().unwrap().port();
 
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
 
@@ -431,74 +387,11 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
         }
     });
 
-    let uploaded_chat = Arc::new(AtomicBool::new(false));
-    let uploaded_chat_clone = uploaded_chat.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(mut request) = drive_server.recv() {
-            let url = request.url().to_string();
-            let method = request.method().as_str().to_string();
-
-            if method == "GET" && url.contains("/drive/v3/files") {
-                // Folder query
-                let mock_resp = serde_json::json!({ "files": [{ "id": "folder_root_123", "name": "chzzk_records" }] });
-                let resp = Response::from_string(mock_resp.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(resp);
-            } else if method == "POST"
-                && url.contains("/upload/drive/v3/files?uploadType=resumable")
-            {
-                // Resumable upload init for chat.jsonl
-                let mut body = String::new();
-                let _ = request.as_reader().read_to_string(&mut body);
-                let session_url = format!("http://127.0.0.1:{drive_port}/resumable_chat_session");
-                let resp = Response::empty(200).with_header(
-                    Header::from_bytes(&b"Location"[..], session_url.as_bytes()).unwrap(),
-                );
-                let _ = request.respond(resp);
-            } else if method == "PUT" && url.contains("/resumable_chat_session") {
-                // Upload PUT
-                uploaded_chat_clone.store(true, Ordering::SeqCst);
-                let mock_resp = serde_json::json!({
-                    "id": "drive_chat_file_999",
-                    "name": "chat.jsonl"
-                });
-                let resp = Response::from_string(mock_resp.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(resp);
-            } else if method == "POST" && url.contains("/drive/v3/files") {
-                // Create folder
-                let mock_resp = serde_json::json!({ "id": "subfolder_456", "name": "subfolder" });
-                let resp = Response::from_string(mock_resp.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(resp);
-            } else if method == "PATCH" && url.contains("/upload/drive/v3/files") {
-                // Text file upload (e.g. title_history.txt)
-                let mock_resp =
-                    serde_json::json!({ "id": "title_file_789", "name": "title_history.txt" });
-                let resp = Response::from_string(mock_resp.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(resp);
-            } else {
-                let _ = request.respond(Response::empty(200));
-            }
-        }
-    });
-
-    let auth = create_mock_drive_auth(&temp_dir).await;
-    let drive_client = DriveClient::new(auth).with_base_urls(
-        format!("http://127.0.0.1:{drive_port}"),
-        format!("http://127.0.0.1:{drive_port}"),
-    );
+    let mock_backend = Arc::new(MockUploadBackend::default());
 
     let mut settings = Settings::default();
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = true;
-    settings.google_drive.root_folder_name = "chzzk_records".to_string();
 
     let chzzk = ChzzkClient::new(&settings.chzzk)
         .with_game_base_url(format!("http://127.0.0.1:{chzzk_port}"))
@@ -510,7 +403,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
     let orchestrator = EngineOrchestrator::with_cancel_token(
         settings,
         chzzk,
-        Some(drive_client),
+        Some(mock_backend.clone()),
         event_tx,
         cancel_token.clone(),
     );
@@ -556,13 +449,13 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
 
     cancel_token.cancel();
 
-    let mut saw_drive_uploaded_log = false;
+    let mut saw_uploaded_log = false;
     while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
         match ev {
             AppEvent::Log(ref entry)
-                if entry.contains("Uploaded 'chat.jsonl' for chan_drive_chat") =>
+                if entry.contains("Uploaded & deleted 'chat.jsonl' for chan_drive_chat") =>
             {
-                saw_drive_uploaded_log = true;
+                saw_uploaded_log = true;
             }
             AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_drive_chat" => {
                 break;
@@ -571,14 +464,14 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_drive_enabled() 
         }
     }
 
+    let uploads = mock_backend.uploads.lock().await;
     assert!(
-        uploaded_chat.load(Ordering::SeqCst),
-        "chat.jsonl must be uploaded to Google Drive"
+        uploads
+            .iter()
+            .any(|(path, _)| path.file_name().and_then(|n| n.to_str()) == Some("chat.jsonl")),
+        "chat.jsonl must be uploaded via MockUploadBackend"
     );
-    assert!(
-        saw_drive_uploaded_log,
-        "Must emit Drive log for chat.jsonl upload"
-    );
+    assert!(saw_uploaded_log, "Must emit log for chat.jsonl upload");
 
     assert!(
         !chat_file_path.exists(),
