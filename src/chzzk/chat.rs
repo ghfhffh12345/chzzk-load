@@ -445,7 +445,7 @@ impl ChzzkChatClient {
             }
         }
 
-        let total = writer.flush_and_close().await?;
+        let (total, _) = writer.flush_and_close().await?;
         if let Some(ref tx) = on_stats {
             let _ = tx.try_send(total);
         }

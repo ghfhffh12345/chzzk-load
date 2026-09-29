@@ -6,15 +6,25 @@ use tokio::io::AsyncWriteExt;
 
 use crate::chzzk::models_chat::RecordedChatMessage;
 
-/// In-memory batched writer for live chat messages (`chat.jsonl`).
+/// In-memory batched writer for live chat messages (`chat_%04d.jsonl`).
 ///
 /// Designed to minimize disk I/O and extend flash memory / microSD longevity
 /// on single-board computers (SBCs) by using dual-trigger flushing:
 /// - Message count threshold (capacity_threshold)
 /// - Maximum buffered byte threshold (64 KB default)
 /// - Periodic time interval threshold (`maybe_flush_timer`)
+///
+/// Supports rotating output files aligned with stream chunk intervals,
+/// ensuring only non-empty intervals produce files on disk and sealed chunk paths
+/// are emitted for incremental cloud upload.
 pub struct ChatWriter {
-    target_path: PathBuf,
+    session_dir: PathBuf,
+    custom_target_path: Option<PathBuf>,
+    current_target_path: PathBuf,
+    chunk_index: usize,
+    chunk_duration: Duration,
+    chunk_start: Instant,
+    messages_in_current_chunk: u64,
     buffer: Vec<u8>,
     buffered_count: usize,
     capacity_threshold: usize,
@@ -26,10 +36,49 @@ pub struct ChatWriter {
 }
 
 impl ChatWriter {
-    /// Creates a new `ChatWriter` targeting `target_path`.
+    /// Creates a new `ChatWriter` targeting a single fixed `target_path`.
     pub fn new(target_path: PathBuf, flush_interval: Duration, capacity_threshold: usize) -> Self {
+        let session_dir = target_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+
         Self {
-            target_path,
+            session_dir,
+            current_target_path: target_path.clone(),
+            custom_target_path: Some(target_path),
+            chunk_index: 0,
+            chunk_duration: Duration::from_secs(365 * 24 * 3600), // effectively infinite
+            chunk_start: Instant::now(),
+            messages_in_current_chunk: 0,
+            buffer: Vec::with_capacity(64 * 1024),
+            buffered_count: 0,
+            capacity_threshold,
+            max_bytes_threshold: 64 * 1024, // 64 KB
+            flush_interval,
+            last_flush: Instant::now(),
+            total_written: 0,
+            dir_created: false,
+        }
+    }
+
+    /// Creates a rotating `ChatWriter` targeting `session_dir` with time-based chunks `chat_%04d.jsonl`.
+    pub fn new_rotating(
+        session_dir: PathBuf,
+        chunk_duration: Duration,
+        flush_interval: Duration,
+        capacity_threshold: usize,
+    ) -> Self {
+        let initial_target = session_dir.join("chat_0000.jsonl");
+        Self {
+            session_dir,
+            custom_target_path: None,
+            current_target_path: initial_target,
+            chunk_index: 0,
+            chunk_duration,
+            chunk_start: Instant::now(),
+            messages_in_current_chunk: 0,
             buffer: Vec::with_capacity(64 * 1024),
             buffered_count: 0,
             capacity_threshold,
@@ -48,9 +97,19 @@ impl ChatWriter {
         self
     }
 
-    /// Returns a reference to the destination path.
+    /// Returns a reference to the active destination path.
     pub fn target_path(&self) -> &Path {
-        &self.target_path
+        &self.current_target_path
+    }
+
+    /// Returns the current chunk index.
+    pub fn current_chunk_index(&self) -> usize {
+        self.chunk_index
+    }
+
+    /// Returns the file path for the current chunk.
+    pub fn current_chunk_path(&self) -> PathBuf {
+        self.current_target_path.clone()
     }
 
     /// Returns the total number of chat messages written to disk so far.
@@ -77,6 +136,7 @@ impl ChatWriter {
             .context("Failed to serialize RecordedChatMessage")?;
         self.buffer.push(b'\n');
         self.buffered_count += 1;
+        self.messages_in_current_chunk += 1;
 
         if self.buffered_count >= self.capacity_threshold
             || self.buffer.len() >= self.max_bytes_threshold
@@ -99,6 +159,36 @@ impl ChatWriter {
         }
     }
 
+    /// Checks if the current chunk duration interval has elapsed.
+    ///
+    /// If elapsed:
+    /// - Flushes any buffered messages to disk.
+    /// - If messages were written during this chunk, returns `Some(sealed_path)`.
+    /// - If 0 messages were received during this interval, skips file creation and returns `None`.
+    /// - Increments `chunk_index`, resets the timer, and updates `current_target_path`.
+    pub async fn maybe_rotate(&mut self) -> Result<Option<PathBuf>> {
+        if self.custom_target_path.is_some() || self.chunk_start.elapsed() < self.chunk_duration {
+            return Ok(None);
+        }
+
+        self.flush().await?;
+
+        let sealed = if self.messages_in_current_chunk > 0 {
+            Some(self.current_target_path.clone())
+        } else {
+            None
+        };
+
+        self.chunk_index += 1;
+        self.messages_in_current_chunk = 0;
+        self.chunk_start = Instant::now();
+        self.current_target_path = self
+            .session_dir
+            .join(format!("chat_{:04}.jsonl", self.chunk_index));
+
+        Ok(sealed)
+    }
+
     /// Flushes all buffered messages to the target file on disk.
     ///
     /// Appends each serialized message followed by a newline (`\n`).
@@ -111,13 +201,13 @@ impl ChatWriter {
 
         if !self.dir_created {
             if let Some(parent) = self
-                .target_path
+                .current_target_path
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
             {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+                tokio::fs::create_dir_all(parent).await.with_context(|| {
+                    format!("Failed to create directory {}", parent.display())
+                })?;
             }
             self.dir_created = true;
         }
@@ -125,9 +215,14 @@ impl ChatWriter {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.target_path)
+            .open(&self.current_target_path)
             .await
-            .with_context(|| format!("Failed to open chat file {}", self.target_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to open chat file {}",
+                    self.current_target_path.display()
+                )
+            })?;
 
         file.write_all(&self.buffer)
             .await
@@ -142,9 +237,14 @@ impl ChatWriter {
     }
 
     /// Flushes any lingering buffered messages and closes the writer,
-    /// returning the total number of messages written to disk across the entire session.
-    pub async fn flush_and_close(&mut self) -> Result<u64> {
+    /// returning the total number of messages written and the final chunk's path (if non-empty).
+    pub async fn flush_and_close(&mut self) -> Result<(u64, Option<PathBuf>)> {
         self.flush().await?;
-        Ok(self.total_written)
+        let sealed = if self.messages_in_current_chunk > 0 {
+            Some(self.current_target_path.clone())
+        } else {
+            None
+        };
+        Ok((self.total_written, sealed))
     }
 }
