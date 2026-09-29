@@ -19,10 +19,10 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 
 - ⚡ **Lossless Stream-Copy & Clean EOF (`-c copy`)**: Segments live HLS video streams into `.ts` chunks with zero CPU transcoding overhead. Omits reconnect flags to eliminate infinite HLS manifest EOF retry loops upon natural stream completion.
 - 🌐 **Direct CDN Stream Extraction (P2P/Grid Bypass)**: Automatically decodes base64-encoded `cdn_url` parameters from Chzzk `p2pPath` playlists, pulling direct 1080p/720p CDN HLS streams without requiring P2P or grid software.
-- 💬 **Real-Time Live Chat Recording (`chat.jsonl`)**: Simultaneously captures live chat via WebSocket into structured JSON Lines format, preserving timestamps, user nicknames, badges, donations/cheeses, and message text.
+- 💬 **Real-Time Live Chat Recording (`chat_%04d.jsonl`)**: Simultaneously captures live chat via WebSocket into structured JSON Lines format segmented into time-aligned chunks, preserving timestamps, user nicknames, badges, donations/cheeses, and message text.
 - 💽 **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD card and flash storage longevity on Single Board Computers (Raspberry Pi, ARM64) using in-memory byte buffering with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
 - 🏷️ **Dynamic Title Tracking & History Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically updates cloud storage via rclone in real-time.
-- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk simultaneously per active stream. Chunks and completed chat logs are permanently deleted immediately upon verified cloud upload.
+- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments and at most 1 chat chunk reside on disk simultaneously per active stream. Chunks are permanently deleted immediately upon verified cloud upload.
 - 🛡️ **N+1 Segment Boundary Safety**: Chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
 - ☁️ **Universal Cloud Storage Sync via Rclone**: Seamless cloud synchronization powered by [rclone](https://rclone.org/), supporting 70+ storage providers including Google Drive, OneDrive, Amazon S3, Dropbox, WebDAV, SFTP, and local paths. Runs in **local-only recording mode** when cloud sync is disabled (`remote_path: ""`).
 - 🔀 **Intra-Channel FIFO Serialization & Multi-Stream Concurrency**: Guarantees segments belonging to the same stream upload strictly in sequential order while uploading across different channels concurrently (up to `upload_concurrency`, default: 3).
@@ -106,7 +106,7 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 | `general.stream_cooldown_seconds` | `60` | Post-stream cooldown to avoid duplicate sessions from CDN caching. |
 | `general.recordings_dir` | `"recordings"` | Local folder for temporary video segments and chat logs. |
 | `general.min_free_disk_gb` | `2.0` | Minimum required free disk space in GB to continue recording. |
-| `general.record_chat` | `true` | Enable concurrent real-time live chat recording into `chat.jsonl`. |
+| `general.record_chat` | `true` | Enable concurrent real-time live chat recording into time-aligned `chat_%04d.jsonl` chunks. |
 | `general.chat_flush_interval_seconds` | `30` | Periodic timer interval in seconds to flush buffered chat messages to disk. |
 | `rclone.remote_path` | `"gdrive:Chzzk_Recordings"` | Destination remote and folder path in rclone format (`<remote>:<path>`). Set to `""` for **local-only recording mode**. |
 | `rclone.upload_concurrency` | `3` | Maximum number of concurrent channel upload streams (intra-channel uploads remain strictly serialized). |
@@ -119,7 +119,7 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 
 For Single Board Computers (such as a Raspberry Pi or ARM64 board running Linux from a microSD card), it is strongly recommended to set `recordings_dir` to a RAM disk (e.g. `/dev/shm/chzzk-load`), shorten `chunk_duration_seconds` to `120`, and limit `upload_concurrency` to `2`.
 
-Because `chzzk-load` maintains only 1–2 video segments locally and deletes them immediately upon confirmed cloud upload, using `/dev/shm` buffers temporary chunks in memory and uploads them directly to cloud storage, completely eliminating flash storage wear and protecting microSD card longevity:
+Because `chzzk-load` maintains only 1–2 video segments and active chat chunks locally and deletes them immediately upon confirmed cloud upload, using `/dev/shm` buffers temporary chunks in memory and uploads them directly to cloud storage, completely eliminating flash storage wear and protecting microSD card longevity:
 
 ```json
 {
@@ -171,7 +171,7 @@ Because `chzzk-load` maintains only 1–2 video segments locally and deletes the
 
 ## Cloud Storage Setup (rclone)
 
-If `remote_path` is left empty (`""`), `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files and `chat.jsonl` in `recordings_dir`.
+If `remote_path` is left empty (`""`), `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files and `chat_%04d.jsonl` chunks in `recordings_dir`.
 
 To enable automatic cloud storage upload:
 1. Install [rclone](https://rclone.org/downloads/) on your system:

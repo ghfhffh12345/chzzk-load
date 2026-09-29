@@ -205,9 +205,9 @@ impl ChatWriter {
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
             {
-                tokio::fs::create_dir_all(parent).await.with_context(|| {
-                    format!("Failed to create directory {}", parent.display())
-                })?;
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .with_context(|| format!("Failed to create directory {}", parent.display()))?;
             }
             self.dir_created = true;
         }

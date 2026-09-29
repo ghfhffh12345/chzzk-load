@@ -412,10 +412,10 @@ impl ChzzkChatClient {
                     }
                     _ = flush_timer.tick() => {
                         let _ = writer.maybe_flush_timer().await;
-                        if let Ok(Some(sealed_path)) = writer.maybe_rotate().await {
-                            if let Some(ref tx) = sealed_tx {
-                                let _ = tx.send(sealed_path).await;
-                            }
+                        if let (Ok(Some(sealed_path)), Some(tx)) =
+                            (writer.maybe_rotate().await, &sealed_tx)
+                        {
+                            let _ = tx.send(sealed_path).await;
                         }
                     }
                     msg = ws_reader.next() => {
@@ -474,10 +474,8 @@ impl ChzzkChatClient {
         }
 
         let (total, final_sealed) = writer.flush_and_close().await?;
-        if let Some(final_path) = final_sealed {
-            if let Some(ref tx) = sealed_tx {
-                let _ = tx.send(final_path).await;
-            }
+        if let (Some(final_path), Some(tx)) = (final_sealed, &sealed_tx) {
+            let _ = tx.send(final_path).await;
         }
         if let Some(ref tx) = on_stats {
             let _ = tx.try_send(total);

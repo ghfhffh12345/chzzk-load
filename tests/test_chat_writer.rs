@@ -162,7 +162,10 @@ async fn test_chat_writer_rotates_on_interval() {
     );
 
     assert_eq!(writer.current_chunk_index(), 0);
-    assert_eq!(writer.current_chunk_path(), temp_dir.join("chat_0000.jsonl"));
+    assert_eq!(
+        writer.current_chunk_path(),
+        temp_dir.join("chat_0000.jsonl")
+    );
 
     let msg1 = RecordedChatMessage {
         time_ms: 1000,
@@ -184,9 +187,14 @@ async fn test_chat_writer_rotates_on_interval() {
     let sealed0 = writer.maybe_rotate().await.unwrap();
     assert_eq!(sealed0, Some(temp_dir.join("chat_0000.jsonl")));
     assert_eq!(writer.current_chunk_index(), 1);
-    assert_eq!(writer.current_chunk_path(), temp_dir.join("chat_0001.jsonl"));
+    assert_eq!(
+        writer.current_chunk_path(),
+        temp_dir.join("chat_0001.jsonl")
+    );
 
-    let content0 = tokio::fs::read_to_string(temp_dir.join("chat_0000.jsonl")).await.unwrap();
+    let content0 = tokio::fs::read_to_string(temp_dir.join("chat_0000.jsonl"))
+        .await
+        .unwrap();
     assert_eq!(content0.lines().count(), 1);
 
     // Write message to chunk 1
@@ -246,7 +254,11 @@ async fn test_chat_writer_skips_empty_interval() {
     tokio::time::sleep(Duration::from_millis(70)).await;
     let sealed1 = writer.maybe_rotate().await.unwrap();
     assert_eq!(sealed1, None); // Skipped!
-    assert!(!tokio::fs::try_exists(temp_dir.join("chat_0001.jsonl")).await.unwrap_or(false));
+    assert!(
+        !tokio::fs::try_exists(temp_dir.join("chat_0001.jsonl"))
+            .await
+            .unwrap_or(false)
+    );
     assert_eq!(writer.current_chunk_index(), 2);
 
     // Interval 2: 1 message pushed.
@@ -266,7 +278,11 @@ async fn test_chat_writer_skips_empty_interval() {
     let (total, final_sealed) = writer.flush_and_close().await.unwrap();
     assert_eq!(total, 2);
     assert_eq!(final_sealed, Some(temp_dir.join("chat_0002.jsonl")));
-    assert!(tokio::fs::try_exists(temp_dir.join("chat_0002.jsonl")).await.unwrap_or(false));
+    assert!(
+        tokio::fs::try_exists(temp_dir.join("chat_0002.jsonl"))
+            .await
+            .unwrap_or(false)
+    );
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
@@ -287,7 +303,11 @@ async fn test_chat_writer_flush_and_close_with_lingering_messages() {
     let (total, final_sealed) = writer.flush_and_close().await.unwrap();
     assert_eq!(total, 0);
     assert_eq!(final_sealed, None);
-    assert!(!tokio::fs::try_exists(temp_dir.join("chat_0000.jsonl")).await.unwrap_or(false));
+    assert!(
+        !tokio::fs::try_exists(temp_dir.join("chat_0000.jsonl"))
+            .await
+            .unwrap_or(false)
+    );
 
     // Now push 1 message without rotating
     let msg = RecordedChatMessage {
@@ -306,7 +326,11 @@ async fn test_chat_writer_flush_and_close_with_lingering_messages() {
     let (total, final_sealed) = writer.flush_and_close().await.unwrap();
     assert_eq!(total, 1);
     assert_eq!(final_sealed, Some(temp_dir.join("chat_0000.jsonl")));
-    assert!(tokio::fs::try_exists(temp_dir.join("chat_0000.jsonl")).await.unwrap_or(false));
+    assert!(
+        tokio::fs::try_exists(temp_dir.join("chat_0000.jsonl"))
+            .await
+            .unwrap_or(false)
+    );
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }

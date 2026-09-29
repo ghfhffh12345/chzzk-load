@@ -378,4 +378,3 @@ async fn test_chat_client_emits_sealed_chunks() {
     let _ = server_task.await;
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
-

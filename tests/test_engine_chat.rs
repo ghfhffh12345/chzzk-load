@@ -311,7 +311,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
     orchestrator.spawn_recording_session("chan_local_chat".to_string(), info, upload_tx);
 
-    // Wait for the session dir to be created, then create a mock chat.jsonl to simulate captured chat
+    // Wait for the session dir to be created, then create a mock chat_0000.jsonl to simulate captured chat
     let mut session_dir_opt = None;
     for _ in 0..100 {
         if let Ok(mut entries) = tokio::fs::read_dir(&temp_dir).await {
@@ -452,10 +452,9 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     cancel_token.cancel();
 
     while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
-        if let AppEvent::RecordingEnded { ref channel_id } = ev {
-            if channel_id == "chan_backend_chat" {
-                break;
-            }
+        if matches!(ev, AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_backend_chat")
+        {
+            break;
         }
     }
 
@@ -466,7 +465,8 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
 
 #[tokio::test]
 async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
-    let temp_dir = std::env::temp_dir().join(format!("test_eng_chat_inc_{}", rand::random::<u32>()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_eng_chat_inc_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -477,39 +477,41 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     let ws_url = format!("ws://{addr}");
 
     let ws_handle = tokio::spawn(async move {
-        if let Ok((stream, _)) = listener.accept().await {
-            if let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await {
-                use futures_util::{SinkExt, StreamExt};
-                if let Some(Ok(_)) = ws.next().await {
-                    let resp = serde_json::json!({
-                        "cmd": 10100,
-                        "bdy": { "sid": "mock_session" }
-                    });
-                    let _ = ws
-                        .send(tokio_tungstenite::tungstenite::Message::Text(
-                            resp.to_string().into(),
-                        ))
-                        .await;
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+            return;
+        };
+        use futures_util::{SinkExt, StreamExt};
+        if let Some(Ok(_)) = ws.next().await {
+            let resp = serde_json::json!({
+                "cmd": 10100,
+                "bdy": { "sid": "mock_session" }
+            });
+            let _ = ws
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    resp.to_string().into(),
+                ))
+                .await;
 
-                    let chat_pkt = serde_json::json!({
-                        "cmd": 93101,
-                        "bdy": [{
-                            "msg": "Live stream chat chunk 0",
-                            "msgTime": 1727268158000u64,
-                            "msgTypeCode": 1,
-                            "profile": "{\"nickname\":\"Viewer\"}",
-                            "extras": "{}"
-                        }]
-                    });
-                    let _ = ws
-                        .send(tokio_tungstenite::tungstenite::Message::Text(
-                            chat_pkt.to_string().into(),
-                        ))
-                        .await;
+            let chat_pkt = serde_json::json!({
+                "cmd": 93101,
+                "bdy": [{
+                    "msg": "Live stream chat chunk 0",
+                    "msgTime": 1727268158000u64,
+                    "msgTypeCode": 1,
+                    "profile": "{\"nickname\":\"Viewer\"}",
+                    "extras": "{}"
+                }]
+            });
+            let _ = ws
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    chat_pkt.to_string().into(),
+                ))
+                .await;
 
-                    while let Some(Ok(_)) = ws.next().await {}
-                }
-            }
+            while let Some(Ok(_)) = ws.next().await {}
         }
     });
 
@@ -582,16 +584,12 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     loop {
         tokio::select! {
             Some(ev) = event_rx.recv() => {
-                if let AppEvent::UploadCompleted { ref chunk_name, .. } = ev {
-                    if chunk_name.starts_with("chat_") && chunk_name.ends_with(".jsonl") {
-                        saw_chunk_uploaded = true;
-                        cancel_token.cancel();
-                    }
+                if matches!(ev, AppEvent::UploadCompleted { ref chunk_name, .. } if chunk_name.starts_with("chat_") && chunk_name.ends_with(".jsonl")) {
+                    saw_chunk_uploaded = true;
+                    cancel_token.cancel();
                 }
-                if let AppEvent::RecordingEnded { ref channel_id } = ev {
-                    if channel_id == "chan_chat_inc" {
-                        break;
-                    }
+                if matches!(ev, AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_chat_inc") {
+                    break;
                 }
             }
             _ = &mut timeout => {
@@ -610,10 +608,12 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         "Expected at least one chat_*.jsonl uploaded to MockUploadBackend"
     );
 
-    assert!(saw_chunk_uploaded, "Must observe AppEvent::UploadCompleted for chat chunk");
+    assert!(
+        saw_chunk_uploaded,
+        "Must observe AppEvent::UploadCompleted for chat chunk"
+    );
 
     consumer_handle.abort();
     let _ = ws_handle.await;
     let _ = fs::remove_dir_all(&temp_dir);
 }
-

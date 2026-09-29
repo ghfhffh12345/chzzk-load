@@ -648,19 +648,12 @@ impl EngineOrchestrator {
                                 })
                                 .await;
 
-                                if send_res.is_ok() {
-                                    let _ = event_tx
-                                        .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{chunk_name} sealed. Pushed to cloud upload queue."
-                                        ))))
-                                        .await;
-                                } else {
-                                    let _ = event_tx
-                                        .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{chunk_name} sealed (saved locally)."
-                                        ))))
-                                        .await;
-                                }
+                            if send_res.is_ok() {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(format!(
+                                        "{chunk_name} sealed. Pushed to cloud upload queue."
+                                    ))))
+                                    .await;
                             } else {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
@@ -668,6 +661,13 @@ impl EngineOrchestrator {
                                     ))))
                                     .await;
                             }
+                        } else {
+                            let _ = event_tx
+                                .send(AppEvent::Log(LogEntry::rec(format!(
+                                    "{chunk_name} sealed (saved locally)."
+                                ))))
+                                .await;
+                        }
                     }
                 })
             };
@@ -721,7 +721,8 @@ impl EngineOrchestrator {
                             }
                         });
 
-                        let chunk_dur = Duration::from_secs(settings.general.chunk_duration_seconds);
+                        let chunk_dur =
+                            Duration::from_secs(settings.general.chunk_duration_seconds);
                         let mut client = ChzzkChatClient::new(
                             chat_cid,
                             access_token,
@@ -850,9 +851,10 @@ impl EngineOrchestrator {
                     {
                         chat_handle.abort();
                     }
-                    let chat_file = session_dir.join("chat.jsonl");
-                    if tokio::fs::try_exists(&chat_file).await.unwrap_or(false) {
-                        let _ = tokio::fs::remove_file(&chat_file).await;
+                    if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
+                        while let Ok(Some(entry)) = rd.next_entry().await {
+                            let _ = tokio::fs::remove_file(entry.path()).await;
+                        }
                     }
                     let _ = tokio::fs::remove_dir(&session_dir).await;
                     let mut active = active_recordings.lock().await;
@@ -1077,10 +1079,6 @@ impl EngineOrchestrator {
                 }
 
                 // Clean up session directory and any empty/partial files
-                let chat_file = session_dir.join("chat.jsonl");
-                if tokio::fs::try_exists(&chat_file).await.unwrap_or(false) {
-                    let _ = tokio::fs::remove_file(&chat_file).await;
-                }
                 if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
                     while let Ok(Some(entry)) = rd.next_entry().await {
                         let _ = tokio::fs::remove_file(entry.path()).await;
