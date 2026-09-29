@@ -737,9 +737,9 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
 }
 
 #[tokio::test]
-async fn test_process_sealed_chunk_no_drive_saves_locally() {
+async fn test_process_sealed_chunk_no_backend_saves_locally() {
     let temp_dir =
-        std::env::temp_dir().join(format!("test_chunk_no_drive_{}", rand::random::<u32>()));
+        std::env::temp_dir().join(format!("test_chunk_no_backend_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let chunk_path = temp_dir.join("chunk_0000.ts");
@@ -788,7 +788,7 @@ async fn test_process_sealed_chunk_no_drive_saves_locally() {
 }
 
 #[tokio::test]
-async fn test_process_sealed_chunk_retry_drive_success() {
+async fn test_process_sealed_chunk_backend_active_pushes_task() {
     let temp_dir =
         std::env::temp_dir().join(format!("test_chunk_retry_ok_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
@@ -832,7 +832,7 @@ async fn test_process_sealed_chunk_retry_drive_success() {
 }
 
 #[tokio::test]
-async fn test_process_sealed_chunk_retry_drive_failure() {
+async fn test_process_sealed_chunk_upload_channel_closed_saves_locally() {
     let temp_dir =
         std::env::temp_dir().join(format!("test_chunk_retry_fail_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
@@ -1234,7 +1234,7 @@ async fn test_engine_orchestrator_concurrent_uploads() {
 }
 
 #[tokio::test]
-async fn test_engine_orchestrator_stream_title_change_renames_drive_folder() {
+async fn test_engine_orchestrator_stream_title_change_uploads_title_history_text() {
     let chzzk_server = Server::http("127.0.0.1:0").unwrap();
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
 
@@ -2440,7 +2440,7 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
 }
 
 #[tokio::test]
-async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks_after_drive_rate_limit() {
+async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
     let chzzk_server = Server::http("127.0.0.1:0").unwrap();
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
 

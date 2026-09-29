@@ -1,8 +1,8 @@
 # chzzk-load
 
-High-performance standalone TUI application for monitoring, recording, and uploading Naver Chzzk livestreams directly to Google Drive in real-time.
+High-performance standalone TUI application for monitoring, recording, and uploading Naver Chzzk livestreams directly to cloud storage via rclone (or local disk) in real-time.
 
-Written in Rust for near-zero CPU and memory overhead, using FFmpeg stream-copy (`-c copy`) and chunked resumable Google Drive uploads.
+Written in Rust for near-zero CPU and memory overhead, using FFmpeg stream-copy (`-c copy`) and rclone cloud syncing.
 
 ---
 

@@ -252,9 +252,9 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
 }
 
 #[tokio::test]
-async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
+async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disabled() {
     let temp_dir =
-        std::env::temp_dir().join(format!("test_eng_chat_nodrive_{}", rand::random::<u32>()));
+        std::env::temp_dir().join(format!("test_eng_chat_nobackend_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let server = Server::http("127.0.0.1:0").unwrap();
@@ -294,7 +294,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
     let orchestrator = EngineOrchestrator::with_cancel_token(
         settings,
         chzzk,
-        None, // No Drive
+        None, // No upload backend
         event_tx,
         cancel_token.clone(),
     );
@@ -348,7 +348,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
 
     assert!(
         session_dir.join("chat.jsonl").exists(),
-        "chat.jsonl must remain saved locally when Google Drive is disabled"
+        "chat.jsonl must remain saved locally when upload backend is disabled"
     );
     assert!(
         session_dir.exists(),
@@ -361,7 +361,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_no_drive() {
 #[tokio::test]
 async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled() {
     let temp_dir =
-        std::env::temp_dir().join(format!("test_eng_chat_drive_{}", rand::random::<u32>()));
+        std::env::temp_dir().join(format!("test_eng_chat_backend_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
     let chzzk_server = Server::http("127.0.0.1:0").unwrap();
@@ -409,16 +409,16 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     );
 
     let info = LiveStreamInfo {
-        channel_id: "chan_drive_chat".to_string(),
+        channel_id: "chan_backend_chat".to_string(),
         live_id: Some(99994),
-        streamer_name: "DriveChatStreamer".to_string(),
-        title: "Drive Chat Title".to_string(),
+        streamer_name: "BackendChatStreamer".to_string(),
+        title: "Backend Chat Title".to_string(),
         hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
-        chat_channel_id: Some("chat_ch_drive".to_string()),
+        chat_channel_id: Some("chat_ch_backend".to_string()),
     };
 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
-    orchestrator.spawn_recording_session("chan_drive_chat".to_string(), info, upload_tx);
+    orchestrator.spawn_recording_session("chan_backend_chat".to_string(), info, upload_tx);
 
     // Condition-based wait for session directory to be created
     let mut session_dir_opt = None;
@@ -453,11 +453,11 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
         match ev {
             AppEvent::Log(ref entry)
-                if entry.contains("Uploaded & deleted 'chat.jsonl' for chan_drive_chat") =>
+                if entry.contains("Uploaded & deleted 'chat.jsonl' for chan_backend_chat") =>
             {
                 saw_uploaded_log = true;
             }
-            AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_drive_chat" => {
+            AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_backend_chat" => {
                 break;
             }
             _ => {}

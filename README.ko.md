@@ -7,9 +7,9 @@
 [![CI](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml/badge.svg)](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-네이버 치지직(Chzzk) 라이브 방송을 자동으로 감지하여 실시간 영상 및 라이브 채팅을 녹화하고 Google Drive로 동기화하는 고성능 독립 실행형 CLI 도구입니다. [Ratatui](https://github.com/ratatui/ratatui) 기반의 대화형 터미널 사용자 인터페이스(TUI)를 제공합니다.
+네이버 치지직(Chzzk) 라이브 방송을 자동으로 감지하여 실시간 영상 및 라이브 채팅을 녹화하고 클라우드 스토리지([rclone](https://rclone.org/) 연동)로 동기화하는 고성능 독립 실행형 CLI 도구입니다. [Ratatui](https://github.com/ratatui/ratatui) 기반의 대화형 터미널 사용자 인터페이스(TUI)를 제공합니다.
 
-`chzzk-load`는 방송 상태를 실시간 모니터링하며, FFmpeg 스트림 복사(`-c copy`)를 통해 원본 손실 없이 영상을 MPEG-TS 세그먼트로 분할 저장하고 WebSocket을 통해 실시간 라이브 채팅을 구조화된 JSON Lines(`chat.jsonl`) 형식으로 동시 수집합니다. 분할 완료된 영상 세그먼트와 채팅 로그는 백그라운드에서 Google Drive로 즉시 업로드되며, 업로드 성공이 확인되는 즉시 로컬 파일을 삭제하여 디스크 사용량을 최소한으로 엄격히 유지합니다.
+`chzzk-load`는 방송 상태를 실시간 모니터링하며, FFmpeg 스트림 복사(`-c copy`)를 통해 원본 손실 없이 영상을 MPEG-TS 세그먼트로 분할 저장하고 WebSocket을 통해 실시간 라이브 채팅을 구조화된 JSON Lines(`chat.jsonl`) 형식으로 동시 수집합니다. 분할 완료된 영상 세그먼트와 채팅 로그는 백그라운드에서 rclone을 통해 클라우드 스토리지로 즉시 업로드되며 (또는 로컬 전용 모드로 로컬에 보관), 업로드 성공이 확인되는 즉시 로컬 파일을 삭제하여 디스크 사용량을 최소한으로 엄격히 유지합니다.
 
 ![chzzk-load TUI 대시보드](assets/tui-preview.png)
 
@@ -21,10 +21,10 @@
 - 🌐 **직접 CDN 스트림 주소 자동 추출 (P2P/그리드 우회)**: 치지직 `p2pPath` 플레이리스트에 포함된 base64 인코딩 `cdn_url` 매개변수를 자동 디코딩하여, 별도의 그리드 소프트웨어 설치 없이 원본 화질(1080p, 720p 등)의 직접 CDN HLS 스트림을 수집합니다.
 - 💬 **실시간 라이브 채팅 녹화 (`chat.jsonl`)**: WebSocket을 통해 실시간 방송 채팅을 동시 수집하여 타임스탬프, 사용자 닉네임, 뱃지, 후원(치즈) 내역, 메시지 내용이 포함된 구조화된 JSON Lines 형식으로 저장합니다.
 - 💽 **플래시 수명 보호 배치 I/O (SBC 최적화)**: 라즈베리 파이(Raspberry Pi), ARM64 등 단일 보드 컴퓨터(SBC)의 microSD 및 플래시 메모리 수명을 보존하기 위해 바이트 버퍼 메모리 버퍼링 및 듀얼 트리거 플러시(500개 메시지 / 64KB 도달 또는 주기적 타이머)를 적용하여 디스크 쓰기 빈도를 최소화합니다.
-- 🏷️ **실시간 방송 제목 추적 및 폴더 동기화**: 방송 중 변경되는 방제를 자동으로 감지하여 `title_history.txt`에 기록하고, Google Drive의 폴더 이름을 최신 방제로 실시간 자동 갱신합니다.
+- 🏷️ **실시간 방송 제목 추적 및 변경 이력 동기화**: 방송 중 변경되는 방제를 자동으로 감지하여 `title_history.txt`에 기록하고, rclone을 통해 클라우드 스토리지의 방제 변경 이력을 실시간 자동 갱신합니다.
 - 💾 **엄격히 제한된 디스크 사용량**: 활성 스트림당 최대 1~2개의 세그먼트 파일만 로컬 디스크에 유지합니다. 클라우드 업로드 완료가 확인되는 즉시 영상 세그먼트와 채팅 로그 파일은 로컬에서 영구 삭제됩니다.
 - 🛡️ **N+1 세그먼트 경계 안전성**: $N$번째 청크는 다음 $N+1$번째 청크가 디스크에 생성(파일 크기 > 0)된 것이 확인된 후에만 업로드 큐로 전달되어, 불완전하거나 손상된 청크의 업로드를 원천 차단합니다.
-- ☁️ **안정적인 Google Drive 이어올리기 및 로컬 폴백**: Google Drive API v3 및 자동 PKCE OAuth2 인증을 통한 클라우드 실시간 전송을 지원합니다. 루트 폴더 캐싱 및 지수 백오프 재시도(HTTP 429 및 5xx 대응)를 갖추고 있으며, Google Drive 인증 설정이 없으면 자동으로 로컬 단독 녹화 모드로 동작합니다.
+- ☁️ **Rclone 기반 다양한 클라우드 스토리지 동기화**: [rclone](https://rclone.org/)과 연동하여 Google Drive, OneDrive, Amazon S3, Dropbox, WebDAV, SFTP 등 70여 개 이상의 다양한 클라우드 스토리지로 원활하게 전송합니다. 클라우드 동기화를 비활성화(`remote_path: ""`)하면 자동으로 **로컬 전용 녹화 모드**로 동작합니다.
 - 🔀 **채널별 순차 직렬화 & 다중 스트림 동시 업로드**: 동일 채널의 세그먼트는 순차(FIFO) 업로드를 보장하여 순서 꼬임과 대역폭 경합을 방지하며, 여러 채널 간에는 최대 `upload_concurrency`(기본값: 3)개까지 병렬 업로드합니다.
 - 🖥️ **이벤트 기반 터미널 대시보드 (TUI)**: `crossterm::event::EventStream` 기반의 비동기 이벤트 루프와 제로 메모리 할당 렌더링으로 유휴 CPU 점유율을 0으로 억제하며, 실시간 채널 상태, 방송 제목, 실시간 수집 채팅 수 카운터, 업로드 진행률 게이지, 전송 속도 지표, 헤더 요약 통계(활성 녹화 수, 누적 녹화 시간, 아카이브 용량), 로그 토글 기능(`l` 키), Windows 콘솔 UTF-8 코드페이지 자동 설정을 지원합니다.
 - 🔄 **CDN 캐시 지연 중복 방지 (Anti-Race)**: 방송 종료 후 쿨다운 적용 및 방송 고유 세션 ID(`live_id`) 추적을 통해 치지직 CDN 캐시 지연(10~30초)으로 인한 중복 세션 생성을 방지합니다.
@@ -34,9 +34,11 @@
 ## 사전 요구사항
 
 - **FFmpeg**: 시스템의 `PATH` 환경 변수에 등록되어 있어야 합니다 (또는 `CHZZK_LOAD_FFMPEG_BIN` 환경 변수로 실행 파일 경로 지정 가능).
+- **Rclone**: (로컬 전용 모드에서는 선택 사항, 클라우드 업로드 사용 시 필수) 시스템의 `PATH`에 등록되어 있어야 합니다 (또는 `settings.json`의 `rclone.rclone_bin` 또는 `CHZZK_LOAD_RCLONE_BIN` 환경 변수로 실행 파일 경로 지정 가능).
 
 ```bash
 ffmpeg -version
+rclone version
 ```
 
 ---
@@ -76,11 +78,11 @@ chzzk-load --config /path/to/my-settings.json
     "record_chat": true,
     "chat_flush_interval_seconds": 30
   },
-  "google_drive": {
-    "credentials_path": "credentials.json",
-    "token_path": "token.json",
-    "root_folder_name": "Chzzk_Recordings",
-    "upload_concurrency": 3
+  "rclone": {
+    "remote_path": "gdrive:Chzzk_Recordings",
+    "upload_concurrency": 3,
+    "rclone_bin": "rclone",
+    "extra_args": []
   },
   "chzzk": {
     "nid_aut": "",
@@ -106,10 +108,10 @@ chzzk-load --config /path/to/my-settings.json
 | `general.min_free_disk_gb` | `2.0` | 녹화를 계속하기 위해 필요한 최소 여유 디스크 공간(GB 단위). |
 | `general.record_chat` | `true` | `chat.jsonl` 파일로 실시간 라이브 채팅 동시 녹화 활성화 여부. |
 | `general.chat_flush_interval_seconds` | `30` | 메모리에 버퍼링된 채팅 메시지를 디스크로 플러시하는 주기(초 단위). |
-| `google_drive.credentials_path` | `"credentials.json"` | Google Cloud에서 발급받은 OAuth2 데스크톱 클라이언트 비밀번호 파일 경로. |
-| `google_drive.token_path` | `"token.json"` | 발급받은 OAuth2 인증 토큰이 자동 저장 및 갱신되는 파일 경로. |
-| `google_drive.root_folder_name` | `"Chzzk_Recordings"` | Google Drive 내에 녹화 파일들이 업로드될 루트 폴더 이름. |
-| `google_drive.upload_concurrency` | `3` | 채널 간 동시 업로드 가능한 최대 스트림 수 (동일 채널 내 청크는 엄격한 FIFO 순서로 직렬 업로드됨). |
+| `rclone.remote_path` | `"gdrive:Chzzk_Recordings"` | rclone 형식의 대상 원격지 및 경로 (`<원격지이름>:<경로>`). 빈 문자열(`""`)로 설정 시 **로컬 전용 녹화 모드**로 동작합니다. |
+| `rclone.upload_concurrency` | `3` | 채널 간 동시 업로드 가능한 최대 스트림 수 (동일 채널 내 청크는 엄격한 FIFO 순서로 직렬 업로드됨). |
+| `rclone.rclone_bin` | `"rclone"` | rclone 실행 파일의 경로 또는 명령어 이름. |
+| `rclone.extra_args` | `[]` | rclone 호출 시 전달할 추가 CLI 인자 목록 (예: `["--drive-chunk-size=64M"]`). |
 | `chzzk.nid_aut` / `nid_ses` | `""` | 연령 제한 또는 구독자 전용 방송 녹화를 위한 네이버 로그인 세션 쿠키 값 (선택 사항). |
 | `channels` | - | 모니터링할 치지직 채널 목록 (`id`: 채널 URL의 고유 식별자, `name`: TUI 표시용 이름). |
 
@@ -117,7 +119,7 @@ chzzk-load --config /path/to/my-settings.json
 
 microSD 카드를 사용하는 라즈베리 파이(Raspberry Pi) 및 ARM64 단일 보드 컴퓨터(SBC) 환경에서는 `recordings_dir`을 RAM 디스크(예: `/dev/shm/chzzk-load`)로 지정하고, 세그먼트 길이를 `120`초로 단축하며, `upload_concurrency`를 `2`로 설정하는 것을 적극 권장합니다.
 
-`chzzk-load`는 클라우드 업로드 성공 시 로컬 세그먼트를 즉시 삭제하여 활성 스트림당 1~2개의 세그먼트만 디스크에 유지하므로, `/dev/shm`을 임시 디렉터리로 사용하면 영상 세그먼트가 메모리에만 기록된 후 Google Drive로 직접 전송되어 microSD 및 플래시 메모리의 쓰기 수명 마모를 완전히 방지할 수 있습니다:
+`chzzk-load`는 클라우드 업로드 성공 시 로컬 세그먼트를 즉시 삭제하여 활성 스트림당 1~2개의 세그먼트만 디스크에 유지하므로, `/dev/shm`을 임시 디렉터리로 사용하면 영상 세그먼트가 메모리에만 기록된 후 클라우드 스토리지로 직접 전송되어 microSD 및 플래시 메모리의 쓰기 수명 마모를 완전히 방지할 수 있습니다:
 
 ```json
 {
@@ -130,11 +132,11 @@ microSD 카드를 사용하는 라즈베리 파이(Raspberry Pi) 및 ARM64 단�
     "record_chat": true,
     "chat_flush_interval_seconds": 30
   },
-  "google_drive": {
-    "credentials_path": "credentials.json",
-    "token_path": "token.json",
-    "root_folder_name": "Chzzk_Recordings",
-    "upload_concurrency": 2
+  "rclone": {
+    "remote_path": "gdrive:Chzzk_Recordings",
+    "upload_concurrency": 2,
+    "rclone_bin": "rclone",
+    "extra_args": []
   },
   "chzzk": {
     "nid_aut": "",
@@ -162,19 +164,27 @@ microSD 카드를 사용하는 라즈베리 파이(Raspberry Pi) 및 ARM64 단�
 | 환경 변수 | 설명 |
 | :--- | :--- |
 | `CHZZK_LOAD_FFMPEG_BIN` | FFmpeg 실행 파일의 사용자 지정 경로 (미설정 시 기본적으로 `PATH`의 `ffmpeg` 사용). |
+| `CHZZK_LOAD_RCLONE_BIN` | rclone 실행 파일의 사용자 지정 경로 (`rclone.rclone_bin` 및 `PATH`보다 우선 적용). |
 | `CHZZK_LOAD_BIN` | npm 런처 사용 시 실행할 네이티브 `chzzk-load` 바이너리의 사용자 지정 경로. |
 
 ---
 
-## Google Drive 연동 설정
+## 클라우드 스토리지 연동 설정 (rclone)
 
-Google Drive 인증 정보가 설정되지 않은 경우, `chzzk-load`는 자동으로 **로컬 전용 녹화 모드**로 전환되어 `recordings_dir`에 `.ts` 파일들과 `chat.jsonl` 파일을 보관합니다.
+`remote_path`를 빈 문자열(`""`)로 설정한 경우, `chzzk-load`는 자동으로 **로컬 전용 녹화 모드**로 동작하며 `.ts` 파일들과 `chat.jsonl` 파일을 `recordings_dir`에 보관하고 업로드 및 삭제를 진행하지 않습니다.
 
-Google Drive 자동 업로드를 활성화하려면:
-1. [Google Cloud Console](https://console.cloud.google.com/)에서 프로젝트를 생성하고 **Google Drive API**를 활성화합니다.
-2. **사용자 인증 정보** $\to$ **사용자 인증 정보 만들기** $\to$ **OAuth 클라이언트 ID**에서 애플리케이션 유형으로 **데스크톱 앱(Desktop App)**을 선택합니다.
-3. 생성된 클라이언트 비밀번호 JSON 파일을 다운로드하여 `credentials.json`으로 이름을 변경한 후, `settings.json`과 동일한 디렉터리에 배치합니다.
-4. `chzzk-load`를 실행합니다. 일회성 OAuth2 인증을 위한 브라우저 창이 자동으로 열립니다. 승인 완료 시 인증 토큰이 `token.json`에 자동 저장되며 이후 실행 시 자동으로 갱신됩니다.
+클라우드 스토리지 자동 업로드를 활성화하려면:
+1. 시스템에 [rclone](https://rclone.org/downloads/)을 설치합니다:
+   - **Windows**: `winget install Rclone.Rclone` 또는 `choco install rclone`
+   - **macOS**: `brew install rclone`
+   - **Linux**: `sudo apt install rclone` 또는 `curl https://rclone.org/install.sh | sudo bash`
+2. 터미널에서 `rclone config` 명령어를 실행하여 원하는 클라우드 스토리지 원격지(예: Google Drive의 경우 `gdrive`, OneDrive의 경우 `onedrive`, AWS S3의 경우 `s3` 등)를 대화형 안내에 따라 설정합니다.
+3. 원격지 연결 상태를 확인합니다:
+   ```bash
+   rclone lsd gdrive:
+   ```
+4. `settings.json`의 `remote_path` 항목에 대상 원격지 및 디렉터리 경로를 지정합니다 (예: `"remote_path": "gdrive:Chzzk_Recordings"` 또는 `"remote_path": "onedrive:Recordings"`).
+5. `chzzk-load`를 실행합니다. 프로그램 시작 시 rclone 원격지 연결을 자동으로 검증하고, 녹화 완료된 세그먼트를 클라우드로 실시간 전송합니다.
 
 ---
 

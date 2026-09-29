@@ -1,7 +1,7 @@
 {
   "name": "chzzk-load",
   "version": "0.5.2",
-  "description": "High-performance TUI for recording Naver Chzzk streams and streaming to Google Drive",
+  "description": "High-performance TUI for recording Naver Chzzk streams and syncing to cloud storage via rclone",
   "bin": {
     "chzzk-load": "./bin/chzzk-load.js"
   },
@@ -11,7 +11,8 @@
     "recorder",
     "livestream",
     "tui",
-    "google-drive",
+    "rclone",
+    "cloud-storage",
     "cli"
   ],
   "author": "ghfhffh12345",

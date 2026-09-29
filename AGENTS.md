@@ -6,7 +6,7 @@ Welcome to `chzzk-load`. This document serves as the primary technical specifica
 
 ## 1. Project Overview
 
-`chzzk-load` is a high-performance, standalone Rust application equipped with a modern Ratatui Terminal User Interface (TUI). It monitors Naver Chzzk live broadcasts, losslessly segments live video into MPEG-TS chunks via stream-copied FFmpeg (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat.jsonl`), concurrently uploads completed chunks and logs to Google Drive using resumable chunked uploads, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
+`chzzk-load` is a high-performance, standalone Rust application equipped with a modern Ratatui Terminal User Interface (TUI). It monitors Naver Chzzk live broadcasts, losslessly segments live video into MPEG-TS chunks via stream-copied FFmpeg (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat.jsonl`), concurrently uploads completed chunks and logs to cloud storage via rclone (or retains them locally in local-only mode), and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
 
 ### Key System Characteristics
 - **Standalone Binary**: Compiles directly into an independent executable (`chzzk-load.exe`) runnable without Cargo or external runtime environments (FFmpeg must be installed and available on `PATH`, or configured via `CHZZK_LOAD_FFMPEG_BIN`).
@@ -16,8 +16,8 @@ Welcome to `chzzk-load`. This document serves as the primary technical specifica
 - **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD and flash memory longevity on Single Board Computers (Raspberry Pi/ARM64) using an in-memory buffer (`ChatWriter`) with direct byte-buffer serialization and dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
 - **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk simultaneously per active stream. Chunks and completed chat logs are deleted immediately upon receiving an HTTP 200/201 upload confirmation.
 - **N+1 Segment Boundary Safety**: Chunk $N$ is only sealed and queued for upload after chunk $N+1$ exists on disk with file size $> 0$ bytes (or upon final stream termination), guaranteeing no partial chunks are uploaded.
-- **Dynamic Title Tracking & Folder Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically synchronizes Google Drive folder names in real time.
-- **Resilient Cloud Sync with Exponential Backoff**: Caches Google Drive root folder IDs, retries transient network errors and HTTP 429 rate limits with exponential backoff, and maintains a resilient `pending_chunks` fallback queue to prevent segment loss during transient outages.
+- **Dynamic Title Tracking & History Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically synchronizes cloud storage via `backend.upload_text` in real time.
+- **Universal Cloud Sync via Rclone**: Interfaces with `rclone` (supporting 70+ storage providers including Google Drive, OneDrive, S3, WebDAV, SFTP, etc.) with real-time transfer progress parsing, subprocess management, and clean local-only fallback when unconfigured.
 - **Anti-Race Cache Deduplication**: Protects against Chzzk CDN cache TTL delays (10–30s) by tracking finished broadcast `live_id`s and enforcing a post-recording cooldown to prevent duplicate sessions.
 - **Event-Driven Zero-Alloc TUI**: Employs `crossterm::event::EventStream` and event-driven redraw scheduling with zero-allocation borrowed log rendering and zero CPU spinning.
 
@@ -60,11 +60,11 @@ chzzk-load/
 │   │   ├── ffmpeg.rs         # Command builder (-extension_picky 0, clean EOF termination, CHZZK_LOAD_FFMPEG_BIN)
 │   │   ├── watcher.rs        # SegmentWatcher, N+1 chunk sealing logic, zero-alloc extension check
 │   │   └── chat_writer.rs    # ChatWriter: byte-buffer direct serializer with dual-trigger flush
-│   ├── drive.rs              # Google Drive module root
-│   ├── drive/                # Google Drive API v3 client & OAuth2
-│   │   ├── auth.rs           # DriveAuth: PKCE authorization flow, token refresh
-│   │   └── client.rs         # DriveClient: folder caching, exponential backoff retries, resumable uploads, rename
-│   ├── uploader.rs           # UploadTask, UploadWorker (upload-and-delete pipeline)
+│   ├── uploader.rs           # Upload module root & re-exports (UploadTask, UploadWorker, UploadBackend, RcloneBackend, MockUploadBackend)
+│   ├── uploader/             # Upload engine & backend implementations
+│   │   ├── backend.rs        # UploadBackend trait, MockUploadBackend, UploadProgressCallback
+│   │   ├── rclone.rs         # RcloneBackend: rclone subprocess execution, rcat text upload, progress parsing, check_connection
+│   │   └── worker.rs         # UploadWorker: per-channel FIFO serialization, fair cross-channel concurrency
 │   ├── engine.rs             # EngineOrchestrator: channel polling, sessions, rate-limit queue, upload consumer
 │   ├── tui.rs                # Ratatui Dashboard module root & re-exports
 │   └── tui/                  # Ratatui Dashboard
@@ -80,10 +80,9 @@ chzzk-load/
     ├── test_chzzk_client.rs
     ├── test_cli_smoke.rs
     ├── test_config.rs
-    ├── test_drive_auth.rs
-    ├── test_drive_uploader.rs
     ├── test_engine_chat.rs
     ├── test_engine_events.rs
+    ├── test_rclone_backend.rs
     ├── test_recorder_watcher.rs
     ├── test_tui_console.rs
     └── test_tui_state.rs
@@ -102,9 +101,9 @@ chzzk-load/
    - If valid and unrecorded, registers the channel into `active_recordings` and spawns `spawn_recording_session`.
 3. When the channel returns `status == "CLOSE"`:
    - Clears any `finished_sessions` tracking entry, resetting the channel for future broadcasts.
-4. **Non-Blocking Mutex Scoping & Rate-Limit Resiliency**:
-   - The orchestrator minimizes mutex hold times on `active_sessions` and `active_recordings`, releasing locks before issuing network requests (e.g. Drive folder creation or title sync).
-   - If Google Drive folder creation encounters transient 429 rate limits or errors, sealed chunks accumulate safely in an in-memory `pending_chunks` deque. Upon folder resolution or stream shutdown, all pending chunks are drained and dispatched to Drive, preventing segment loss.
+4. **Non-Blocking Mutex Scoping & Upload Dispatch**:
+   - The orchestrator minimizes mutex hold times on `active_sessions` and `active_recordings`, releasing locks before issuing network requests or upload operations.
+   - When a cloud upload backend is configured, sealed chunks are dispatched to the upload queue and streamed asynchronously. When running in local-only mode (`remote_path: ""`), sealed chunks remain preserved in the local session directory.
 
 ### 3.2. FFmpeg Recording & N+1 Watcher (`src/recorder/`)
 - `build_ffmpeg_command` spawns an independent FFmpeg child process with:
@@ -129,19 +128,14 @@ chzzk-load/
   6. **Flash Longevity Buffer (`ChatWriter`)**: Messages are serialized directly into a pre-allocated byte buffer (`Vec<u8>`) using `serde_json::to_writer`, avoiding intermediate string allocations. Buffered data is written to `<session_dir>/chat.jsonl` using dual-trigger flushing (500 messages or 64 KB capacity, or periodic timer interval `chat_flush_interval_seconds`). No per-message `fsync` is performed during streaming.
   7. On session cancellation or stream termination, flushes all remaining records, guaranteeing zero lost messages.
 
-### 3.4. Google Drive Upload Pipeline & Title History Sync (`src/drive/` & `src/uploader/`)
+### 3.4. Cloud Storage Upload Pipeline & Title History Sync (`src/uploader/`)
 - Sealed chunks are sent over an `mpsc::Sender<UploadTask>` channel to `spawn_upload_consumer_with_concurrency`.
-- **Per-Channel Serialization & Cross-Channel Concurrency**: To prevent uplink bandwidth contention, disk accumulation, and Google Drive segment ordering disruption, chunks belonging to the same channel are strictly serialized in FIFO order. Independent channels upload concurrently up to `upload_concurrency` (default: 3) using fair round-robin scheduling.
-- **Root Folder ID Caching**: Root folder lookups are executed once and cached, eliminating repetitive Drive API searches.
-- **Exponential Backoff Retries**: API operations and chunk streaming use `send_with_retry`, retrying up to 3 times with exponential backoff (`100ms * 2^(attempt-1)`) on HTTP 429 rate limits or transient 5xx errors.
-- **High-Throughput Streaming Buffer**: Resumable file streaming uses a buffer dynamically clamped between 64 KiB and 8 MiB (`(file_size as usize).clamp(64 * 1024, RESUMABLE_UPLOAD_BUFFER_SIZE)`) via `FramedRead`, eliminating thread-pool switching overhead and saturating uplink bandwidth on high-speed networks.
-- **Accurate MIME Types**: Sets `video/mp2t` for video segments, `application/x-ndjson` for `chat.jsonl`, and `text/plain; charset=UTF-8` for `title_history.txt`.
-- Drive subfolders are created lazily by `process_sealed_chunk` only when the first valid chunk is confirmed sealed.
-- **Stream Title History**: If the broadcast title changes during a session, the engine appends the timestamped change to `title_history.txt`, and asynchronously renames the Google Drive folder via `drive.rename_folder`.
-- Resumable upload initiates with a `POST /upload/drive/v3/files?uploadType=resumable` metadata request, obtaining a session URI.
-- The chunk byte stream is transmitted with progress tracking callbacks updating `AppEvent::UploadProgress`.
-- On HTTP 200/201 response, `tokio::fs::remove_file(&chunk_path)` executes immediately.
-- Upon recording session end, `chat.jsonl` is uploaded to the broadcast's Google Drive folder and deleted locally. If Drive is disabled, `chat.jsonl` is preserved on local disk.
+- **Per-Channel Serialization & Cross-Channel Concurrency**: To prevent uplink bandwidth contention, disk accumulation, and cloud storage segment ordering disruption, chunks belonging to the same channel are strictly serialized in FIFO order. Independent channels upload concurrently up to `upload_concurrency` (default: 3) using fair round-robin scheduling.
+- **Pluggable Upload Backend (`UploadBackend` Trait)**: Abstract interface defining `upload_file(&self, source_path, dest_remote, progress_tx)` and `upload_text(&self, content, dest_remote)`. Decouples engine orchestration from cloud storage mechanics, enabling unit testing via `MockUploadBackend`.
+- **Rclone Subprocess Integration (`RcloneBackend`)**: Runs `rclone copyto <local_file> <remote_path>/<session>/<filename> --progress` as an asynchronous child process (`tokio::process::Command`). Dynamically parses stdout progress strings (`Transferred: ... % / ... ETA ...`) and forwards updates to `AppEvent::UploadProgress`. Binary resolution respects `CHZZK_LOAD_RCLONE_BIN` before `settings.rclone.rclone_bin` (defaulting to `"rclone"`).
+- **Text Streaming via `rcat`**: Stream title history updates (`title_history.txt`) are uploaded directly from in-memory strings using `rclone rcat <dest_remote>`, avoiding temporary disk files.
+- **Immediate Post-Upload Deletion**: On exit status 0 from rclone, `tokio::fs::remove_file(&chunk_path)` executes immediately to preserve the bounded disk footprint.
+- **Local-Only Recording Mode**: When `remote_path` is empty (`""`), the engine skips cloud uploading, retaining all `.ts` segments and `chat.jsonl` in the local recordings folder.
 
 ### 3.5. Ratatui TUI Dashboard (`src/tui/`)
 - **Event-Driven Render Loop**: The main TUI event loop uses `crossterm::event::EventStream` and `tokio::select!` with biased selection. Rendering only executes when state actually changes (`needs_redraw = true`) or upon periodic 250ms animation ticks, eliminating idle CPU consumption.
@@ -232,6 +226,7 @@ cargo test
 cargo test --test test_engine_chat
 cargo test --test test_chat_client
 cargo test --test test_chat_writer
+cargo test --test test_rclone_backend
 cargo test --test test_engine_events
 cargo test --test test_engine_events test_engine_orchestrator_prevents_duplicate_session_race_condition
 
@@ -267,5 +262,6 @@ When implementing changes, AI agents must strictly preserve the following rules:
 8. **Non-Blocking Telemetry Backpressure**: Never block internal WebSocket reading or recording loops on TUI event channels (`try_send` should always be used for telemetry and stats reporting).
 9. **FFmpeg Binary Resolution**: `build_ffmpeg_command` must respect the `CHZZK_LOAD_FFMPEG_BIN` environment variable override before defaulting to `"ffmpeg"`.
 10. **Clean HLS Stream Termination (No Reconnect Flags)**: Never add `-reconnect` or `-reconnect_at_eof` flags to `build_ffmpeg_command`. Live HLS streams must terminate cleanly and promptly upon manifest EOF when the broadcast ends.
-11. **Non-Blocking Mutex Scoping in Engine**: Never hold the `active_sessions` or `active_recordings` mutex across asynchronous network I/O or Drive operations.
+11. **Non-Blocking Mutex Scoping in Engine**: Never hold the `active_sessions` or `active_recordings` mutex across asynchronous network I/O, backend uploads, or rclone operations.
+12. **Rclone Binary Resolution**: `RcloneBackend` must respect the `CHZZK_LOAD_RCLONE_BIN` environment variable override before falling back to `settings.rclone.rclone_bin` and `"rclone"` on `PATH`.
 

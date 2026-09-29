@@ -63,7 +63,7 @@ function createMockBinary(tempDir) {
       '  exit 0',
       'fi',
       'if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then',
-      '  echo "Real-time Chzzk stream recording and Google Drive syncing"',
+      '  echo "Real-time Chzzk stream recording and cloud storage syncing"',
       '  echo "Usage: chzzk-load [OPTIONS]"',
       '  exit 0',
       'fi',
@@ -94,7 +94,7 @@ fn main() {
         std::process::exit(0);
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Real-time Chzzk stream recording and Google Drive syncing");
+        println!("Real-time Chzzk stream recording and cloud storage syncing");
         println!("Usage: chzzk-load.exe [OPTIONS]");
         std::process::exit(0);
     }

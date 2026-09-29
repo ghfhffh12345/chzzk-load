@@ -7,9 +7,9 @@
 [![CI](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml/badge.svg)](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A high-performance, standalone tool for automated Naver Chzzk live stream recording, real-time live chat archiving, and Google Drive syncing, featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
+A high-performance, standalone tool for automated Naver Chzzk live stream recording, real-time live chat archiving, and cloud storage syncing (via [rclone](https://rclone.org/)), featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
 
-`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat.jsonl`), concurrently uploads completed chunks and logs to Google Drive, and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
+`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat.jsonl`), concurrently uploads completed chunks and logs to cloud storage via rclone (or keeps them locally in local-only mode), and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
 
 ![chzzk-load TUI Dashboard](assets/tui-preview.png)
 
@@ -21,10 +21,10 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 - 🌐 **Direct CDN Stream Extraction (P2P/Grid Bypass)**: Automatically decodes base64-encoded `cdn_url` parameters from Chzzk `p2pPath` playlists, pulling direct 1080p/720p CDN HLS streams without requiring P2P or grid software.
 - 💬 **Real-Time Live Chat Recording (`chat.jsonl`)**: Simultaneously captures live chat via WebSocket into structured JSON Lines format, preserving timestamps, user nicknames, badges, donations/cheeses, and message text.
 - 💽 **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD card and flash storage longevity on Single Board Computers (Raspberry Pi, ARM64) using in-memory byte buffering with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
-- 🏷️ **Dynamic Title Tracking & Folder Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically updates Google Drive folder names in real-time.
+- 🏷️ **Dynamic Title Tracking & History Sync**: Detects stream title changes during broadcasts, records them to `title_history.txt`, and automatically updates cloud storage via rclone in real-time.
 - 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments reside on disk simultaneously per active stream. Chunks and completed chat logs are permanently deleted immediately upon verified cloud upload.
 - 🛡️ **N+1 Segment Boundary Safety**: Chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
-- ☁️ **Resilient Google Drive Sync & Local Fallback**: Direct cloud upload via Google Drive API v3 with automatic PKCE OAuth2 authorization, root folder caching, and exponential backoff retries (HTTP 429 & 5xx). Runs in local-only recording mode if Google Drive credentials are omitted.
+- ☁️ **Universal Cloud Storage Sync via Rclone**: Seamless cloud synchronization powered by [rclone](https://rclone.org/), supporting 70+ storage providers including Google Drive, OneDrive, Amazon S3, Dropbox, WebDAV, SFTP, and local paths. Runs in **local-only recording mode** when cloud sync is disabled (`remote_path: ""`).
 - 🔀 **Intra-Channel FIFO Serialization & Multi-Stream Concurrency**: Guarantees segments belonging to the same stream upload strictly in sequential order while uploading across different channels concurrently (up to `upload_concurrency`, default: 3).
 - 🖥️ **Event-Driven Terminal Dashboard**: Powered by `crossterm::event::EventStream` with zero-allocation rendering, real-time channel states, live stream titles, chat message counters, upload progress gauges, transfer speed metrics, header statistics (active recordings, total duration, archived size), collapsible activity logs (`l` key), and native Windows UTF-8 console support.
 - 🔄 **Anti-Race Cache Protection**: Enforces post-recording cooldown and tracks broadcast session IDs to prevent duplicate recording triggers caused by CDN cache TTL delays.
@@ -34,9 +34,11 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 ## Prerequisites
 
 - **FFmpeg**: Must be installed and accessible on your system's `PATH` (or configured via the `CHZZK_LOAD_FFMPEG_BIN` environment variable).
+- **Rclone**: (Optional for local-only mode, required for cloud upload) Must be installed and accessible on your system's `PATH` (or configured via `settings.json` `rclone.rclone_bin` or the `CHZZK_LOAD_RCLONE_BIN` environment variable).
 
 ```bash
 ffmpeg -version
+rclone version
 ```
 
 ---
@@ -76,11 +78,11 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
     "record_chat": true,
     "chat_flush_interval_seconds": 30
   },
-  "google_drive": {
-    "credentials_path": "credentials.json",
-    "token_path": "token.json",
-    "root_folder_name": "Chzzk_Recordings",
-    "upload_concurrency": 3
+  "rclone": {
+    "remote_path": "gdrive:Chzzk_Recordings",
+    "upload_concurrency": 3,
+    "rclone_bin": "rclone",
+    "extra_args": []
   },
   "chzzk": {
     "nid_aut": "",
@@ -106,10 +108,10 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 | `general.min_free_disk_gb` | `2.0` | Minimum required free disk space in GB to continue recording. |
 | `general.record_chat` | `true` | Enable concurrent real-time live chat recording into `chat.jsonl`. |
 | `general.chat_flush_interval_seconds` | `30` | Periodic timer interval in seconds to flush buffered chat messages to disk. |
-| `google_drive.credentials_path` | `"credentials.json"` | Path to Google OAuth2 Desktop client secrets file. |
-| `google_drive.token_path` | `"token.json"` | Path to saved OAuth2 authorization tokens file. |
-| `google_drive.root_folder_name` | `"Chzzk_Recordings"` | Destination folder name created in Google Drive. |
-| `google_drive.upload_concurrency` | `3` | Maximum number of concurrent channel upload streams (intra-channel uploads remain strictly serialized). |
+| `rclone.remote_path` | `"gdrive:Chzzk_Recordings"` | Destination remote and folder path in rclone format (`<remote>:<path>`). Set to `""` for **local-only recording mode**. |
+| `rclone.upload_concurrency` | `3` | Maximum number of concurrent channel upload streams (intra-channel uploads remain strictly serialized). |
+| `rclone.rclone_bin` | `"rclone"` | Path or command name for the rclone executable. |
+| `rclone.extra_args` | `[]` | Optional extra CLI flags passed to rclone invocations (e.g. `["--drive-chunk-size=64M"]`). |
 | `chzzk.nid_aut` / `nid_ses` | `""` | Optional Naver session cookies for adult/subscriber-only streams. |
 | `channels` | - | List of monitored Chzzk channels (`id` from channel URL, `name` for display). |
 
@@ -117,7 +119,7 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 
 For Single Board Computers (such as a Raspberry Pi or ARM64 board running Linux from a microSD card), it is strongly recommended to set `recordings_dir` to a RAM disk (e.g. `/dev/shm/chzzk-load`), shorten `chunk_duration_seconds` to `120`, and limit `upload_concurrency` to `2`.
 
-Because `chzzk-load` maintains only 1–2 video segments locally and deletes them immediately upon confirmed cloud upload, using `/dev/shm` buffers temporary chunks in memory and uploads them directly to Google Drive, completely eliminating flash storage wear and protecting microSD card longevity:
+Because `chzzk-load` maintains only 1–2 video segments locally and deletes them immediately upon confirmed cloud upload, using `/dev/shm` buffers temporary chunks in memory and uploads them directly to cloud storage, completely eliminating flash storage wear and protecting microSD card longevity:
 
 ```json
 {
@@ -130,11 +132,11 @@ Because `chzzk-load` maintains only 1–2 video segments locally and deletes the
     "record_chat": true,
     "chat_flush_interval_seconds": 30
   },
-  "google_drive": {
-    "credentials_path": "credentials.json",
-    "token_path": "token.json",
-    "root_folder_name": "Chzzk_Recordings",
-    "upload_concurrency": 2
+  "rclone": {
+    "remote_path": "gdrive:Chzzk_Recordings",
+    "upload_concurrency": 2,
+    "rclone_bin": "rclone",
+    "extra_args": []
   },
   "chzzk": {
     "nid_aut": "",
@@ -162,19 +164,27 @@ Because `chzzk-load` maintains only 1–2 video segments locally and deletes the
 | Variable | Description |
 | :--- | :--- |
 | `CHZZK_LOAD_FFMPEG_BIN` | Custom path to the FFmpeg executable (defaults to `ffmpeg` on `PATH`). |
+| `CHZZK_LOAD_RCLONE_BIN` | Custom path to the rclone executable (overrides `rclone.rclone_bin` and system `PATH`). |
 | `CHZZK_LOAD_BIN` | Path override for the native `chzzk-load` binary when running via the npm launcher. |
 
 ---
 
-## Google Drive Setup
+## Cloud Storage Setup (rclone)
 
-If Google Drive credentials are not provided, `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files and `chat.jsonl` in `recordings_dir`.
+If `remote_path` is left empty (`""`), `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files and `chat.jsonl` in `recordings_dir`.
 
-To enable automatic Google Drive upload:
-1. In the [Google Cloud Console](https://console.cloud.google.com/), create a project and enable the **Google Drive API**.
-2. Under **Credentials** $\to$ **Create Credentials** $\to$ **OAuth Client ID**, select **Desktop App**.
-3. Download the client secrets JSON, rename it to `credentials.json`, and place it in the same directory as `settings.json`.
-4. Run `chzzk-load`. A browser window will open for one-time OAuth2 authorization. Tokens will be automatically saved to `token.json` and refreshed in future runs.
+To enable automatic cloud storage upload:
+1. Install [rclone](https://rclone.org/downloads/) on your system:
+   - **Windows**: `winget install Rclone.Rclone` or `choco install rclone`
+   - **macOS**: `brew install rclone`
+   - **Linux**: `sudo apt install rclone` or `curl https://rclone.org/install.sh | sudo bash`
+2. Run `rclone config` in your terminal to configure your desired cloud storage remote (e.g. `gdrive` for Google Drive, `onedrive` for Microsoft OneDrive, `s3` for AWS S3, etc.). Follow the interactive prompts provided by rclone.
+3. Test your remote connection:
+   ```bash
+   rclone lsd gdrive:
+   ```
+4. Set `remote_path` in `settings.json` to your target remote and destination folder (e.g. `"remote_path": "gdrive:Chzzk_Recordings"` or `"remote_path": "onedrive:Recordings"`).
+5. Run `chzzk-load`. The application will verify the rclone remote connection on startup and stream completed segments to your cloud storage.
 
 ---
 
