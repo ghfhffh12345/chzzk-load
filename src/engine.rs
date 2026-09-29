@@ -615,7 +615,7 @@ impl EngineOrchestrator {
                     let chzzk_chat = chzzk.clone();
                     let event_tx_chat = event_tx.clone();
                     let chat_cid_id = channel_id.clone();
-                    let chat_target_path = session_dir.join("chat.jsonl");
+                    let chat_session_dir = session_dir.clone();
                     let flush_sec = settings.general.chat_flush_interval_seconds;
 
                     Some(tokio::spawn(async move {
@@ -657,10 +657,12 @@ impl EngineOrchestrator {
                             }
                         });
 
+                        let chunk_dur = Duration::from_secs(settings.general.chunk_duration_seconds);
                         let mut client = ChzzkChatClient::new(
                             chat_cid,
                             access_token,
-                            chat_target_path,
+                            chat_session_dir,
+                            chunk_dur,
                             Duration::from_secs(flush_sec),
                             chat_session_cancel,
                         );
@@ -674,7 +676,7 @@ impl EngineOrchestrator {
                             ))))
                             .await;
 
-                        match client.run(Some(stats_tx)).await {
+                        match client.run(Some(stats_tx), None).await {
                             Ok(total_msgs) => {
                                 let _ = event_tx_chat
                                     .send(AppEvent::Log(LogEntry::chat(format!(

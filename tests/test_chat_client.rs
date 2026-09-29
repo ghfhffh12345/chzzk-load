@@ -67,12 +67,14 @@ async fn test_mock_websocket_handshake_and_chat_receiving() {
 
     let cancel_token = CancellationToken::new();
     let temp_dir = std::env::temp_dir().join(format!("test_ws_chat_{}", rand::random::<u32>()));
-    let chat_file = temp_dir.join("chat.jsonl");
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+    let chat_file = temp_dir.join("chat_0000.jsonl");
 
     let client = ChzzkChatClient::new(
         "mock_channel".to_string(),
         "mock_access_token".to_string(),
-        chat_file.clone(),
+        temp_dir.clone(),
+        Duration::from_secs(3600),
         Duration::from_millis(50),
         cancel_token.clone(),
     )
@@ -84,7 +86,7 @@ async fn test_mock_websocket_handshake_and_chat_receiving() {
         cancel_clone.cancel();
     });
 
-    let total = client.run(None).await.unwrap();
+    let total = client.run(None, None).await.unwrap();
     assert_eq!(total, 1);
 
     server_task.await.unwrap();
@@ -172,12 +174,14 @@ async fn test_handshake_failure_reconnects_with_backoff() {
     let cancel_token = CancellationToken::new();
     let temp_dir =
         std::env::temp_dir().join(format!("test_ws_reconnect_{}", rand::random::<u32>()));
-    let chat_file = temp_dir.join("chat.jsonl");
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+    let chat_file = temp_dir.join("chat_0000.jsonl");
 
     let client = ChzzkChatClient::new(
         "mock_channel".to_string(),
         "mock_access_token".to_string(),
-        chat_file.clone(),
+        temp_dir.clone(),
+        Duration::from_secs(3600),
         Duration::from_millis(50),
         cancel_token.clone(),
     )
@@ -190,7 +194,7 @@ async fn test_handshake_failure_reconnects_with_backoff() {
         cancel_clone.cancel();
     });
 
-    let total = client.run(None).await.unwrap();
+    let total = client.run(None, None).await.unwrap();
     assert_eq!(total, 1);
     assert_eq!(
         connection_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -247,12 +251,13 @@ async fn test_chat_telemetry_non_blocking_when_receiver_full() {
 
     let cancel_token = CancellationToken::new();
     let temp_dir = std::env::temp_dir().join(format!("test_ws_stats_{}", rand::random::<u32>()));
-    let chat_file = temp_dir.join("chat.jsonl");
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
 
     let client = ChzzkChatClient::new(
         "mock_channel".to_string(),
         "mock_access_token".to_string(),
-        chat_file.clone(),
+        temp_dir.clone(),
+        Duration::from_secs(3600),
         Duration::from_millis(50),
         cancel_token.clone(),
     )
@@ -268,9 +273,109 @@ async fn test_chat_telemetry_non_blocking_when_receiver_full() {
     });
 
     // Run must NOT block or deadlock even though stats_tx is saturated
-    let total = client.run(Some(stats_tx)).await.unwrap();
+    let total = client.run(Some(stats_tx), None).await.unwrap();
     assert_eq!(total, 10);
 
     let _ = server_task.await;
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
+
+#[tokio::test]
+async fn test_chat_client_emits_sealed_chunks() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{addr}");
+
+    let server_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+        // 1. Read CONNECT
+        let _ = ws.next().await.unwrap().unwrap();
+
+        // 2. Respond CONNECTED
+        let resp = serde_json::json!({
+            "cmd": 10100,
+            "bdy": { "sid": "session_test_xyz" }
+        });
+        ws.send(Message::Text(resp.to_string().into()))
+            .await
+            .unwrap();
+
+        // 3. Send message for chunk 0
+        let chat_packet = serde_json::json!({
+            "cmd": 93101,
+            "bdy": [
+                {
+                    "msg": "Chunk 0 message",
+                    "msgTime": 1727268158000u64,
+                    "msgTypeCode": 1,
+                    "profile": "{\"nickname\":\"Viewer0\"}",
+                    "extras": "{}"
+                }
+            ]
+        });
+        ws.send(Message::Text(chat_packet.to_string().into()))
+            .await
+            .unwrap();
+
+        // Wait a bit, then send message for chunk 1
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let chat_packet2 = serde_json::json!({
+            "cmd": 93101,
+            "bdy": [
+                {
+                    "msg": "Chunk 1 message",
+                    "msgTime": 1727268159000u64,
+                    "msgTypeCode": 1,
+                    "profile": "{\"nickname\":\"Viewer1\"}",
+                    "extras": "{}"
+                }
+            ]
+        });
+        ws.send(Message::Text(chat_packet2.to_string().into()))
+            .await
+            .unwrap();
+
+        // Drain until close
+        while let Some(Ok(_)) = ws.next().await {}
+    });
+
+    let cancel_token = CancellationToken::new();
+    let temp_dir = std::env::temp_dir().join(format!("test_ws_sealed_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    // 100ms chunk duration
+    let client = ChzzkChatClient::new(
+        "mock_channel".to_string(),
+        "mock_access_token".to_string(),
+        temp_dir.clone(),
+        Duration::from_millis(100),
+        Duration::from_millis(20),
+        cancel_token.clone(),
+    )
+    .with_custom_ws_url(ws_url);
+
+    let (sealed_tx, mut sealed_rx) = tokio::sync::mpsc::channel::<std::path::PathBuf>(10);
+
+    let cancel_clone = cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        cancel_clone.cancel();
+    });
+
+    let total = client.run(None, Some(sealed_tx)).await.unwrap();
+    assert_eq!(total, 2);
+
+    let chunk0 = sealed_rx.recv().await.expect("Expected chunk 0 sealed");
+    assert_eq!(chunk0, temp_dir.join("chat_0000.jsonl"));
+    assert!(tokio::fs::try_exists(&chunk0).await.unwrap_or(false));
+
+    let chunk1 = sealed_rx.recv().await.expect("Expected chunk 1 sealed");
+    assert_eq!(chunk1, temp_dir.join("chat_0001.jsonl"));
+    assert!(tokio::fs::try_exists(&chunk1).await.unwrap_or(false));
+
+    let _ = server_task.await;
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
