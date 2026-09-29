@@ -23,8 +23,9 @@ pub fn format_destination(remote_path: &str, remote_dir: &str, file_name: &str) 
 /// Statistics emitted by rclone in JSON log events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RcloneStats {
+    #[serde(default)]
     pub bytes: u64,
-    #[serde(rename = "totalBytes")]
+    #[serde(default, rename = "totalBytes")]
     pub total_bytes: u64,
     #[serde(default)]
     pub speed: f64,
@@ -100,6 +101,7 @@ impl RcloneBackend {
         remote_dest: &str,
     ) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(self.resolve_bin());
+        cmd.kill_on_drop(true);
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());
@@ -120,6 +122,7 @@ impl RcloneBackend {
     /// Builds a `tokio::process::Command` configured for `rclone rcat`.
     pub fn build_rcat_command(&self, remote_dest: &str) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(self.resolve_bin());
+        cmd.kill_on_drop(true);
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());
@@ -133,6 +136,7 @@ impl RcloneBackend {
     /// Builds a `tokio::process::Command` configured for `rclone lsf --max-depth 1`.
     pub fn build_check_command(&self) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(self.resolve_bin());
+        cmd.kill_on_drop(true);
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::piped());

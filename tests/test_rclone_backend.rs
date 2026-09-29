@@ -46,6 +46,17 @@ fn test_parse_rclone_log_progress() {
 }
 
 #[test]
+fn test_parse_rclone_log_omits_total_bytes() {
+    let json_line =
+        r#"{"level":"info","msg":"Transferred","stats":{"bytes":5242880,"speed":1048576.0}}"#;
+    let stats =
+        parse_rclone_log_line(json_line).expect("should parse stats when totalBytes is omitted");
+    assert_eq!(stats.bytes, 5242880);
+    assert_eq!(stats.total_bytes, 0);
+    assert!((stats.speed - 1048576.0).abs() < f64::EPSILON);
+}
+
+#[test]
 fn test_parse_rclone_log_non_json_or_notice() {
     // Plain text log line
     assert!(parse_rclone_log_line("2026/09/29 14:00:00 NOTICE: Config file not found").is_none());
