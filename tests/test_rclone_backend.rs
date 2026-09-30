@@ -77,6 +77,7 @@ fn test_rclone_backend_command_builder() {
         upload_concurrency: 3,
         rclone_bin: "rclone".to_string(),
         extra_args: vec!["--fast-list".to_string(), "--transfers=4".to_string()],
+        skip_connection_check: false,
     };
     let backend = RcloneBackend::new(config);
     let cmd = backend.build_copy_command(
@@ -108,6 +109,7 @@ fn test_rclone_backend_bin_resolution() {
         upload_concurrency: 2,
         rclone_bin: "custom_rclone".to_string(),
         extra_args: vec![],
+        skip_connection_check: false,
     };
     let backend = RcloneBackend::new(config);
     let backend_with_bin = backend.with_bin("explicit_rclone");
@@ -121,6 +123,7 @@ fn test_rclone_backend_rcat_command_builder() {
         upload_concurrency: 1,
         rclone_bin: "rclone".to_string(),
         extra_args: vec!["--drive-chunk-size=32M".to_string()],
+        skip_connection_check: false,
     };
     let backend = RcloneBackend::new(config);
     let cmd = backend.build_rcat_command("gdrive:Chzzk/session/metadata.jsonl");
@@ -142,6 +145,7 @@ fn test_rclone_backend_check_command_builder() {
         upload_concurrency: 1,
         rclone_bin: "rclone".to_string(),
         extra_args: vec!["--retries=1".to_string()],
+        skip_connection_check: false,
     };
     let backend = RcloneBackend::new(config);
     let cmd = backend.build_check_command();

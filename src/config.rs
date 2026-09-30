@@ -67,6 +67,8 @@ pub struct RcloneConfig {
     pub rclone_bin: String,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    #[serde(default = "default_skip_connection_check")]
+    pub skip_connection_check: bool,
 }
 
 fn default_remote_path() -> String {
@@ -78,6 +80,9 @@ fn default_upload_concurrency() -> usize {
 fn default_rclone_bin() -> String {
     "rclone".to_string()
 }
+fn default_skip_connection_check() -> bool {
+    false
+}
 
 impl Default for RcloneConfig {
     fn default() -> Self {
@@ -86,6 +91,7 @@ impl Default for RcloneConfig {
             upload_concurrency: default_upload_concurrency(),
             rclone_bin: default_rclone_bin(),
             extra_args: Vec::new(),
+            skip_connection_check: default_skip_connection_check(),
         }
     }
 }
@@ -123,6 +129,8 @@ remote_path = "remote:chzzk"
 upload_concurrency = 3
 # Path to rclone binary
 rclone_bin = "rclone"
+# Skip rclone connection check at startup
+skip_connection_check = false
 # Additional arguments passed to rclone child process
 extra_args = []
 

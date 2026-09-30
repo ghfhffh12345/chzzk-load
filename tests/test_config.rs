@@ -27,9 +27,22 @@ fn test_default_rclone_config() {
     assert_eq!(cfg.upload_concurrency, 3);
     assert_eq!(cfg.rclone_bin, "rclone");
     assert!(cfg.extra_args.is_empty());
+    assert!(!cfg.skip_connection_check);
 
     let settings = Settings::default();
     assert_eq!(settings.rclone, cfg);
+}
+
+#[test]
+fn test_rclone_config_skip_connection_check() {
+    let toml_data = r#"
+        remote_path = "gdrive:Chzzk"
+        skip_connection_check = true
+    "#;
+    let cfg: RcloneConfig =
+        toml::from_str(toml_data).expect("Failed to parse skip_connection_check rclone config");
+    assert_eq!(cfg.remote_path, "gdrive:Chzzk");
+    assert!(cfg.skip_connection_check);
 }
 
 #[test]

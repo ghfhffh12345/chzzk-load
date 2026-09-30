@@ -30,6 +30,11 @@ use chzzk_load::uploader::{RcloneBackend, UploadBackend};
 pub struct Cli {
     #[arg(short, long, help = "Path to dedicated settings.toml file")]
     pub config: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Skip rclone remote connection verification check at startup"
+    )]
+    pub skip_rclone_check: bool,
 }
 
 #[tokio::main]
@@ -53,27 +58,64 @@ async fn main() -> anyhow::Result<()> {
     let settings = Settings::load_or_create_default(&config_path)?;
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AppEvent>(1000);
+    let cancel_token = CancellationToken::new();
 
     // Initialize cloud upload backend if remote_path is configured
     let upload_backend: Option<Arc<dyn UploadBackend>> = if !settings.rclone.remote_path.is_empty()
     {
         let backend = Arc::new(RcloneBackend::new(settings.rclone.clone()));
-        match backend.check_connection().await {
-            Ok(()) => {
-                let _ = event_tx
-                    .send(AppEvent::Log(LogEntry::cloud(format!(
-                        "Rclone remote '{}' verified successfully",
-                        settings.rclone.remote_path
-                    ))))
-                    .await;
-            }
-            Err(e) => {
-                let _ = event_tx
-                    .send(AppEvent::Log(LogEntry::warn(format!(
-                        "Rclone remote connection check failed: {e}"
-                    ))))
-                    .await;
-            }
+        let should_skip = args.skip_rclone_check || settings.rclone.skip_connection_check;
+        if should_skip {
+            let _ = event_tx
+                .send(AppEvent::Log(LogEntry::cloud(
+                    "Rclone remote connection check skipped",
+                )))
+                .await;
+        } else {
+            let _ = event_tx
+                .send(AppEvent::Log(LogEntry::cloud(format!(
+                    "Verifying rclone remote '{}' in background...",
+                    settings.rclone.remote_path
+                ))))
+                .await;
+
+            let check_backend = backend.clone();
+            let check_event_tx = event_tx.clone();
+            let check_cancel_token = cancel_token.clone();
+            let check_remote_path = settings.rclone.remote_path.clone();
+
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = check_cancel_token.cancelled() => {
+                        // Shutdown requested before or during check
+                    }
+                    result = tokio::time::timeout(Duration::from_secs(10), check_backend.check_connection()) => {
+                        match result {
+                            Ok(Ok(())) => {
+                                let _ = check_event_tx
+                                    .send(AppEvent::Log(LogEntry::cloud(format!(
+                                        "Rclone remote '{check_remote_path}' verified successfully"
+                                    ))))
+                                    .await;
+                            }
+                            Ok(Err(e)) => {
+                                let _ = check_event_tx
+                                    .send(AppEvent::Log(LogEntry::warn(format!(
+                                        "Rclone remote connection check failed: {e}"
+                                    ))))
+                                    .await;
+                            }
+                            Err(_) => {
+                                let _ = check_event_tx
+                                    .send(AppEvent::Log(LogEntry::warn(format!(
+                                        "Rclone remote connection check timed out after 10s: '{check_remote_path}'"
+                                    ))))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            });
         }
         Some(backend)
     } else {
@@ -85,7 +127,6 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let cancel_token = CancellationToken::new();
     let chzzk = ChzzkClient::new(&settings.chzzk);
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings.clone(),

@@ -23,6 +23,10 @@ fn test_cli_help_flag() {
         "Help text should document config flag"
     );
     assert!(
+        stdout.contains("--skip-rclone-check"),
+        "Help text should document --skip-rclone-check flag"
+    );
+    assert!(
         stdout.contains("--help") && stdout.contains("-h"),
         "Help text should document help flag"
     );
