@@ -75,6 +75,20 @@ pub fn build_ffmpeg_command(
     )
 }
 
+/// Detects whether an FFmpeg stderr log line indicates an AES key 403 Forbidden or
+/// DRM permission denied error that occurs when recording restricted streams without
+/// authenticated Naver credentials.
+pub fn is_ffmpeg_key_forbidden_error(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    lower.contains("unable to open key file")
+        || (lower.contains("403 forbidden")
+            && (lower.contains("aes_key") || lower.contains("key file")))
+        || (lower.contains("aes_key")
+            && (lower.contains("access denied")
+                || lower.contains("permission denied")
+                || lower.contains("forbidden")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +163,42 @@ mod tests {
         let expected_bin =
             std::env::var("CHZZK_LOAD_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
         assert_eq!(std_cmd.get_program(), expected_bin.as_str());
+    }
+
+    #[test]
+    fn test_is_ffmpeg_key_forbidden_error() {
+        assert!(is_ffmpeg_key_forbidden_error(
+            "[crypto @ 0000021c321d2680] Unable to open key file https://example.com/aes_key"
+        ));
+        assert!(is_ffmpeg_key_forbidden_error(
+            "[crypto @ 0000021c321d2680] unable to open key file https://example.com/aes_key"
+        ));
+        assert!(is_ffmpeg_key_forbidden_error(
+            "\x1b[31m[crypto @ 0000021c321d2680] Unable to open key file https://example.com/aes_key\x1b[0m"
+        ));
+        assert!(is_ffmpeg_key_forbidden_error(
+            "[https @ 0000021c321d3340] HTTP error 403 Forbidden for https://example.com/aes_key"
+        ));
+        assert!(is_ffmpeg_key_forbidden_error(
+            "[https @ 0000021c321d3340] http error 403 forbidden for https://example.com/aes_key"
+        ));
+        assert!(is_ffmpeg_key_forbidden_error(
+            "[https @ 0000021c321d3340] HTTP error 403 Forbidden while reading key file"
+        ));
+        assert!(is_ffmpeg_key_forbidden_error(
+            "[crypto @ 0000021c321d2680] aes_key request failed: access denied"
+        ));
+        assert!(is_ffmpeg_key_forbidden_error(
+            "[crypto @ 0000021c321d2680] aes_key: Permission Denied"
+        ));
+        assert!(is_ffmpeg_key_forbidden_error(
+            "[crypto @ 0000021c321d2680] aes_key request returned forbidden"
+        ));
+        assert!(!is_ffmpeg_key_forbidden_error(
+            "[hls @ 0000021c321d1200] Opening 'chunk_0001.ts' for reading"
+        ));
+        assert!(!is_ffmpeg_key_forbidden_error(
+            "[https @ 0000021c321d3340] HTTP error 403 Forbidden for https://example.com/video_0001.m4v"
+        ));
     }
 }
