@@ -65,7 +65,13 @@ chzzk-load/
 │   │   ├── backend.rs        # UploadBackend trait, MockUploadBackend, UploadProgressCallback
 │   │   ├── rclone.rs         # RcloneBackend: rclone subprocess execution, rcat text upload, progress parsing, check_connection
 │   │   └── worker.rs         # UploadWorker: per-channel FIFO serialization, fair cross-channel concurrency
-│   ├── engine.rs             # EngineOrchestrator: channel polling, sessions, rate-limit queue, upload consumer
+│   ├── engine.rs             # EngineOrchestrator root & re-exports (ActiveSessionState, FinishedSession, EngineState)
+│   ├── engine/               # Orchestration engine submodules
+│   │   ├── cleanup.rs        # Session folder cleanup utilities (cleanup_empty_session_dirs)
+│   │   ├── dispatcher.rs     # Chunk sealing & upload dispatching (process_sealed_chunk, seal_and_enqueue_chunks)
+│   │   ├── recording.rs      # RecordingSession lifecycle runner, ffmpeg stderr monitor, watcher loop
+│   │   ├── session.rs        # ActiveSessionState & FinishedSession state management & metadata tracking
+│   │   └── state.rs          # EngineState synchronized shared state container
 │   ├── tui.rs                # Ratatui Dashboard module root & re-exports
 │   └── tui/                  # Ratatui Dashboard
 │       ├── app.rs            # App state, key event handling, channel list state, chat_count telemetry
