@@ -10,13 +10,13 @@ This specification details the complete deprecation and removal of `title_histor
 1. **Clean Deprecation of `title_history.txt`**: Completely replace `title_history.txt` with `metadata.jsonl` across local storage, cloud synchronization (`UploadBackend::upload_text`), documentation, and unit/integration tests.
 2. **Comprehensive State Transition Tracking**: Capture initial state (`INITIAL_STATE`) and all subsequent discrete changes (`METADATA_CHANGED`) across:
    - **Stream Identity & Classification**: Broadcast title (`live_title`), category type (`category_type`), category display value (`live_category_value`), category slug (`live_category`), and hashtags (`tags`).
-   - **Broadcaster & Channel Profile**: Broadcaster display name (`channel_name` / `streamer_name`), channel avatar URL (`channel_image_url`), and channel identifier (`channel_id`).
+   - **Broadcaster & Channel Profile**: Broadcaster display name (`channel_name` / `streamer_name`), channel avatar URL (`channel_image_url`), verified partner checkmark (`verified_mark`), and channel identifier (`channel_id`).
    - **Unified Access Gating (`access_tier`)**: A mutually exclusive enum representing the stream's primary authorization tier: `PUBLIC`, `ADULT_ONLY`, `CHEAT_KEY`, `CHANNEL_SUBSCRIPTION`, `NAVER_PLUS`, and `PAY_PER_VIEW`.
    - **Co-streaming & Watch Parties (`watch_party`)**: Track official watch-alongs (e.g. Asian Games, LCK, World Cup) including `watch_party_no`, `watch_party_tag`, `party_type`, and `paid_product_id`.
-   - **Platform Policies & Restrictions (`policies`)**: Geo-blocking (`kr_only_viewing`), platform moderation status (`playable_status`), DVR live rewind (`time_machine_active`), viewer clipping (`clip_active`), and TV app policies (`tv_app_viewing_policy_type`).
-   - **In-Game Rewards & Sponsorship**: Drops campaign identifier (`drops_campaign_no`) and sponsored stream disclosure (`paid_promotion`).
-   - **Chat Interaction Rules (`chat_rules`)**: Chat availability tiers (`chat_available_group`), follower duration requirements (`min_follower_minute`), and subscriber bypass rules (`allow_subscriber_in_follower_mode`).
-   - **Contextual Telemetry**: Instantaneous concurrent viewer count (`concurrent_user_count`) embedded inside each state snapshot.
+   - **Platform Policies & Restrictions (`policies`)**: Geo-blocking (`kr_only_viewing`), platform moderation status (`playable_status`), moderation violation code (`blind_type`), DVR live rewind (`time_machine_active`), viewer clipping (`clip_active`), and TV app policies (`tv_app_viewing_policy_type`).
+   - **In-Game Rewards, Loyalty & Sponsorship**: Drops campaign identifier (`drops_campaign_no`), Log Power viewer ranking active status (`log_power_active`), and sponsored stream disclosure (`paid_promotion`).
+   - **Chat Interaction Rules (`chat_rules`)**: Chat availability tiers (`chat_available_group`), identity condition (`chat_available_condition`), follower duration requirements (`min_follower_minute`), subscriber bypass rules (`allow_subscriber_in_follower_mode`), message slow mode cooldown (`chat_slow_mode_sec`), emote-only mode (`chat_emoji_mode`), and donation ranking visibility (`chat_donation_ranking_exposure`).
+   - **Contextual Telemetry & Lifecycle**: Official broadcast start and end timestamps (`open_date`, `close_date`), live thumbnail snapshot (`live_thumbnail_image_url`), default cover thumbnail (`default_thumbnail_image_url`), concurrent viewers (`concurrent_user_count`), and cumulative visits (`accumulate_count`) embedded inside each state snapshot.
 3. **Microsecond-Accurate Video Synchronization**: Every event records `stream_offset_ms`—the elapsed duration in milliseconds from the exact moment recording began (`std::time::Instant`)—enabling VOD replay players to seek and synchronize metadata changes directly against the video timeline ($O(1)$ random seek) without relying on chunk indices.
 4. **Self-Contained Snapshots with Field-Level Deltas**: Every event contains both a complete normalized state snapshot (`state`) and an explicit diff (`changes`) detailing which fields changed (`old` vs `new`).
 5. **Flash-Friendly & Zero-Allocation Streaming**:
@@ -86,6 +86,8 @@ pub struct BroadcastPolicies {
     pub kr_only_viewing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub playable_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blind_type: Option<String>,
     pub time_machine_active: bool,
     pub clip_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,8 +101,14 @@ pub struct ChatRulesState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_available_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_available_condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub min_follower_minute: Option<u32>,
     pub allow_subscriber_in_follower_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_slow_mode_sec: Option<u32>,
+    pub chat_emoji_mode: bool,
+    pub chat_donation_ranking_exposure: bool,
 }
 
 /// Complete normalized snapshot of broadcast state at a specific point in time.
@@ -110,11 +118,14 @@ pub struct StreamMetadataState {
     pub live_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_date: Option<String>,
     pub channel_id: String,
     #[serde(alias = "streamer_name")]
     pub channel_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_image_url: Option<String>,
+    pub verified_mark: bool,
     #[serde(alias = "title")]
     pub live_title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,10 +143,15 @@ pub struct StreamMetadataState {
     pub paid_promotion: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drops_campaign_no: Option<String>,
+    pub log_power_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "live_image_url")]
     pub live_thumbnail_image_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_thumbnail_image_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrent_user_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accumulate_count: Option<u64>,
 }
 ```
 
@@ -169,6 +185,8 @@ pub struct MetadataDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_name: Option<FieldDiff<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_mark: Option<FieldDiff<bool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub category_type: Option<FieldDiff<Option<CategoryType>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_category_value: Option<FieldDiff<Option<String>>>,
@@ -188,12 +206,15 @@ pub struct MetadataDelta {
     pub paid_promotion: Option<FieldDiff<bool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drops_campaign_no: Option<FieldDiff<Option<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_power_active: Option<FieldDiff<bool>>,
 }
 
 impl MetadataDelta {
     pub fn is_empty(&self) -> bool {
         self.live_title.is_none()
             && self.channel_name.is_none()
+            && self.verified_mark.is_none()
             && self.category_type.is_none()
             && self.live_category_value.is_none()
             && self.live_category.is_none()
@@ -204,6 +225,7 @@ impl MetadataDelta {
             && self.chat_rules.is_none()
             && self.paid_promotion.is_none()
             && self.drops_campaign_no.is_none()
+            && self.log_power_active.is_none()
     }
 }
 
@@ -237,6 +259,10 @@ impl StreamMetadataState {
         }
         if self.channel_name != new.channel_name {
             delta.channel_name = Some(FieldDiff::new(self.channel_name.clone(), new.channel_name.clone()));
+            changed = true;
+        }
+        if self.verified_mark != new.verified_mark {
+            delta.verified_mark = Some(FieldDiff::new(self.verified_mark, new.verified_mark));
             changed = true;
         }
         if self.category_type != new.category_type {
@@ -279,6 +305,10 @@ impl StreamMetadataState {
             delta.drops_campaign_no = Some(FieldDiff::new(self.drops_campaign_no.clone(), new.drops_campaign_no.clone()));
             changed = true;
         }
+        if self.log_power_active != new.log_power_active {
+            delta.log_power_active = Some(FieldDiff::new(self.log_power_active, new.log_power_active));
+            changed = true;
+        }
 
         if changed { Some(delta) } else { None }
     }
@@ -309,6 +339,8 @@ pub struct LiveDetailContent {
     #[serde(default)]
     pub open_date: Option<String>,
     #[serde(default)]
+    pub close_date: Option<String>,
+    #[serde(default)]
     pub category_type: Option<String>,
     #[serde(default)]
     pub live_category: Option<String>,
@@ -331,13 +363,25 @@ pub struct LiveDetailContent {
     #[serde(default)]
     pub chat_available_group: Option<String>,
     #[serde(default)]
+    pub chat_available_condition: Option<String>,
+    #[serde(default)]
     pub min_follower_minute: Option<u32>,
     #[serde(default)]
     pub allow_subscriber_in_follower_mode: Option<bool>,
     #[serde(default)]
+    pub chat_slow_mode_sec: Option<u32>,
+    #[serde(default)]
+    pub chat_emoji_mode: Option<bool>,
+    #[serde(default)]
+    pub chat_donation_ranking_exposure: Option<bool>,
+    #[serde(default)]
     pub live_image_url: Option<String>,
     #[serde(default)]
+    pub default_thumbnail_image_url: Option<String>,
+    #[serde(default)]
     pub concurrent_user_count: Option<u64>,
+    #[serde(default)]
+    pub accumulate_count: Option<u64>,
     #[serde(default)]
     pub watch_party_no: Option<i64>,
     #[serde(default)]
@@ -356,6 +400,10 @@ pub struct LiveDetailContent {
     pub membership_benefit_type: Option<String>,
     #[serde(default)]
     pub tv_app_viewing_policy_type: Option<String>,
+    #[serde(default)]
+    pub blind_type: Option<serde_json::Value>,
+    #[serde(default)]
+    pub log_power_active: Option<bool>,
 }
 ```
 
