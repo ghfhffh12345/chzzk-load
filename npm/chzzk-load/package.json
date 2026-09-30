@@ -1,6 +1,6 @@
 {
   "name": "chzzk-load",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "High-performance TUI for recording Naver Chzzk streams and syncing to cloud storage via rclone",
   "bin": {
     "chzzk-load": "./bin/chzzk-load.js"
@@ -29,10 +29,10 @@
     "node": ">=16.0.0"
   },
   "optionalDependencies": {
-    "chzzk-load-windows-x64": "0.7.0",
-    "chzzk-load-linux-x64": "0.7.0",
-    "chzzk-load-linux-arm64": "0.7.0",
-    "chzzk-load-darwin-x64": "0.7.0",
-    "chzzk-load-darwin-arm64": "0.7.0"
+    "chzzk-load-windows-x64": "0.8.0",
+    "chzzk-load-linux-x64": "0.8.0",
+    "chzzk-load-linux-arm64": "0.8.0",
+    "chzzk-load-darwin-x64": "0.8.0",
+    "chzzk-load-darwin-arm64": "0.8.0"
   }
 }
