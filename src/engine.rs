@@ -1589,7 +1589,7 @@ impl EngineOrchestrator {
                         })
                         .await;
                 }
-                Ok(LiveDetail::Close) => {
+                Ok(LiveDetail::Close { .. }) => {
                     // Channel reported CLOSE (offline)
                     if let Some(token) = self.session_cancel_tokens.lock().await.remove(&channel.id)
                     {
