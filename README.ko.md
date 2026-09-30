@@ -155,6 +155,208 @@ alias = "SampleStreamer"
 
 ---
 
+## 데이터 포맷 및 파일 규격
+
+각 녹화 세션은 `[{timestamp}] [{alias}] {streamer_name} - {title}` 형식의 전용 디렉터리를 생성하며, 무손실 영상 세그먼트, 시간 분할된 채팅 로그 및 방송 상태 전이 메타데이터 이벤트를 저장합니다:
+
+```
+recordings/
+└── [2026-09-30_140000] [StreamerAlias] StreamerName - Live Stream Title/
+    ├── chunk_0000.ts          # 영상 세그먼트 (무손실 MPEG-TS 스트림카피)
+    ├── chunk_0001.ts
+    ├── chat_0000.jsonl        # 채팅 로그 세그먼트 (JSON Lines)
+    ├── chat_0001.jsonl
+    └── metadata.jsonl         # 방송 메타데이터 상태 전이 및 비디오 싱크 타임라인
+```
+
+---
+
+### 1. 실시간 라이브 채팅 포맷 (`chat_%04d.jsonl`)
+
+WebSocket을 통해 수집된 라이브 채팅 메시지는 구조화된 JSON Lines 형식으로 직렬화되어, 영상 세그먼트 시간(`chunk_duration_seconds`)에 맞춰 순차적인 번호의 청크 파일(`chat_%04d.jsonl`)로 분할 저장됩니다.
+
+#### 필드 스키마
+
+| 필드 | 타입 | 설명 |
+| :--- | :--- | :--- |
+| `time_ms` | `number` | 치지직 서버에서 메시지가 전송된 Unix 밀리초 타임스탬프. |
+| `datetime` | `string` | 로컬 시간 기준 포맷팅 문자열 (`YYYY-MM-DD HH:mm:ss`). |
+| `msg_type` | `string` | 메시지 분류: `"TEXT"`, `"DONATION"`, `"SUBSCRIPTION"`, `"SYSTEM_MESSAGE"`, 또는 `"TYPE_{code}"`. |
+| `nickname` | `string` | 메시지 작성자의 닉네임. |
+| `user_id_hash` | `string \| null` | 치지직 API가 제공하는 익명화된 유저 ID 해시 값. |
+| `content` | `string` | 채팅 메시지 본문 텍스트. |
+| `donation_amount` | `number \| null` | 후원 치즈 수량 (`"DONATION"` 메시지일 때만 포함되며 일반 채팅은 `null`). |
+| `extras` | `object \| null` | 유저 뱃지, 구독 등급, 이모티콘 및 결제 상세 정보가 포함된 파싱된 JSON 객체. |
+| `raw` | `object` | 치지직 채팅 WebSocket 서버로부터 전달받은 전체 원본 JSON 페이로드. |
+
+#### 레코드 예시 (일반 채팅)
+
+```json
+{
+  "time_ms": 1790757912345,
+  "datetime": "2026-09-30 14:05:12",
+  "msg_type": "TEXT",
+  "nickname": "ChzzkViewer",
+  "user_id_hash": "a1b2c3d4e5f6789012345678abcdef01",
+  "content": "나이스 플레이!",
+  "donation_amount": null,
+  "extras": {
+    "chatType": "STREAMING",
+    "emojis": {},
+    "osType": "PC",
+    "streamingChannelId": "4c3b44869c9b1399723ec28ec236f736",
+    "userRoleCode": "common_user"
+  },
+  "raw": { "cmd": 93101, "bdy": [], "tid": "1" }
+}
+```
+
+#### 레코드 예시 (치즈 후원)
+
+```json
+{
+  "time_ms": 1790757920123,
+  "datetime": "2026-09-30 14:05:20",
+  "msg_type": "DONATION",
+  "nickname": "CheeseLover",
+  "user_id_hash": "b2c3d4e5f6a1789012345678abcdef02",
+  "content": "오늘 방송 화이팅! 1,000 치즈 후원합니다!",
+  "donation_amount": 1000,
+  "extras": {
+    "donationType": "CHAT",
+    "payAmount": 1000,
+    "payType": "CURRENCY"
+  },
+  "raw": { "cmd": 93102, "bdy": [], "tid": "2" }
+}
+```
+
+---
+
+### 2. 방송 메타데이터 및 동기화 타임라인 포맷 (`metadata.jsonl`)
+
+`metadata.jsonl`은 방송 중 일어나는 모든 상태 전이(방제 변경, 카테고리 전환, 같이보기, 시청 권한 등)를 밀리초 단위의 비디오 싱크 타임라인(`stream_offset_ms`)과 함께 기록하는 추가 전용(append-only) JSON Lines 이벤트 스트림입니다. 로컬 디스크 기록과 동시에 rclone(`rcat`)을 통해 클라우드 스토리지로 실시간 동기화됩니다.
+
+#### 이벤트 유형
+
+- **`INITIAL_STATE`**: 녹화 세션 시작 시 1회 기록(`stream_offset_ms: 0`), 방송의 초기 전체 스냅샷을 캡처합니다.
+- **`METADATA_CHANGED`**: 모니터링 중 추적 대상 필드가 변경될 때마다 발행되며, 변경된 필드의 diff(`changes`) 및 최신 전체 상태 스냅샷(`state`)을 담고 있습니다.
+
+#### 엔벨로프(Envelope) 스키마
+
+| 필드 | 타입 | 설명 |
+| :--- | :--- | :--- |
+| `version` | `number` | 스키마 버전 (`1`). |
+| `event` | `string` | 이벤트 구분 식별자: `"INITIAL_STATE"` 또는 `"METADATA_CHANGED"`. |
+| `timestamp` | `string` | ISO 8601 표준 UTC 타임스탬프 (`YYYY-MM-DDTHH:mm:ssZ`). |
+| `time_local` | `string` | 로컬 시간 기준 문자열 (`YYYY-MM-DD HH:mm:ss`). |
+| `stream_offset_ms`| `number` | 녹화 시작 시점으로부터 경과된 밀리초(ms) 단위 시간 (시작 시 `0`). MPEG-TS 비디오 타임라인과 밀리초 단위로 정확히 동기화됩니다. |
+| `changes` | `object \| null` | 필드 단위 변경 diff 객체 (`INITIAL_STATE`는 `null`). 변경된 각 항목별로 `{ "old": ..., "new": ... }` 쌍을 포함합니다. |
+| `state` | `object` | 상태 전이 발생 직후의 완전한 방송 상태 스냅샷. |
+
+#### 방송 상태 스냅샷 스키마 (`state`)
+
+| 필드 | 타입 | 설명 |
+| :--- | :--- | :--- |
+| `channel_id` | `string` | 모니터링 대상 치지직 채널 고유 ID. |
+| `channel_name` | `string` | 스트리머 채널 표시명. |
+| `live_title` | `string` | 방송 제목 (방제). |
+| `live_id` | `number \| null` | 방송 세션 고유 숫자 식별자 (liveId). |
+| `open_date` | `string \| null` | 치지직 API 기준 방송 시작 일시. |
+| `close_date` | `string \| null` | 방송 종료 일시 (방송 종료 시점에 입력됨). |
+| `channel_image_url` | `string \| null` | 스트리머 프로필 이미지 CDN URL. |
+| `verified_mark` | `boolean` | 공식 파트너 인증 마크 보유 여부. |
+| `category_type` | `string \| null` | 대분류 카테고리 (`"GAME"`, `"TALK"`, `"SPORTS"`, `"ETC"` 등). |
+| `live_category` | `string \| null` | 내부 카테고리 슬러그 (예: `"game"`, `"talk"`). |
+| `live_category_value`| `string \| null` | 상세 카테고리/게임 명칭 (예: `"Valorant"`, `"League of Legends"`). |
+| `tags` | `string[]` | 스트리머가 설정한 방송 태그 목록. |
+| `access_tier` | `string` | 상호 배타적 시청 권한 등급: `"PUBLIC"`, `"ADULT_ONLY"`, `"CHEAT_KEY"`, `"NAVER_PLUS"`, `"CHANNEL_SUBSCRIPTION"`, 또는 `"PAY_PER_VIEW"`. |
+| `policies` | `object` | 방송 시청 정책: `kr_only_viewing` (`bool`), `clip_active` (`bool`), `time_machine_active` (`bool`). |
+| `watch_party` | `object` | 같이보기 상태: `is_active` (`bool`), `no` (`number \| null`), `tag` (`string \| null`), `party_type` (`string \| null`), `paid_product_id` (`string \| null`). |
+| `chat_rules` | `object` | 채팅 제한 및 규칙: `chat_active` (`bool`), `chat_available_group` (`string \| null`), `chat_available_condition` (`string \| null`), `min_follower_minute` (`number \| null`), `allow_subscriber_in_follower_mode` (`bool`), `chat_slow_mode_sec` (`number \| null`), `chat_emoji_mode` (`bool`), `chat_donation_ranking_exposure` (`bool`). |
+| `paid_promotion` | `boolean` | 유료 광고/협찬 방송 고지 여부. |
+| `drops_campaign_no`| `string \| null` | 드롭스 캠페인이 활성화된 경우 해당 식별자. |
+| `log_power_active` | `boolean` | 치지직 로그 파워 연동 활성화 여부. |
+| `live_thumbnail_image_url` | `string \| null` | 실시간 라이브 미리보기 썸네일 CDN URL. |
+| `default_thumbnail_image_url` | `string \| null` | 채널 기본 썸네일 이미지 CDN URL. |
+| `concurrent_user_count` | `number \| null` | 이벤트 발생 시점의 실시간 시청자 수. |
+| `accumulate_count` | `number \| null` | 이벤트 발생 시점의 누적 시청자 수. |
+
+> [!TIP]
+> **디스크 및 네트워크 부하 방지**: 시청자 수(`concurrent_user_count`, `accumulate_count`)나 CDN 썸네일 토큰처럼 지속적으로 요동치는 텔레메트리 필드는 스냅샷에는 갱신되지만, `METADATA_CHANGED` 이벤트를 자체적으로 **트리거하지 않도록 설계**되어 불필요한 쓰기 오버헤드를 원천 차단합니다.
+
+#### 레코드 예시 (`METADATA_CHANGED`)
+
+```json
+{
+  "version": 1,
+  "event": "METADATA_CHANGED",
+  "timestamp": "2026-09-30T14:35:10Z",
+  "time_local": "2026-09-30 23:35:10",
+  "stream_offset_ms": 2110450,
+  "changes": {
+    "live_title": {
+      "old": "저녁 토크 및 소통 방송",
+      "new": "발로란트 시청자 참여전 시작!"
+    },
+    "category_type": {
+      "old": "TALK",
+      "new": "GAME"
+    },
+    "live_category_value": {
+      "old": "저녁 토크",
+      "new": "Valorant"
+    }
+  },
+  "state": {
+    "channel_id": "4c3b44869c9b1399723ec28ec236f736",
+    "channel_name": "SampleStreamer",
+    "channel_image_url": "https://nng-phinf.pstatic.net/...",
+    "verified_mark": true,
+    "live_title": "발로란트 시청자 참여전 시작!",
+    "live_id": 3829140,
+    "open_date": "2026-09-30 23:00:00",
+    "close_date": null,
+    "category_type": "GAME",
+    "live_category": "game",
+    "live_category_value": "Valorant",
+    "tags": ["발로란트", "FPS", "시참"],
+    "access_tier": "PUBLIC",
+    "policies": {
+      "kr_only_viewing": false,
+      "clip_active": true,
+      "time_machine_active": true
+    },
+    "watch_party": {
+      "is_active": false,
+      "no": null,
+      "tag": null,
+      "party_type": null,
+      "paid_product_id": null
+    },
+    "chat_rules": {
+      "chat_active": true,
+      "chat_available_group": null,
+      "chat_available_condition": null,
+      "min_follower_minute": null,
+      "allow_subscriber_in_follower_mode": false,
+      "chat_slow_mode_sec": null,
+      "chat_emoji_mode": false,
+      "chat_donation_ranking_exposure": true
+    },
+    "paid_promotion": false,
+    "drops_campaign_no": null,
+    "log_power_active": false,
+    "live_thumbnail_image_url": "https://livecloud-thumb.akamaized.net/...",
+    "default_thumbnail_image_url": "https://nng-phinf.pstatic.net/...",
+    "concurrent_user_count": 1840,
+    "accumulate_count": 8920
+  }
+}
+```
+
+---
+
 ## 환경 변수 안내
 
 | 환경 변수 | 설명 |

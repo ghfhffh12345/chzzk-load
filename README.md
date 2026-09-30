@@ -155,6 +155,208 @@ alias = "SampleStreamer"
 
 ---
 
+## Data Formats & File Specifications
+
+Each recording session generates a dedicated directory structured as `[{timestamp}] [{alias}] {streamer_name} - {title}` containing lossless video segments, chunked chat logs, and broadcast metadata events:
+
+```
+recordings/
+└── [2026-09-30_140000] [StreamerAlias] StreamerName - Live Stream Title/
+    ├── chunk_0000.ts          # Video segment (lossless MPEG-TS)
+    ├── chunk_0001.ts
+    ├── chat_0000.jsonl        # Chat log segment (JSON Lines)
+    ├── chat_0001.jsonl
+    └── metadata.jsonl         # Broadcast state transitions & sync timeline
+```
+
+---
+
+### 1. Live Chat Format (`chat_%04d.jsonl`)
+
+Live chat messages captured via WebSocket are serialized as structured JSON Lines into progressively numbered chunks (`chat_%04d.jsonl`), time-aligned with video segments (`chunk_duration_seconds`).
+
+#### Field Schema
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `time_ms` | `number` | Unix timestamp in milliseconds when the message was sent on Chzzk. |
+| `datetime` | `string` | Local timestamp formatted as `YYYY-MM-DD HH:mm:ss`. |
+| `msg_type` | `string` | Message category: `"TEXT"`, `"DONATION"`, `"SUBSCRIPTION"`, `"SYSTEM_MESSAGE"`, or `"TYPE_{code}"`. |
+| `nickname` | `string` | Display nickname of the message sender. |
+| `user_id_hash` | `string \| null` | Anonymized user ID hash provided by Chzzk API. |
+| `content` | `string` | Raw text content of the message. |
+| `donation_amount` | `number \| null` | Donated cheese amount (present for `"DONATION"` messages, `null` otherwise). |
+| `extras` | `object \| null` | Parsed JSON object containing user badges, subscription tier, emojis, and pay metadata. |
+| `raw` | `object` | Complete raw JSON envelope as delivered by the Chzzk WebSocket server. |
+
+#### Example Record (Standard Chat)
+
+```json
+{
+  "time_ms": 1790757912345,
+  "datetime": "2026-09-30 14:05:12",
+  "msg_type": "TEXT",
+  "nickname": "ChzzkViewer",
+  "user_id_hash": "a1b2c3d4e5f6789012345678abcdef01",
+  "content": "GG! Great play!",
+  "donation_amount": null,
+  "extras": {
+    "chatType": "STREAMING",
+    "emojis": {},
+    "osType": "PC",
+    "streamingChannelId": "4c3b44869c9b1399723ec28ec236f736",
+    "userRoleCode": "common_user"
+  },
+  "raw": { "cmd": 93101, "bdy": [], "tid": "1" }
+}
+```
+
+#### Example Record (Donation)
+
+```json
+{
+  "time_ms": 1790757920123,
+  "datetime": "2026-09-30 14:05:20",
+  "msg_type": "DONATION",
+  "nickname": "CheeseLover",
+  "user_id_hash": "b2c3d4e5f6a1789012345678abcdef02",
+  "content": "Cheering you on! Here is 1,000 cheese!",
+  "donation_amount": 1000,
+  "extras": {
+    "donationType": "CHAT",
+    "payAmount": 1000,
+    "payType": "CURRENCY"
+  },
+  "raw": { "cmd": 93102, "bdy": [], "tid": "2" }
+}
+```
+
+---
+
+### 2. Stream Metadata & Timeline Format (`metadata.jsonl`)
+
+`metadata.jsonl` tracks all broadcast state transitions across the lifetime of the stream with millisecond-accurate video timeline synchronization (`stream_offset_ms`). It is dual-written locally and updated in real time on cloud storage via `rclone rcat`.
+
+#### Event Types
+
+- **`INITIAL_STATE`**: Written once at stream startup (`stream_offset_ms: 0`), capturing the complete initial broadcast snapshot.
+- **`METADATA_CHANGED`**: Emitted whenever any tracked broadcast property changes (e.g. title update, category switch, watch party started, chat rules modified). Contains a `changes` diff alongside the updated `state` snapshot.
+
+#### Envelope Schema
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `version` | `number` | Schema version (`1`). |
+| `event` | `string` | Event discriminator: `"INITIAL_STATE"` or `"METADATA_CHANGED"`. |
+| `timestamp` | `string` | UTC timestamp in ISO 8601 format (`YYYY-MM-DDTHH:mm:ssZ`). |
+| `time_local` | `string` | Local timestamp formatted as `YYYY-MM-DD HH:mm:ss`. |
+| `stream_offset_ms`| `number` | Milliseconds elapsed since the recording session started (`0` at initial start). Syncs directly with video timestamps. |
+| `changes` | `object \| null` | Field diff object (`null` for `"INITIAL_STATE"`). Contains `{ "old": ..., "new": ... }` for each changed property. |
+| `state` | `object` | Complete snapshot of the broadcast state after the event occurred. |
+
+#### State Snapshot Schema (`state`)
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `channel_id` | `string` | Monitored Chzzk channel alphanumeric ID. |
+| `channel_name` | `string` | Streamer channel display name. |
+| `live_title` | `string` | Broadcast title. |
+| `live_id` | `number \| null` | Unique numeric broadcast session ID. |
+| `open_date` | `string \| null` | Stream start timestamp from Chzzk API. |
+| `close_date` | `string \| null` | Stream end timestamp (populated upon stream completion). |
+| `channel_image_url` | `string \| null` | Streamer profile picture CDN URL. |
+| `verified_mark` | `boolean` | Whether the streamer has an official verified partner mark. |
+| `category_type` | `string \| null` | Broad category classification (`"GAME"`, `"TALK"`, `"SPORTS"`, `"ETC"`, etc.). |
+| `live_category` | `string \| null` | Category slug identifier (e.g. `"game"`, `"talk"`). |
+| `live_category_value`| `string \| null` | Display category/game title (e.g. `"Valorant"`, `"League of Legends"`). |
+| `tags` | `string[]` | List of broadcast tags configured by the streamer. |
+| `access_tier` | `string` | Mutually exclusive access gating tier: `"PUBLIC"`, `"ADULT_ONLY"`, `"CHEAT_KEY"`, `"NAVER_PLUS"`, `"CHANNEL_SUBSCRIPTION"`, or `"PAY_PER_VIEW"`. |
+| `policies` | `object` | Broadcast access policies: `kr_only_viewing` (`bool`), `clip_active` (`bool`), `time_machine_active` (`bool`). |
+| `watch_party` | `object` | Watch party metadata: `is_active` (`bool`), `no` (`number \| null`), `tag` (`string \| null`), `party_type` (`string \| null`), `paid_product_id` (`string \| null`). |
+| `chat_rules` | `object` | Chat rules & restrictions: `chat_active` (`bool`), `chat_available_group` (`string \| null`), `chat_available_condition` (`string \| null`), `min_follower_minute` (`number \| null`), `allow_subscriber_in_follower_mode` (`bool`), `chat_slow_mode_sec` (`number \| null`), `chat_emoji_mode` (`bool`), `chat_donation_ranking_exposure` (`bool`). |
+| `paid_promotion` | `boolean` | Whether paid sponsorship/advertisement is declared. |
+| `drops_campaign_no`| `string \| null` | Identifier of active Drops campaign, if any. |
+| `log_power_active` | `boolean` | Whether Chzzk Log Power integration is active. |
+| `live_thumbnail_image_url` | `string \| null` | Live preview thumbnail CDN URL. |
+| `default_thumbnail_image_url` | `string \| null` | Channel default fallback thumbnail CDN URL. |
+| `concurrent_user_count` | `number \| null` | Concurrent live viewer count at the moment of the event. |
+| `accumulate_count` | `number \| null` | Cumulative total viewer count at the moment of the event. |
+
+> [!TIP]
+> **Change Detection & Anti-Churn**: Fluctuating telemetry counters (`concurrent_user_count`, `accumulate_count`) and CDN thumbnail query token changes are captured in snapshots but **do not trigger** `METADATA_CHANGED` events to prevent write churn.
+
+#### Example Record (`METADATA_CHANGED`)
+
+```json
+{
+  "version": 1,
+  "event": "METADATA_CHANGED",
+  "timestamp": "2026-09-30T14:35:10Z",
+  "time_local": "2026-09-30 23:35:10",
+  "stream_offset_ms": 2110450,
+  "changes": {
+    "live_title": {
+      "old": "Just Chatting and relaxing",
+      "new": "Switching to Valorant with viewers!"
+    },
+    "category_type": {
+      "old": "TALK",
+      "new": "GAME"
+    },
+    "live_category_value": {
+      "old": "Just Chatting",
+      "new": "Valorant"
+    }
+  },
+  "state": {
+    "channel_id": "4c3b44869c9b1399723ec28ec236f736",
+    "channel_name": "SampleStreamer",
+    "channel_image_url": "https://nng-phinf.pstatic.net/...",
+    "verified_mark": true,
+    "live_title": "Switching to Valorant with viewers!",
+    "live_id": 3829140,
+    "open_date": "2026-09-30 23:00:00",
+    "close_date": null,
+    "category_type": "GAME",
+    "live_category": "game",
+    "live_category_value": "Valorant",
+    "tags": ["Valorant", "FPS", "Viewers"],
+    "access_tier": "PUBLIC",
+    "policies": {
+      "kr_only_viewing": false,
+      "clip_active": true,
+      "time_machine_active": true
+    },
+    "watch_party": {
+      "is_active": false,
+      "no": null,
+      "tag": null,
+      "party_type": null,
+      "paid_product_id": null
+    },
+    "chat_rules": {
+      "chat_active": true,
+      "chat_available_group": null,
+      "chat_available_condition": null,
+      "min_follower_minute": null,
+      "allow_subscriber_in_follower_mode": false,
+      "chat_slow_mode_sec": null,
+      "chat_emoji_mode": false,
+      "chat_donation_ranking_exposure": true
+    },
+    "paid_promotion": false,
+    "drops_campaign_no": null,
+    "log_power_active": false,
+    "live_thumbnail_image_url": "https://livecloud-thumb.akamaized.net/...",
+    "default_thumbnail_image_url": "https://nng-phinf.pstatic.net/...",
+    "concurrent_user_count": 1840,
+    "accumulate_count": 8920
+  }
+}
+```
+
+---
+
 ## Environment Variables
 
 | Variable | Description |
