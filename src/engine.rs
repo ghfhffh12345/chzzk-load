@@ -2,14 +2,14 @@ use crate::app_path::resolve_path;
 use crate::chzzk::chat::ChzzkChatClient;
 use crate::chzzk::client::ChzzkClient;
 use crate::chzzk::models::{LiveDetail, LiveStreamInfo};
+use crate::chzzk::models_metadata::{
+    MetadataDelta, MetadataEvent, MetadataEventType, StreamMetadataState,
+};
 use crate::config::Settings;
 use crate::recorder::ffmpeg::{
     build_ffmpeg_command, build_ffmpeg_command_with_bin, sanitize_filename,
 };
 use crate::recorder::watcher::SegmentWatcher;
-use crate::chzzk::models_metadata::{
-    MetadataDelta, MetadataEvent, MetadataEventType, StreamMetadataState,
-};
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{ProgressCallback, UploadBackend, UploadTask, broadcast_identifier};
 use chrono::{Local, Utc};
@@ -2004,12 +2004,7 @@ mod tests {
 
     #[test]
     fn test_active_session_state_stable_folder_name() {
-        let mut session = test_session(
-            "2026-09-29_120000",
-            "Streamer",
-            None,
-            "Initial Title",
-        );
+        let mut session = test_session("2026-09-29_120000", "Streamer", None, "Initial Title");
         let initial_folder = session.folder_name();
         assert_eq!(
             initial_folder,
@@ -2026,12 +2021,7 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_with_alias() {
-        let session = test_session(
-            "2026-09-30_1100",
-            "Streamer",
-            Some("MyAlias"),
-            "My Stream",
-        );
+        let session = test_session("2026-09-30_1100", "Streamer", Some("MyAlias"), "My Stream");
         assert_eq!(
             session.folder_name(),
             "[2026-09-30_1100] [MyAlias] Streamer - My Stream"
@@ -2040,12 +2030,7 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_without_alias() {
-        let session = test_session(
-            "2026-09-30_1100",
-            "Streamer",
-            None,
-            "My Stream",
-        );
+        let session = test_session("2026-09-30_1100", "Streamer", None, "My Stream");
         assert_eq!(
             session.folder_name(),
             "[2026-09-30_1100] Streamer - My Stream"
@@ -2054,12 +2039,7 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_empty_alias_fallback() {
-        let session = test_session(
-            "2026-09-30_1100",
-            "Streamer",
-            Some("   "),
-            "My Stream",
-        );
+        let session = test_session("2026-09-30_1100", "Streamer", Some("   "), "My Stream");
         assert_eq!(
             session.folder_name(),
             "[2026-09-30_1100] Streamer - My Stream"
@@ -2082,12 +2062,7 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_dots_alias_fallback() {
-        let session = test_session(
-            "2026-09-30_1100",
-            "Streamer",
-            Some("..."),
-            "My Stream",
-        );
+        let session = test_session("2026-09-30_1100", "Streamer", Some("..."), "My Stream");
         assert_eq!(
             session.folder_name(),
             "[2026-09-30_1100] Streamer - My Stream"
@@ -2096,34 +2071,19 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_empty_title() {
-        let session = test_session(
-            "2026-09-30_1100",
-            "Streamer",
-            Some("MyAlias"),
-            "...",
-        );
+        let session = test_session("2026-09-30_1100", "Streamer", Some("MyAlias"), "...");
         assert_eq!(
             session.folder_name(),
             "[2026-09-30_1100] [MyAlias] Streamer"
         );
 
-        let session_no_alias = test_session(
-            "2026-09-30_1100",
-            "Streamer",
-            None,
-            "   ",
-        );
+        let session_no_alias = test_session("2026-09-30_1100", "Streamer", None, "   ");
         assert_eq!(session_no_alias.folder_name(), "[2026-09-30_1100] Streamer");
     }
 
     #[test]
     fn test_active_session_state_folder_name_empty_streamer() {
-        let session = test_session(
-            "2026-09-30_1100",
-            "...",
-            Some("MyAlias"),
-            "My Stream",
-        );
+        let session = test_session("2026-09-30_1100", "...", Some("MyAlias"), "My Stream");
         assert_eq!(
             session.folder_name(),
             "[2026-09-30_1100] [MyAlias] Unknown - My Stream"
@@ -2134,9 +2094,11 @@ mod tests {
     fn test_active_session_state_metadata_jsonl_formatting() {
         use crate::chzzk::models_metadata::{MetadataEventType, StreamMetadataState};
 
-        let mut initial_meta = StreamMetadataState::default();
-        initial_meta.channel_name = "TestStreamer".to_string();
-        initial_meta.live_title = "Initial Title".to_string();
+        let initial_meta = StreamMetadataState {
+            channel_name: "TestStreamer".to_string(),
+            live_title: "Initial Title".to_string(),
+            ..Default::default()
+        };
 
         let mut session = ActiveSessionState::new(
             "2026-09-30_140000".to_string(),
@@ -2146,7 +2108,10 @@ mod tests {
         );
 
         assert_eq!(session.metadata_history.len(), 1);
-        assert_eq!(session.metadata_history[0].event, MetadataEventType::InitialState);
+        assert_eq!(
+            session.metadata_history[0].event,
+            MetadataEventType::InitialState
+        );
         assert_eq!(session.metadata_history[0].stream_offset_ms, 0);
 
         let mut updated_meta = initial_meta.clone();
@@ -2154,7 +2119,10 @@ mod tests {
         let change = session.record_metadata_change(updated_meta);
         assert!(change.is_some());
         assert_eq!(session.metadata_history.len(), 2);
-        assert_eq!(session.metadata_history[1].event, MetadataEventType::MetadataChanged);
+        assert_eq!(
+            session.metadata_history[1].event,
+            MetadataEventType::MetadataChanged
+        );
 
         let jsonl = session.format_metadata_jsonl();
         let lines: Vec<&str> = jsonl.trim().lines().collect();

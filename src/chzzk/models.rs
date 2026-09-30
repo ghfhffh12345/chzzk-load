@@ -220,6 +220,7 @@ pub struct LiveStreamInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum LiveDetail {
     /// Stream is OPEN and media HLS URL is available for recording.
     Open(LiveStreamInfo),

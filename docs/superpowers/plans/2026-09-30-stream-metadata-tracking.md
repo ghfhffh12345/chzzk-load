@@ -81,7 +81,7 @@ flowchart TD
   - `MetadataEvent`: JSON line container with `version: u8`, `event: MetadataEventType`, `timestamp`, `time_local`, `stream_offset_ms`, `changes`, `state`
   - `deserialize_optional_string_or_number`: Serde helper for dynamic string/numeric fields
 
-- [ ] **Step 1: Write the failing unit tests for metadata models and delta computation**
+- [x] **Step 1: Write the failing unit tests for metadata models and delta computation**
 
 Create `tests/test_metadata_events.rs`:
 ```rust
@@ -228,12 +228,12 @@ fn test_deserialize_optional_string_or_number() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --test test_metadata_events`
 Expected: Compilation failure (`models_metadata` module not found).
 
-- [ ] **Step 3: Implement `src/chzzk/models_metadata.rs` and re-export in `src/chzzk.rs`**
+- [x] **Step 3: Implement `src/chzzk/models_metadata.rs` and re-export in `src/chzzk.rs`**
 
 Create `src/chzzk/models_metadata.rs`:
 ```rust
@@ -548,12 +548,12 @@ pub mod models_metadata;
 pub use models_metadata::*;
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test --test test_metadata_events`
 Expected: All 5 unit tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/chzzk/models_metadata.rs src/chzzk.rs tests/test_metadata_events.rs
@@ -578,7 +578,7 @@ git commit -m "feat(chzzk): implement metadata models and delta computation engi
   - Expanded `ChannelInfo`: `pub channel_image_url: Option<String>`, `pub verified_mark: Option<bool>`
   - Expanded `LiveDetailContent` deserializing all 2026 Chzzk fields.
 
-- [ ] **Step 1: Write unit tests for `resolve_access_tier` and `LiveDetailContent` expansion**
+- [x] **Step 1: Write unit tests for `resolve_access_tier` and `LiveDetailContent` expansion**
 
 In `tests/test_chzzk_client.rs`, add:
 ```rust
@@ -672,12 +672,12 @@ fn test_resolve_access_tier_precedence() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --test test_chzzk_client test_resolve_access_tier_precedence`
 Expected: Compilation failure (`resolve_access_tier` not found).
 
-- [ ] **Step 3: Update `src/chzzk/models.rs`, `src/chzzk/client.rs`, and test call-sites**
+- [x] **Step 3: Update `src/chzzk/models.rs`, `src/chzzk/client.rs`, and test call-sites**
 
 1. In `src/chzzk/models.rs`:
    - Expand `ChannelInfo`:
@@ -771,13 +771,13 @@ Expected: Compilation failure (`resolve_access_tier` not found).
      Pass `metadata` into `LiveStreamInfo { ..., metadata }`.
 3. In `tests/test_engine_chat.rs` (lines 106, 216, 296, 405, 576) and `tests/test_engine_events.rs` (lines 3384, 3551), add `metadata: Default::default()` to all `LiveStreamInfo` struct initializers.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cargo test --test test_chzzk_client`
 Run: `cargo test --test test_engine_chat`
 Expected: All tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/chzzk/models.rs src/chzzk/client.rs tests/test_chzzk_client.rs tests/test_engine_chat.rs tests/test_engine_events.rs
@@ -800,7 +800,7 @@ git commit -m "feat(chzzk): expand live detail models, implement access tier res
   - Dual-write on recording startup, polling transitions, and session termination.
   - Updates internal unit test `test_active_session_state_metadata_jsonl_formatting`.
 
-- [ ] **Step 1: Write internal unit test in `src/engine.rs`**
+- [x] **Step 1: Write internal unit test in `src/engine.rs`**
 
 Replace `test_active_session_state_title_history_formatting` with:
 ```rust
@@ -839,12 +839,12 @@ fn test_active_session_state_metadata_jsonl_formatting() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo test --lib test_active_session_state_metadata_jsonl_formatting`
 Expected: Compilation failure (`record_metadata_change` not found).
 
-- [ ] **Step 3: Implement `ActiveSessionState` and lifecycle dual-write in `src/engine.rs`**
+- [x] **Step 3: Implement `ActiveSessionState` and lifecycle dual-write in `src/engine.rs`**
 
 1. In `ActiveSessionState`:
    ```rust
@@ -940,12 +940,12 @@ Expected: Compilation failure (`record_metadata_change` not found).
      - Send `AppEvent::Log(LogEntry::rec(format!("[{}] Stream metadata changed. Updated 'metadata.jsonl'", channel.id)))`.
      - If `delta.live_title.is_some()`, send `AppEvent::ChannelUpdate`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cargo test --lib test_active_session_state_metadata_jsonl_formatting`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/engine.rs
@@ -967,7 +967,7 @@ git commit -m "feat(engine): transition ActiveSessionState to metadata_history a
 - Adds new transition test:
   - `test_engine_orchestrator_stream_category_and_watch_party_metadata_transition`
 
-- [ ] **Step 1: Write/Update integration tests in `tests/test_engine_events.rs`**
+- [x] **Step 1: Write/Update integration tests in `tests/test_engine_events.rs`**
 
 Update `test_engine_orchestrator_stream_title_change_uploads_title_history_text`:
 - Assert `mock_backend.texts` contains `("metadata.jsonl", content)`.
@@ -983,13 +983,13 @@ Add `test_engine_orchestrator_stream_category_and_watch_party_metadata_transitio
 - Poll 2: Valorant game category + Watch party 520 ("2026아시안게임").
 - Verify `metadata.jsonl` contains `changes.category_type`, `changes.live_category_value`, and `changes.watch_party`.
 
-- [ ] **Step 2: Run integration tests to verify they pass**
+- [x] **Step 2: Run integration tests to verify they pass**
 
 Run: `cargo test --test test_engine_events test_engine_orchestrator_stream_metadata`
 Run: `cargo test --test test_engine_events test_engine_orchestrator_stream_category_and_watch_party`
 Expected: All tests pass.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/test_engine_events.rs
@@ -1010,25 +1010,25 @@ git commit -m "test(engine): migrate title_history tests to metadata.jsonl and a
 - Replaces `"gdrive:Chzzk/session/title_history.txt"` in `tests/test_rclone_backend.rs` with `"gdrive:Chzzk/session/metadata.jsonl"`.
 - Updates `examples/preview.rs` log output.
 
-- [ ] **Step 1: Update backend tests and preview example**
+- [x] **Step 1: Update backend tests and preview example**
 
 1. In `src/uploader/backend.rs`: Replace `"title_history.txt"` with `"metadata.jsonl"`.
 2. In `tests/test_rclone_backend.rs`: Replace `"title_history.txt"` with `"metadata.jsonl"`.
 3. In `examples/preview.rs`: Replace `"title_history.txt"` with `"metadata.jsonl"`.
 
-- [ ] **Step 2: Run verification search for any remaining `title_history` occurrences**
+- [x] **Step 2: Run verification search for any remaining `title_history` occurrences**
 
 Run: `git grep -n "title_history"`
 Expected: Zero occurrences in `src/`, `tests/`, or `examples/` (only historical references in `docs/superpowers/specs/` from prior features).
 
-- [ ] **Step 3: Run full test suite and clippy**
+- [x] **Step 3: Run full test suite and clippy**
 
 Run: `cargo test --all-targets`
 Run: `cargo clippy --all-targets -- -D warnings`
 Run: `cargo fmt --check`
 Expected: All tests pass with zero warnings and correct formatting.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/uploader/backend.rs tests/test_rclone_backend.rs examples/preview.rs
@@ -1045,30 +1045,30 @@ git commit -m "refactor: complete deprecation of title_history.txt across backen
 - Modify: `AGENTS.md`
 - Modify: `docs/superpowers/plans/2026-09-30-stream-metadata-tracking.md`
 
-- [ ] **Step 1: Update README.md and README.ko.md**
+- [x] **Step 1: Update README.md and README.ko.md**
 
 Update the feature list to describe `metadata.jsonl`:
 - English: "📊 **Stream Metadata Event Tracking (`metadata.jsonl`)**: Tracks all broadcast state transitions (title, category, tags, access tier, watch parties, policies, chat rules) with millisecond-accurate video synchronization, uploaded to cloud storage in real time."
 - Korean: "📊 **실시간 방송 메타데이터 이벤트 추적 (`metadata.jsonl`)**: 방송 중 변경되는 모든 상태 전이(방제, 카테고리, 태그, 시청 권한 등급, 같이보기, 방송 정책, 채팅 규칙)를 밀리초 단위의 비디오 싱크와 함께 `metadata.jsonl`에 기록하고 실시간 클라우드 동기화를 지원합니다."
 
-- [ ] **Step 2: Update AGENTS.md**
+- [x] **Step 2: Update AGENTS.md**
 
 - Section 1 (Project Overview): Replace `title_history.txt` bullet with `Stream Metadata Event Tracking (metadata.jsonl)`.
 - Section 3.4 (Cloud Storage Upload Pipeline & Title History Sync): Rename heading and document `metadata.jsonl` dual-write and `rcat` streaming.
 - Section 6 (Architectural Invariants for Agents): Add invariant for `metadata.jsonl` stream offset monotonicity and telemetry exclusion from delta triggers.
 
-- [ ] **Step 3: Synchronize `docs/superpowers/plans/2026-09-30-stream-metadata-tracking.md`**
+- [x] **Step 3: Synchronize `docs/superpowers/plans/2026-09-30-stream-metadata-tracking.md`**
 
 Ensure `docs/superpowers/plans/2026-09-30-stream-metadata-tracking.md` reflects this exact, approved plan.
 
-- [ ] **Step 4: Final validation**
+- [x] **Step 4: Final validation**
 
 Run: `cargo test --all-targets`
 Run: `cargo clippy --all-targets -- -D warnings`
 Run: `cargo fmt --check`
 Run: `node scripts/test-npm-packages.js`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add README.md README.ko.md AGENTS.md docs/superpowers/plans/2026-09-30-stream-metadata-tracking.md

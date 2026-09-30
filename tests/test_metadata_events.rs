@@ -1,6 +1,6 @@
 use chzzk_load::chzzk::models_metadata::{
-    BroadcastPolicies, CategoryType, ChatRulesState, MetadataEvent,
-    MetadataEventType, StreamAccessTier, StreamMetadataState, WatchPartyState,
+    BroadcastPolicies, CategoryType, ChatRulesState, MetadataEvent, MetadataEventType,
+    StreamAccessTier, StreamMetadataState, WatchPartyState,
 };
 
 fn sample_metadata_state() -> StreamMetadataState {
@@ -72,8 +72,14 @@ fn test_metadata_delta_computation_title_and_category_change() {
     let delta = state1.compute_delta(&state2).expect("delta must exist");
     assert_eq!(delta.live_title.as_ref().unwrap().old, "Initial Title");
     assert_eq!(delta.live_title.as_ref().unwrap().new, "New Game Broadcast");
-    assert_eq!(delta.category_type.as_ref().unwrap().new, Some(CategoryType::Game));
-    assert_eq!(delta.live_category_value.as_ref().unwrap().new, Some("Valorant".to_string()));
+    assert_eq!(
+        delta.category_type.as_ref().unwrap().new,
+        Some(CategoryType::Game)
+    );
+    assert_eq!(
+        delta.live_category_value.as_ref().unwrap().new,
+        Some("Valorant".to_string())
+    );
     assert!(delta.watch_party.is_none());
 }
 
@@ -93,7 +99,10 @@ fn test_metadata_delta_computation_watch_party_and_drops() {
 
     let delta = state1.compute_delta(&state2).expect("delta must exist");
     assert_eq!(delta.watch_party.as_ref().unwrap().new.no, Some(520));
-    assert_eq!(delta.drops_campaign_no.as_ref().unwrap().new, Some("camp_val_99".to_string()));
+    assert_eq!(
+        delta.drops_campaign_no.as_ref().unwrap().new,
+        Some("camp_val_99".to_string())
+    );
     assert!(delta.policies.as_ref().unwrap().new.kr_only_viewing);
 }
 
@@ -123,7 +132,10 @@ fn test_metadata_jsonl_serialization_roundtrip() {
 fn test_deserialize_optional_string_or_number() {
     #[derive(serde::Deserialize)]
     struct TestContainer {
-        #[serde(default, deserialize_with = "chzzk_load::chzzk::models_metadata::deserialize_optional_string_or_number")]
+        #[serde(
+            default,
+            deserialize_with = "chzzk_load::chzzk::models_metadata::deserialize_optional_string_or_number"
+        )]
         val: Option<String>,
     }
 

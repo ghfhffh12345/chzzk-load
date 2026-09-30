@@ -132,7 +132,11 @@ pub struct StreamMetadataState {
     pub drops_campaign_no: Option<String>,
     #[serde(default)]
     pub log_power_active: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "live_image_url")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "live_image_url"
+    )]
     pub live_thumbnail_image_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_thumbnail_image_url: Option<String>,
@@ -234,11 +238,17 @@ impl StreamMetadataState {
         let mut changed = false;
 
         if self.live_title != new.live_title {
-            delta.live_title = Some(FieldDiff::new(self.live_title.clone(), new.live_title.clone()));
+            delta.live_title = Some(FieldDiff::new(
+                self.live_title.clone(),
+                new.live_title.clone(),
+            ));
             changed = true;
         }
         if self.channel_name != new.channel_name {
-            delta.channel_name = Some(FieldDiff::new(self.channel_name.clone(), new.channel_name.clone()));
+            delta.channel_name = Some(FieldDiff::new(
+                self.channel_name.clone(),
+                new.channel_name.clone(),
+            ));
             changed = true;
         }
         if self.verified_mark != new.verified_mark {
@@ -246,15 +256,24 @@ impl StreamMetadataState {
             changed = true;
         }
         if self.category_type != new.category_type {
-            delta.category_type = Some(FieldDiff::new(self.category_type.clone(), new.category_type.clone()));
+            delta.category_type = Some(FieldDiff::new(
+                self.category_type.clone(),
+                new.category_type.clone(),
+            ));
             changed = true;
         }
         if self.live_category_value != new.live_category_value {
-            delta.live_category_value = Some(FieldDiff::new(self.live_category_value.clone(), new.live_category_value.clone()));
+            delta.live_category_value = Some(FieldDiff::new(
+                self.live_category_value.clone(),
+                new.live_category_value.clone(),
+            ));
             changed = true;
         }
         if self.live_category != new.live_category {
-            delta.live_category = Some(FieldDiff::new(self.live_category.clone(), new.live_category.clone()));
+            delta.live_category = Some(FieldDiff::new(
+                self.live_category.clone(),
+                new.live_category.clone(),
+            ));
             changed = true;
         }
         if self.tags != new.tags {
@@ -270,11 +289,17 @@ impl StreamMetadataState {
             changed = true;
         }
         if self.watch_party != new.watch_party {
-            delta.watch_party = Some(FieldDiff::new(self.watch_party.clone(), new.watch_party.clone()));
+            delta.watch_party = Some(FieldDiff::new(
+                self.watch_party.clone(),
+                new.watch_party.clone(),
+            ));
             changed = true;
         }
         if self.chat_rules != new.chat_rules {
-            delta.chat_rules = Some(FieldDiff::new(self.chat_rules.clone(), new.chat_rules.clone()));
+            delta.chat_rules = Some(FieldDiff::new(
+                self.chat_rules.clone(),
+                new.chat_rules.clone(),
+            ));
             changed = true;
         }
         if self.paid_promotion != new.paid_promotion {
@@ -282,11 +307,15 @@ impl StreamMetadataState {
             changed = true;
         }
         if self.drops_campaign_no != new.drops_campaign_no {
-            delta.drops_campaign_no = Some(FieldDiff::new(self.drops_campaign_no.clone(), new.drops_campaign_no.clone()));
+            delta.drops_campaign_no = Some(FieldDiff::new(
+                self.drops_campaign_no.clone(),
+                new.drops_campaign_no.clone(),
+            ));
             changed = true;
         }
         if self.log_power_active != new.log_power_active {
-            delta.log_power_active = Some(FieldDiff::new(self.log_power_active, new.log_power_active));
+            delta.log_power_active =
+                Some(FieldDiff::new(self.log_power_active, new.log_power_active));
             changed = true;
         }
 
@@ -294,7 +323,9 @@ impl StreamMetadataState {
     }
 }
 
-pub fn deserialize_optional_string_or_number<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+pub fn deserialize_optional_string_or_number<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
 {

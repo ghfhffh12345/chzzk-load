@@ -451,9 +451,10 @@ impl ChzzkClient {
                 }
             }
 
-            let playback_meta = content.live_playback_json.as_deref().and_then(|json| {
-                serde_json::from_str::<PlaybackJson>(json).ok()?.meta
-            });
+            let playback_meta = content
+                .live_playback_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<PlaybackJson>(json).ok()?.meta);
 
             let category_type = content.category_type.as_deref().map(|ct| match ct {
                 "GAME" => CategoryType::Game,
@@ -463,9 +464,14 @@ impl ChzzkClient {
                 _ => CategoryType::Unknown,
             });
 
-            let polling_playable = content.live_polling_status_json.as_deref().and_then(|json| {
-                serde_json::from_str::<LivePollingStatus>(json).ok()?.playable_status
-            });
+            let polling_playable = content
+                .live_polling_status_json
+                .as_deref()
+                .and_then(|json| {
+                    serde_json::from_str::<LivePollingStatus>(json)
+                        .ok()?
+                        .playable_status
+                });
 
             let blind_type_str = content.blind_type.as_ref().map(|v| {
                 if let Some(s) = v.as_str() {
@@ -498,7 +504,8 @@ impl ChzzkClient {
                     tv_app_viewing_policy_type: content.tv_app_viewing_policy_type.clone(),
                 },
                 watch_party: WatchPartyState {
-                    is_active: content.watch_party_no.is_some() || content.watch_party_tag.is_some(),
+                    is_active: content.watch_party_no.is_some()
+                        || content.watch_party_tag.is_some(),
                     no: content.watch_party_no,
                     tag: content.watch_party_tag.clone(),
                     party_type: content.watch_party_type.clone(),

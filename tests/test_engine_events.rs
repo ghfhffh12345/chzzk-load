@@ -1293,9 +1293,11 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
     let orchestrator =
         EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
-    let mut initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState::default();
-    initial_meta.channel_name = "RenameStreamer".to_string();
-    initial_meta.live_title = "Initial Stream Title".to_string();
+    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+        channel_name: "RenameStreamer".to_string(),
+        live_title: "Initial Stream Title".to_string(),
+        ..Default::default()
+    };
 
     // Initialize active recording state
     {
@@ -1423,9 +1425,11 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
     let orchestrator =
         EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
-    let mut initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState::default();
-    initial_meta.channel_name = "RenameStreamer".to_string();
-    initial_meta.live_title = "Initial Stream Title".to_string();
+    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+        channel_name: "RenameStreamer".to_string(),
+        live_title: "Initial Stream Title".to_string(),
+        ..Default::default()
+    };
 
     let session_folder = "[2026-09-22_1000] [RenameStreamer] RenameStreamer - Initial Stream Title";
     let session_dir = temp_dir.join(session_folder);
@@ -1569,9 +1573,11 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         let active = orchestrator.active_recordings();
         active.lock().await.insert("chan_pre".to_string());
 
-        let mut initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState::default();
-        initial_meta.channel_name = "PreStreamer".to_string();
-        initial_meta.live_title = "Early Title 1".to_string();
+        let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+            channel_name: "PreStreamer".to_string(),
+            live_title: "Early Title 1".to_string(),
+            ..Default::default()
+        };
 
         let sessions = orchestrator.active_sessions();
         sessions.lock().await.insert(
@@ -1702,12 +1708,14 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
     let orchestrator =
         EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
-    let mut initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState::default();
-    initial_meta.channel_name = "TransStreamer".to_string();
-    initial_meta.live_title = "Just Chatting".to_string();
-    initial_meta.category_type = Some(chzzk_load::chzzk::models_metadata::CategoryType::Talk);
-    initial_meta.live_category = Some("talk".to_string());
-    initial_meta.live_category_value = Some("Just Chatting".to_string());
+    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+        channel_name: "TransStreamer".to_string(),
+        live_title: "Just Chatting".to_string(),
+        category_type: Some(chzzk_load::chzzk::models_metadata::CategoryType::Talk),
+        live_category: Some("talk".to_string()),
+        live_category_value: Some("Just Chatting".to_string()),
+        ..Default::default()
+    };
 
     {
         let active = orchestrator.active_recordings();

@@ -877,12 +877,18 @@ fn test_resolve_access_tier_precedence() {
     };
 
     // 1. Default Public
-    assert_eq!(resolve_access_tier(&base_content, None), StreamAccessTier::Public);
+    assert_eq!(
+        resolve_access_tier(&base_content, None),
+        StreamAccessTier::Public
+    );
 
     // 2. AdultOnly
     let mut adult_content = base_content.clone();
     adult_content.adult = Some(true);
-    assert_eq!(resolve_access_tier(&adult_content, None), StreamAccessTier::AdultOnly);
+    assert_eq!(
+        resolve_access_tier(&adult_content, None),
+        StreamAccessTier::AdultOnly
+    );
 
     // 3. CheatKey beats AdultOnly
     let cheat_meta = PlaybackMeta {
@@ -892,20 +898,32 @@ fn test_resolve_access_tier_precedence() {
         paid_live: None,
         playback_auth_type: Some("CHZZK_CHEAT_KEY".to_string()),
     };
-    assert_eq!(resolve_access_tier(&adult_content, Some(&cheat_meta)), StreamAccessTier::CheatKey);
+    assert_eq!(
+        resolve_access_tier(&adult_content, Some(&cheat_meta)),
+        StreamAccessTier::CheatKey
+    );
 
     // 4. NaverPlus beats CheatKey
     let mut plus_content = adult_content.clone();
     plus_content.membership_benefit_type = Some("NAVER_PLUS".to_string());
-    assert_eq!(resolve_access_tier(&plus_content, Some(&cheat_meta)), StreamAccessTier::NaverPlus);
+    assert_eq!(
+        resolve_access_tier(&plus_content, Some(&cheat_meta)),
+        StreamAccessTier::NaverPlus
+    );
 
     // 5. ChannelSubscription beats NaverPlus
     let mut sub_content = plus_content.clone();
     sub_content.membership_benefit_type = Some("MEMBER_ONLY".to_string());
-    assert_eq!(resolve_access_tier(&sub_content, Some(&cheat_meta)), StreamAccessTier::ChannelSubscription);
+    assert_eq!(
+        resolve_access_tier(&sub_content, Some(&cheat_meta)),
+        StreamAccessTier::ChannelSubscription
+    );
 
     // 6. PayPerView beats ChannelSubscription
     let mut ppv_content = sub_content.clone();
     ppv_content.paid_product = Some(serde_json::json!({"sku": "ticket_1"}));
-    assert_eq!(resolve_access_tier(&ppv_content, Some(&cheat_meta)), StreamAccessTier::PayPerView);
+    assert_eq!(
+        resolve_access_tier(&ppv_content, Some(&cheat_meta)),
+        StreamAccessTier::PayPerView
+    );
 }
