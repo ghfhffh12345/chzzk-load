@@ -80,7 +80,7 @@ record_chat = true
 chat_flush_interval_seconds = 30
 
 [rclone]
-remote_path = "gdrive:Chzzk_Recordings"
+remote_path = "remote:chzzk"
 upload_concurrency = 3
 rclone_bin = "rclone"
 extra_args = []
@@ -109,7 +109,7 @@ alias = "SampleStreamer"
 | `general.min_free_disk_gb` | `2.0` | Minimum required free disk space in GB to continue recording. |
 | `general.record_chat` | `true` | Enable concurrent real-time live chat recording into time-aligned `chat_%04d.jsonl` chunks. |
 | `general.chat_flush_interval_seconds` | `30` | Periodic timer interval in seconds to flush buffered chat messages to disk. |
-| `rclone.remote_path` | `"gdrive:Chzzk_Recordings"` | Destination remote and folder path in rclone format (`<remote>:<path>`). Set to `""` for **local-only recording mode**. |
+| `rclone.remote_path` | `"remote:chzzk"` | Destination remote and folder path in rclone format (`<remote>:<path>`). Set to `""` for **local-only recording mode**. |
 | `rclone.upload_concurrency` | `3` | Maximum number of concurrent channel upload streams (intra-channel uploads remain strictly serialized). |
 | `rclone.rclone_bin` | `"rclone"` | Path or command name for the rclone executable. |
 | `rclone.extra_args` | `[]` | Optional extra CLI flags passed to rclone invocations (e.g. `["--drive-chunk-size=64M"]`). |
@@ -133,7 +133,7 @@ record_chat = true
 chat_flush_interval_seconds = 30
 
 [rclone]
-remote_path = "gdrive:Chzzk_Recordings"
+remote_path = "remote:chzzk"
 upload_concurrency = 2
 rclone_bin = "rclone"
 extra_args = []
@@ -179,7 +179,7 @@ To enable automatic cloud storage upload:
    ```bash
    rclone lsd gdrive:
    ```
-4. Set `remote_path` in `settings.toml` to your target remote and destination folder (e.g. `remote_path = "gdrive:Chzzk_Recordings"` or `remote_path = "onedrive:Recordings"`).
+4. Set `remote_path` in `settings.toml` to your target remote and destination folder (e.g. `remote_path = "remote:chzzk"` or `remote_path = "onedrive:Recordings"`).
 5. Run `chzzk-load`. The application will verify the rclone remote connection on startup and stream completed segments to your cloud storage.
 
 ---

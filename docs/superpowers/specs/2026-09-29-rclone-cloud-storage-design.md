@@ -35,7 +35,7 @@ Replace `GoogleDriveConfig` with `RcloneConfig`:
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RcloneConfig {
-    /// Remote destination path in rclone format (e.g. "gdrive:Chzzk_Recordings", "s3:my-bucket/recordings").
+    /// Remote destination path in rclone format (e.g. "remote:chzzk", "s3:my-bucket/recordings").
     /// If empty, chzzk-load runs in local-only recording mode.
     #[serde(default = "default_remote_path")]
     pub remote_path: String,
@@ -54,7 +54,7 @@ pub struct RcloneConfig {
 }
 
 fn default_remote_path() -> String {
-    "gdrive:Chzzk_Recordings".to_string()
+    "remote:chzzk".to_string()
 }
 fn default_upload_concurrency() -> usize {
     3
@@ -146,7 +146,7 @@ pub trait UploadBackend: Send + Sync {
 
 ### 5.1. Remote Destination Formatting
 Given:
-- `remote_path`: `"gdrive:Chzzk_Recordings"` (or `"s3:my-bucket/subpath"`)
+- `remote_path`: `"remote:chzzk"` (or `"s3:my-bucket/subpath"`)
 - `remote_dir`: `"[2026-09-29_140000] SampleStreamer - Live Broadcast"`
 - `file_name`: `"chunk_0000.ts"`
 

@@ -47,8 +47,8 @@ record_chat = true
 chat_flush_interval_seconds = 30
 
 [rclone]
-# Target remote path (e.g. "gdrive:Chzzk_Recordings" or "" for local-only mode)
-remote_path = "gdrive:Chzzk_Recordings"
+# Target remote path (e.g. "remote:chzzk" or "" for local-only mode)
+remote_path = "remote:chzzk"
 # Maximum concurrent uploads across different channels
 upload_concurrency = 3
 # Path to rclone binary

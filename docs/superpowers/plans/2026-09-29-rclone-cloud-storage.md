@@ -40,7 +40,7 @@
 - [ ] **Step 1: Write failing tests in `tests/test_config.rs` for `RcloneConfig`**
 
 Add tests for:
-1. `test_default_rclone_config`: Verifies defaults (`remote_path == "gdrive:Chzzk_Recordings"`, `upload_concurrency == 3`, `rclone_bin == "rclone"`, `extra_args.is_empty()`).
+1. `test_default_rclone_config`: Verifies defaults (`remote_path == "remote:chzzk"`, `upload_concurrency == 3`, `rclone_bin == "rclone"`, `extra_args.is_empty()`).
 2. `test_rclone_config_custom_deserialization`: Deserializes custom JSON with `remote_path`, `upload_concurrency`, `rclone_bin`, and `extra_args`.
 3. `test_rclone_local_only_mode`: Verifies deserialization when `remote_path` is empty `""`.
 

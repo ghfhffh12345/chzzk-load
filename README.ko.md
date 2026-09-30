@@ -80,7 +80,7 @@ record_chat = true
 chat_flush_interval_seconds = 30
 
 [rclone]
-remote_path = "gdrive:Chzzk_Recordings"
+remote_path = "remote:chzzk"
 upload_concurrency = 3
 rclone_bin = "rclone"
 extra_args = []
@@ -109,7 +109,7 @@ alias = "SampleStreamer"
 | `general.min_free_disk_gb` | `2.0` | 녹화를 계속하기 위해 필요한 최소 여유 디스크 공간(GB 단위). |
 | `general.record_chat` | `true` | `chat_%04d.jsonl` 시간 단위 세그먼트 청크로 실시간 라이브 채팅 동시 녹화 활성화 여부. |
 | `general.chat_flush_interval_seconds` | `30` | 메모리에 버퍼링된 채팅 메시지를 디스크로 플러시하는 주기(초 단위). |
-| `rclone.remote_path` | `"gdrive:Chzzk_Recordings"` | rclone 형식의 대상 원격지 및 경로 (`<원격지이름>:<경로>`). 빈 문자열(`""`)로 설정 시 **로컬 전용 녹화 모드**로 동작합니다. |
+| `rclone.remote_path` | `"remote:chzzk"` | rclone 형식의 대상 원격지 및 경로 (`<원격지이름>:<경로>`). 빈 문자열(`""`)로 설정 시 **로컬 전용 녹화 모드**로 동작합니다. |
 | `rclone.upload_concurrency` | `3` | 채널 간 동시 업로드 가능한 최대 스트림 수 (동일 채널 내 청크는 엄격한 FIFO 순서로 직렬 업로드됨). |
 | `rclone.rclone_bin` | `"rclone"` | rclone 실행 파일의 경로 또는 명령어 이름. |
 | `rclone.extra_args` | `[]` | rclone 호출 시 전달할 추가 CLI 인자 목록 (예: `["--drive-chunk-size=64M"]`). |
@@ -133,7 +133,7 @@ record_chat = true
 chat_flush_interval_seconds = 30
 
 [rclone]
-remote_path = "gdrive:Chzzk_Recordings"
+remote_path = "remote:chzzk"
 upload_concurrency = 2
 rclone_bin = "rclone"
 extra_args = []
@@ -179,7 +179,7 @@ alias = "SampleStreamer"
    ```bash
    rclone lsd gdrive:
    ```
-4. `settings.toml`의 `remote_path` 항목에 대상 원격지 및 디렉터리 경로를 지정합니다 (예: `remote_path = "gdrive:Chzzk_Recordings"` 또는 `remote_path = "onedrive:Recordings"`).
+4. `settings.toml`의 `remote_path` 항목에 대상 원격지 및 디렉터리 경로를 지정합니다 (예: `remote_path = "remote:chzzk"` 또는 `remote_path = "onedrive:Recordings"`).
 5. `chzzk-load`를 실행합니다. 프로그램 시작 시 rclone 원격지 연결을 자동으로 검증하고, 녹화 완료된 세그먼트를 클라우드로 실시간 전송합니다.
 
 ---
