@@ -14,6 +14,7 @@ This specification details the complete deprecation and removal of `title_histor
    - **Unified Access Gating (`access_tier`)**: A mutually exclusive enum representing the stream's primary authorization tier: `PUBLIC`, `ADULT_ONLY`, `CHEAT_KEY`, `CHANNEL_SUBSCRIPTION`, `NAVER_PLUS`, and `PAY_PER_VIEW`.
    - **Co-streaming & Watch Parties (`watch_party`)**: Track official watch-alongs (e.g. Asian Games, LCK, World Cup) including `watch_party_no`, `watch_party_tag`, `party_type`, and `paid_product_id`.
    - **Platform Policies & Restrictions (`policies`)**: Geo-blocking (`kr_only_viewing`), platform moderation status (`playable_status`), DVR live rewind (`time_machine_active`), viewer clipping (`clip_active`), and TV app policies (`tv_app_viewing_policy_type`).
+   - **In-Game Rewards & Sponsorship**: Drops campaign identifier (`drops_campaign_no`) and sponsored stream disclosure (`paid_promotion`).
    - **Chat Interaction Rules (`chat_rules`)**: Chat availability tiers (`chat_available_group`), follower duration requirements (`min_follower_minute`), and subscriber bypass rules (`allow_subscriber_in_follower_mode`).
    - **Contextual Telemetry**: Instantaneous concurrent viewer count (`concurrent_user_count`) embedded inside each state snapshot.
 3. **Microsecond-Accurate Video Synchronization**: Every event records `stream_offset_ms`—the elapsed duration in milliseconds from the exact moment recording began (`std::time::Instant`)—enabling VOD replay players to seek and synchronize metadata changes directly against the video timeline ($O(1)$ random seek) without relying on chunk indices.
@@ -129,6 +130,8 @@ pub struct StreamMetadataState {
     pub watch_party: WatchPartyState,
     pub chat_rules: ChatRulesState,
     pub paid_promotion: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drops_campaign_no: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "live_image_url")]
     pub live_thumbnail_image_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,6 +186,8 @@ pub struct MetadataDelta {
     pub chat_rules: Option<FieldDiff<ChatRulesState>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paid_promotion: Option<FieldDiff<bool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drops_campaign_no: Option<FieldDiff<Option<String>>>,
 }
 
 impl MetadataDelta {
@@ -198,6 +203,7 @@ impl MetadataDelta {
             && self.watch_party.is_none()
             && self.chat_rules.is_none()
             && self.paid_promotion.is_none()
+            && self.drops_campaign_no.is_none()
     }
 }
 
@@ -269,6 +275,10 @@ impl StreamMetadataState {
             delta.paid_promotion = Some(FieldDiff::new(self.paid_promotion, new.paid_promotion));
             changed = true;
         }
+        if self.drops_campaign_no != new.drops_campaign_no {
+            delta.drops_campaign_no = Some(FieldDiff::new(self.drops_campaign_no.clone(), new.drops_campaign_no.clone()));
+            changed = true;
+        }
 
         if changed { Some(delta) } else { None }
     }
@@ -308,6 +318,8 @@ pub struct LiveDetailContent {
     pub tags: Vec<String>,
     #[serde(default)]
     pub paid_promotion: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_number")]
+    pub drops_campaign_no: Option<String>,
     #[serde(default)]
     pub kr_only_viewing: Option<bool>,
     #[serde(default)]
