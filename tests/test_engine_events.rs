@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chzzk_load::chzzk::client::ChzzkClient;
-use chzzk_load::config::{ChannelConfig, Settings};
+use chzzk_load::config::{ChannelConfig, ChzzkConfig, Settings};
 use chzzk_load::engine::{ActiveSessionState, EngineOrchestrator};
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::uploader::{
@@ -215,10 +215,7 @@ async fn test_engine_orchestrator_poll_channel_offline() {
     });
 
     let settings = Settings {
-        channels: vec![ChannelConfig {
-            id: "chan_offline".to_string(),
-            name: "OfflineStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_offline", "OfflineStreamer")],
         ..Default::default()
     };
 
@@ -261,10 +258,7 @@ async fn test_engine_orchestrator_poll_channel_error() {
     });
 
     let settings = Settings {
-        channels: vec![ChannelConfig {
-            id: "chan_err".to_string(),
-            name: "ErrorStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_err", "ErrorStreamer")],
         ..Default::default()
     };
 
@@ -342,10 +336,7 @@ async fn test_engine_orchestrator_poll_channel_live() {
             recordings_dir: temp_dir.to_string_lossy().to_string(),
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_live".to_string(),
-            name: "LiveStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_live", "LiveStreamer")],
         ..Default::default()
     };
 
@@ -507,10 +498,7 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
             stream_cooldown_seconds: 60,
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_race".to_string(),
-            name: "StreamerRace".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_race", "StreamerRace")],
         ..Default::default()
     };
 
@@ -1000,10 +988,7 @@ async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
             poll_interval_seconds: 60,
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_shutdown".to_string(),
-            name: "ShutdownStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_shutdown", "ShutdownStreamer")],
         ..Default::default()
     };
     let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
@@ -1104,10 +1089,7 @@ async fn test_engine_orchestrator_manual_refresh() {
             poll_interval_seconds: 3600, // 1 hour interval
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_refresh".to_string(),
-            name: "RefreshStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_refresh", "RefreshStreamer")],
         ..Default::default()
     };
     let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
@@ -1294,10 +1276,7 @@ async fn test_engine_orchestrator_stream_title_change_uploads_title_history_text
             recordings_dir: temp_dir.to_string_lossy().to_string(),
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_rename".to_string(),
-            name: "RenameStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_rename", "RenameStreamer")],
         ..Default::default()
     };
 
@@ -1418,10 +1397,7 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
             recordings_dir: temp_dir.to_string_lossy().to_string(),
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_rename".to_string(),
-            name: "RenameStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_rename", "RenameStreamer")],
         ..Default::default()
     };
 
@@ -1538,10 +1514,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
             recordings_dir: temp_dir.to_string_lossy().to_string(),
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_pre".to_string(),
-            name: "PreStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_pre", "PreStreamer")],
         ..Default::default()
     };
 
@@ -1799,10 +1772,7 @@ async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupt
             stream_cooldown_seconds: 1, // 1 second cooldown
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_interrupt".to_string(),
-            name: "StreamerInterrupt".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_interrupt", "StreamerInterrupt")],
         ..Default::default()
     };
 
@@ -1895,10 +1865,10 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
             record_chat: false,
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_upload_shutdown".to_string(),
-            name: "ShutdownUploader".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias(
+            "chan_upload_shutdown",
+            "ShutdownUploader",
+        )],
         ..Default::default()
     };
 
@@ -2141,10 +2111,10 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
             record_chat: false,
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_shutdown_serial".to_string(),
-            name: "ShutdownSerialStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias(
+            "chan_shutdown_serial",
+            "ShutdownSerialStreamer",
+        )],
         ..Default::default()
     };
 
@@ -2298,14 +2268,8 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
             ..Default::default()
         },
         channels: vec![
-            ChannelConfig {
-                id: "chan_multi_1".to_string(),
-                name: "Streamer_1".to_string(),
-            },
-            ChannelConfig {
-                id: "chan_multi_2".to_string(),
-                name: "Streamer_2".to_string(),
-            },
+            ChannelConfig::with_alias("chan_multi_1", "Streamer_1"),
+            ChannelConfig::with_alias("chan_multi_2", "Streamer_2"),
         ],
         ..Default::default()
     };
@@ -2478,10 +2442,7 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
             record_chat: false,
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_retry".to_string(),
-            name: "StreamerRetry".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_retry", "StreamerRetry")],
         ..Default::default()
     };
 
@@ -2603,10 +2564,7 @@ async fn test_engine_orchestrator_poll_channel_restricted_stream_sets_live_and_l
             recordings_dir: temp_dir.to_string_lossy().to_string(),
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_restricted".to_string(),
-            name: "RestrictedStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_restricted", "RestrictedStreamer")],
         ..Default::default()
     };
 
@@ -2732,10 +2690,7 @@ async fn test_engine_orchestrator_restricted_stream_recovers_to_recordable() {
             recordings_dir: temp_dir.to_string_lossy().to_string(),
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_recover".to_string(),
-            name: "RecoverStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_recover", "RecoverStreamer")],
         ..Default::default()
     };
 
@@ -2911,10 +2866,7 @@ fn main() {
             record_chat: false,
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_trans".to_string(),
-            name: "TransStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_trans", "TransStreamer")],
         ..Default::default()
     };
 
@@ -3146,10 +3098,7 @@ async fn test_engine_orchestrator_restricted_stream_resets_on_offline() {
             recordings_dir: temp_dir.to_string_lossy().to_string(),
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_rst_off".to_string(),
-            name: "StreamerRst".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_rst_off", "StreamerRst")],
         ..Default::default()
     };
 
@@ -3349,10 +3298,7 @@ async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_e
             poll_interval_seconds: 60,
             ..Default::default()
         },
-        channels: vec![chzzk_load::config::ChannelConfig {
-            id: "chan_ended".to_string(),
-            name: "EndedStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_ended", "EndedStreamer")],
         ..Default::default()
     };
     let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
@@ -3571,10 +3517,7 @@ fn main() {
             record_chat: false,
             ..Default::default()
         },
-        channels: vec![ChannelConfig {
-            id: "chan_sports".to_string(),
-            name: "SportsStreamer".to_string(),
-        }],
+        channels: vec![ChannelConfig::with_alias("chan_sports", "SportsStreamer")],
         ..Default::default()
     };
     let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
@@ -3862,3 +3805,76 @@ async fn test_upload_consumer_logs_broadcast_identifier_on_success_and_failure()
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_engine_folder_naming_with_alias() {
+    let state = ActiveSessionState::new(
+        "2026-09-30_1100".to_string(),
+        "CustomAlias".to_string(),
+        "Gaming Stream".to_string(),
+    );
+    assert_eq!(
+        state.folder_name(),
+        "[2026-09-30_1100] CustomAlias - Gaming Stream"
+    );
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_channel_update_uses_alias() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    let server_handle = tokio::task::spawn_blocking(move || {
+        let req = server.recv().unwrap();
+        let body = r#"{
+            "code": 200,
+            "message": null,
+            "content": {
+                "status": "OPEN",
+                "liveTitle": "Live Stream",
+                "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://dummy.m3u8\"}]}",
+                "channel": {
+                    "channelId": "chan_alias",
+                    "channelName": "OfficialKoreanName"
+                }
+            }
+        }"#;
+        let response = Response::from_string(body).with_header(
+            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+        );
+        let _ = req.respond(response);
+    });
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
+    let (upload_tx, _upload_rx) = tokio::sync::mpsc::channel(32);
+
+    let mut settings = Settings::default();
+    settings.channels = vec![ChannelConfig::with_alias("chan_alias", "MyAlias")];
+
+    let chzzk_config = ChzzkConfig::default();
+    let client = ChzzkClient::new(&chzzk_config).with_base_url(format!("http://127.0.0.1:{port}"));
+    let orchestrator = EngineOrchestrator::new(settings, client, None, event_tx);
+
+    orchestrator.poll_channels_once(&upload_tx).await;
+    let _ = server_handle.await;
+
+    let mut received_update = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if let AppEvent::ChannelUpdate {
+            channel_id,
+            channel_name,
+            is_live,
+            title,
+        } = event
+        {
+            assert_eq!(channel_id, "chan_alias");
+            // Must use MyAlias, NOT OfficialKoreanName
+            assert_eq!(channel_name, "MyAlias");
+            assert!(is_live);
+            assert_eq!(title, "Live Stream");
+            received_update = true;
+        }
+    }
+    assert!(received_update, "Expected ChannelUpdate event");
+}
+

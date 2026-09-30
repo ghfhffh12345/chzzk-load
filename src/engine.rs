@@ -78,6 +78,7 @@ pub struct EngineOrchestrator {
     restricted_channels: Arc<tokio::sync::Mutex<HashSet<String>>>,
     restricted_live_ids: Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
     api_restricted_channels: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    channel_names: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
     session_cancel_tokens: Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>>,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
@@ -113,11 +114,29 @@ impl EngineOrchestrator {
             restricted_channels: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             restricted_live_ids: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             api_restricted_channels: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            channel_names: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             session_cancel_tokens: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             ffmpeg_bin: None,
+        }
+    }
+
+    pub fn channel_names(&self) -> Arc<tokio::sync::RwLock<HashMap<String, String>>> {
+        self.channel_names.clone()
+    }
+
+    pub fn resolve_display_name(
+        channel: &crate::config::ChannelConfig,
+        cached_names: &HashMap<String, String>,
+    ) -> String {
+        if let Some(alias) = &channel.alias {
+            alias.clone()
+        } else if let Some(official) = cached_names.get(&channel.id) {
+            official.clone()
+        } else {
+            channel.id.clone()
         }
     }
 
@@ -1296,6 +1315,15 @@ impl EngineOrchestrator {
             };
             match detail_res {
                 Ok(LiveDetail::Open(info)) => {
+                    {
+                        let mut names = self.channel_names.write().await;
+                        names.insert(channel.id.clone(), info.streamer_name.clone());
+                    }
+                    let display_name = {
+                        let names = self.channel_names.read().await;
+                        Self::resolve_display_name(channel, &names)
+                    };
+
                     let was_api_restricted = {
                         let mut api_restricted = self.api_restricted_channels.lock().await;
                         api_restricted.remove(&channel.id)
@@ -1317,7 +1345,7 @@ impl EngineOrchestrator {
 
                         let log_msg = format!(
                             "Restricted stream for channel {} ({}) returned to public broadcast (liveId: {:?}). Starting new recording session in new broadcast folder...",
-                            channel.id, info.streamer_name, info.live_id
+                            channel.id, display_name, info.live_id
                         );
                         let _ = self
                             .event_tx
@@ -1341,7 +1369,7 @@ impl EngineOrchestrator {
                         if is_newly_restricted {
                             let log_msg = format!(
                                 "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
-                                channel.id, info.streamer_name
+                                channel.id, display_name
                             );
                             let _ = self
                                 .event_tx
@@ -1353,7 +1381,7 @@ impl EngineOrchestrator {
                             .event_tx
                             .send(AppEvent::ChannelUpdate {
                                 channel_id: channel.id.clone(),
-                                channel_name: info.streamer_name.clone(),
+                                channel_name: display_name.clone(),
                                 is_live: true,
                                 title: info.title.clone(),
                             })
@@ -1463,7 +1491,7 @@ impl EngineOrchestrator {
                             .event_tx
                             .send(AppEvent::ChannelUpdate {
                                 channel_id: channel.id.clone(),
-                                channel_name: info.streamer_name.clone(),
+                                channel_name: display_name.clone(),
                                 is_live: true,
                                 title: info.title.clone(),
                             })
@@ -1474,7 +1502,7 @@ impl EngineOrchestrator {
                             .send(AppEvent::Log(LogEntry::poll(format!(
                                 "Channel {} ({}) stream recently concluded (liveId: {:?}). Waiting for API cache to close...",
                                 channel.id,
-                                channel.display_label(),
+                                display_name,
                                 info.live_id
                             ))))
                             .await;
@@ -1483,7 +1511,7 @@ impl EngineOrchestrator {
                             .event_tx
                             .send(AppEvent::ChannelUpdate {
                                 channel_id: channel.id.clone(),
-                                channel_name: channel.display_label().to_string(),
+                                channel_name: display_name.clone(),
                                 is_live: false,
                                 title: "Stream Concluded (Cooldown)".to_string(),
                             })
@@ -1493,7 +1521,7 @@ impl EngineOrchestrator {
                             .event_tx
                             .send(AppEvent::ChannelUpdate {
                                 channel_id: channel.id.clone(),
-                                channel_name: info.streamer_name.clone(),
+                                channel_name: display_name.clone(),
                                 is_live: true,
                                 title: info.title.clone(),
                             })
@@ -1515,7 +1543,7 @@ impl EngineOrchestrator {
                                 channel.id.clone(),
                                 ActiveSessionState::new(
                                     start_timestamp,
-                                    info.streamer_name.clone(),
+                                    display_name.clone(),
                                     info.title.clone(),
                                 ),
                             );
@@ -1561,16 +1589,25 @@ impl EngineOrchestrator {
                         restricted.insert(channel.id.clone())
                     };
 
+                    {
+                        let mut names = self.channel_names.write().await;
+                        names.insert(channel.id.clone(), streamer_name.clone());
+                    }
+                    let display_name = {
+                        let names = self.channel_names.read().await;
+                        Self::resolve_display_name(channel, &names)
+                    };
+
                     if is_newly_restricted {
                         let log_msg = if adult {
                             format!(
                                 "Recording unavailable for channel {} ({}): 19+ age-restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
-                                channel.id, streamer_name
+                                channel.id, display_name
                             )
                         } else {
                             format!(
                                 "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
-                                channel.id, streamer_name
+                                channel.id, display_name
                             )
                         };
                         let _ = self
@@ -1583,13 +1620,22 @@ impl EngineOrchestrator {
                         .event_tx
                         .send(AppEvent::ChannelUpdate {
                             channel_id: channel.id.clone(),
-                            channel_name: streamer_name,
+                            channel_name: display_name,
                             is_live: true,
                             title,
                         })
                         .await;
                 }
-                Ok(LiveDetail::Close { .. }) => {
+                Ok(LiveDetail::Close { streamer_name }) => {
+                    if let Some(streamer) = streamer_name {
+                        let mut names = self.channel_names.write().await;
+                        names.insert(channel.id.clone(), streamer);
+                    }
+                    let display_name = {
+                        let names = self.channel_names.read().await;
+                        Self::resolve_display_name(channel, &names)
+                    };
+
                     // Channel reported CLOSE (offline)
                     if let Some(token) = self.session_cancel_tokens.lock().await.remove(&channel.id)
                     {
@@ -1636,7 +1682,7 @@ impl EngineOrchestrator {
                         .event_tx
                         .send(AppEvent::ChannelUpdate {
                             channel_id: channel.id.clone(),
-                            channel_name: channel.display_label().to_string(),
+                            channel_name: display_name,
                             is_live: false,
                             title: "Offline".to_string(),
                         })
