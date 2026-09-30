@@ -110,6 +110,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         title: "Chat Stream Title".to_string(),
         hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
         chat_channel_id: Some("chat_ch_123".to_string()),
+        metadata: Default::default(),
     };
 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -220,6 +221,7 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
         title: "No Chat Title".to_string(),
         hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
         chat_channel_id: Some("chat_ch_999".to_string()),
+        metadata: Default::default(),
     };
 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -300,6 +302,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
         title: "Local Chat Title".to_string(),
         hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
         chat_channel_id: Some("chat_ch_local".to_string()),
+        metadata: Default::default(),
     };
 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -409,6 +412,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         title: "Backend Chat Title".to_string(),
         hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
         chat_channel_id: Some("chat_ch_backend".to_string()),
+        metadata: Default::default(),
     };
 
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -580,6 +584,7 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         title: "Inc Stream Title".to_string(),
         hls_url: format!("http://127.0.0.1:{hls_port}/dummy.m3u8"),
         chat_channel_id: Some("chat_ch_inc".to_string()),
+        metadata: Default::default(),
     };
 
     orchestrator.spawn_recording_session("chan_chat_inc".to_string(), info, upload_tx);

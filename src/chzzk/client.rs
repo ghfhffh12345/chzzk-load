@@ -3,8 +3,13 @@ use reqwest::header::{COOKIE, HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::chzzk::models::{
     ChzzkResponse, LiveDetail, LiveDetailContent, LivePollingStatus, LiveStreamInfo, PlaybackJson,
+    PlaybackMeta,
 };
 use crate::chzzk::models_chat::ChatAccessTokenResponse;
+use crate::chzzk::models_metadata::{
+    BroadcastPolicies, CategoryType, ChatRulesState, StreamAccessTier, StreamMetadataState,
+    WatchPartyState,
+};
 use crate::config::ChzzkConfig;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
@@ -198,6 +203,47 @@ pub fn is_stream_auth_required(content: &LiveDetailContent, hls_url: &str) -> bo
     }
 
     false
+}
+
+pub fn resolve_access_tier(
+    content: &LiveDetailContent,
+    playback_meta: Option<&PlaybackMeta>,
+) -> StreamAccessTier {
+    // 1. One-off Paid Product / Pay-Per-View Ticket
+    if content.paid_product.is_some()
+        || content.watch_party_paid_product_id.is_some()
+        || playback_meta.and_then(|m| m.paid_live).unwrap_or(false)
+    {
+        return StreamAccessTier::PayPerView;
+    }
+
+    // 2. Channel Subscriber-Only (Member-only) or NaverPlus
+    if let Some(membership) = &content.membership_benefit_type {
+        if membership.eq_ignore_ascii_case("MEMBER_ONLY")
+            || membership.eq_ignore_ascii_case("CHANNEL_SUBSCRIPTION")
+        {
+            return StreamAccessTier::ChannelSubscription;
+        }
+        if membership.eq_ignore_ascii_case("NAVER_PLUS") {
+            return StreamAccessTier::NaverPlus;
+        }
+    }
+
+    // 3. Platform Cheat Key Pass
+    if let Some(meta) = playback_meta
+        && let Some(auth_type) = &meta.playback_auth_type
+        && auth_type.eq_ignore_ascii_case("CHZZK_CHEAT_KEY")
+    {
+        return StreamAccessTier::CheatKey;
+    }
+
+    // 4. 19+ Age Gating
+    if content.adult.unwrap_or(false) {
+        return StreamAccessTier::AdultOnly;
+    }
+
+    // 5. Default Public Access
+    StreamAccessTier::Public
 }
 
 pub fn is_polling_status_restricted(content: &LiveDetailContent) -> bool {
@@ -405,6 +451,82 @@ impl ChzzkClient {
                 }
             }
 
+            let playback_meta = content.live_playback_json.as_deref().and_then(|json| {
+                serde_json::from_str::<PlaybackJson>(json).ok()?.meta
+            });
+
+            let category_type = content.category_type.as_deref().map(|ct| match ct {
+                "GAME" => CategoryType::Game,
+                "SPORTS" => CategoryType::Sports,
+                "ETC" => CategoryType::Etc,
+                "TALK" => CategoryType::Talk,
+                _ => CategoryType::Unknown,
+            });
+
+            let polling_playable = content.live_polling_status_json.as_deref().and_then(|json| {
+                serde_json::from_str::<LivePollingStatus>(json).ok()?.playable_status
+            });
+
+            let blind_type_str = content.blind_type.as_ref().map(|v| {
+                if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    v.to_string()
+                }
+            });
+
+            let metadata = StreamMetadataState {
+                live_id,
+                open_date: content.open_date.clone(),
+                close_date: content.close_date.clone(),
+                channel_id: channel_id.to_string(),
+                channel_name: streamer_name.clone(),
+                channel_image_url: content.channel.channel_image_url.clone(),
+                verified_mark: content.channel.verified_mark.unwrap_or(false),
+                live_title: title.clone(),
+                category_type,
+                live_category: content.live_category.clone(),
+                live_category_value: content.live_category_value.clone(),
+                tags: content.tags.clone(),
+                access_tier: resolve_access_tier(&content, playback_meta.as_ref()),
+                policies: BroadcastPolicies {
+                    kr_only_viewing: content.kr_only_viewing.unwrap_or(false),
+                    playable_status: polling_playable,
+                    blind_type: blind_type_str,
+                    time_machine_active: content.time_machine_active.unwrap_or(false),
+                    clip_active: content.clip_active.unwrap_or(false),
+                    tv_app_viewing_policy_type: content.tv_app_viewing_policy_type.clone(),
+                },
+                watch_party: WatchPartyState {
+                    is_active: content.watch_party_no.is_some() || content.watch_party_tag.is_some(),
+                    no: content.watch_party_no,
+                    tag: content.watch_party_tag.clone(),
+                    party_type: content.watch_party_type.clone(),
+                    paid_product_id: content.watch_party_paid_product_id.clone(),
+                },
+                chat_rules: ChatRulesState {
+                    chat_active: content.chat_active.unwrap_or(true),
+                    chat_available_group: content.chat_available_group.clone(),
+                    chat_available_condition: content.chat_available_condition.clone(),
+                    min_follower_minute: content.min_follower_minute,
+                    allow_subscriber_in_follower_mode: content
+                        .allow_subscriber_in_follower_mode
+                        .unwrap_or(false),
+                    chat_slow_mode_sec: content.chat_slow_mode_sec,
+                    chat_emoji_mode: content.chat_emoji_mode.unwrap_or(false),
+                    chat_donation_ranking_exposure: content
+                        .chat_donation_ranking_exposure
+                        .unwrap_or(true),
+                },
+                paid_promotion: content.paid_promotion.unwrap_or(false),
+                drops_campaign_no: content.drops_campaign_no.clone(),
+                log_power_active: content.log_power_active.unwrap_or(false),
+                live_thumbnail_image_url: content.live_image_url.clone(),
+                default_thumbnail_image_url: content.default_thumbnail_image_url.clone(),
+                concurrent_user_count: content.concurrent_user_count,
+                accumulate_count: content.accumulate_count,
+            };
+
             Ok(LiveDetail::Open(LiveStreamInfo {
                 channel_id: channel_id.to_string(),
                 live_id,
@@ -412,6 +534,7 @@ impl ChzzkClient {
                 title,
                 hls_url,
                 chat_channel_id,
+                metadata,
             }))
         } else {
             Ok(LiveDetail::Close { streamer_name })

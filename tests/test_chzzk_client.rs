@@ -820,3 +820,92 @@ fn test_extract_best_hls_url_prefers_p2p_720p_when_1080p_absent() {
     let hls_url = extract_best_hls_url(&Some(json)).unwrap();
     assert_eq!(hls_url, raw_720_url);
 }
+
+#[test]
+fn test_resolve_access_tier_precedence() {
+    use chzzk_load::chzzk::client::resolve_access_tier;
+    use chzzk_load::chzzk::models::{ChannelInfo, LiveDetailContent, PlaybackMeta};
+    use chzzk_load::chzzk::models_metadata::StreamAccessTier;
+
+    let base_content = LiveDetailContent {
+        live_id: Some(123),
+        status: "OPEN".to_string(),
+        live_title: Some("Title".to_string()),
+        channel: ChannelInfo {
+            channel_id: "c1".to_string(),
+            channel_name: "Name".to_string(),
+            channel_image_url: None,
+            verified_mark: Some(true),
+        },
+        live_playback_json: None,
+        chat_channel_id: None,
+        adult: Some(false),
+        open_date: None,
+        close_date: None,
+        category_type: None,
+        live_category: None,
+        live_category_value: None,
+        tags: vec![],
+        paid_promotion: None,
+        drops_campaign_no: None,
+        kr_only_viewing: None,
+        clip_active: None,
+        time_machine_active: None,
+        chat_active: None,
+        chat_available_group: None,
+        chat_available_condition: None,
+        min_follower_minute: None,
+        allow_subscriber_in_follower_mode: None,
+        chat_slow_mode_sec: None,
+        chat_emoji_mode: None,
+        chat_donation_ranking_exposure: None,
+        live_image_url: None,
+        default_thumbnail_image_url: None,
+        concurrent_user_count: None,
+        accumulate_count: None,
+        watch_party_no: None,
+        watch_party_tag: None,
+        watch_party_type: None,
+        watch_party_paid_product_id: None,
+        paid_product: None,
+        live_polling_status_json: None,
+        user_adult_status: None,
+        membership_benefit_type: None,
+        tv_app_viewing_policy_type: None,
+        blind_type: None,
+        log_power_active: None,
+    };
+
+    // 1. Default Public
+    assert_eq!(resolve_access_tier(&base_content, None), StreamAccessTier::Public);
+
+    // 2. AdultOnly
+    let mut adult_content = base_content.clone();
+    adult_content.adult = Some(true);
+    assert_eq!(resolve_access_tier(&adult_content, None), StreamAccessTier::AdultOnly);
+
+    // 3. CheatKey beats AdultOnly
+    let cheat_meta = PlaybackMeta {
+        video_id: None,
+        stream_seq: None,
+        live_id: None,
+        paid_live: None,
+        playback_auth_type: Some("CHZZK_CHEAT_KEY".to_string()),
+    };
+    assert_eq!(resolve_access_tier(&adult_content, Some(&cheat_meta)), StreamAccessTier::CheatKey);
+
+    // 4. NaverPlus beats CheatKey
+    let mut plus_content = adult_content.clone();
+    plus_content.membership_benefit_type = Some("NAVER_PLUS".to_string());
+    assert_eq!(resolve_access_tier(&plus_content, Some(&cheat_meta)), StreamAccessTier::NaverPlus);
+
+    // 5. ChannelSubscription beats NaverPlus
+    let mut sub_content = plus_content.clone();
+    sub_content.membership_benefit_type = Some("MEMBER_ONLY".to_string());
+    assert_eq!(resolve_access_tier(&sub_content, Some(&cheat_meta)), StreamAccessTier::ChannelSubscription);
+
+    // 6. PayPerView beats ChannelSubscription
+    let mut ppv_content = sub_content.clone();
+    ppv_content.paid_product = Some(serde_json::json!({"sku": "ticket_1"}));
+    assert_eq!(resolve_access_tier(&ppv_content, Some(&cheat_meta)), StreamAccessTier::PayPerView);
+}

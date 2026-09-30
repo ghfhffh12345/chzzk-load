@@ -3388,6 +3388,7 @@ async fn test_recording_session_cleans_empty_folder_when_no_chunks_saved() {
         title: "Empty Stream Title".to_string(),
         hls_url: "http://127.0.0.1:9999/nonexistent.m3u8".to_string(),
         chat_channel_id: None,
+        metadata: Default::default(),
     };
 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -3555,6 +3556,7 @@ fn main() {
         title: "Sports Broadcast (Encrypted)".to_string(),
         hls_url: "https://test.com/hls.m3u8".to_string(),
         chat_channel_id: None,
+        metadata: Default::default(),
     };
 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
