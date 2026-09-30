@@ -205,12 +205,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogEntry::cloud("Rclone remote 'gdrive:chzzk' verified successfully (v1.68.0)"),
         LogEntry::poll("Polling 12 monitored channels (cycle #142): 6 online, 3 recording"),
         LogEntry::rec(
-            "[하네 | Hane] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/a9a34351_20260930_1158",
+            "[하네 | Hane] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/[2026-09-30_1158] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)",
         ),
         LogEntry::rec(
             "[하네 | Hane] Direct CDN stream extracted: 1080p single-variant (p2p bypass)",
         ),
-        LogEntry::cloud("Remote folder ready: 'gdrive:chzzk/2026-09-30 하네 - 쌀먹쥐'"),
+        LogEntry::cloud(
+            "Remote folder ready: 'gdrive:chzzk/[2026-09-30_1158] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)'",
+        ),
         LogEntry::chat("[하네 | Hane] Connected to live chat WebSocket (kr-ss1.chat.naver.com)"),
         LogEntry::ffmpeg(
             "frame= 1800 fps= 60 q=-1.0 size= 28416kB time=00:01:00.00 bitrate=3878.4kbits/s speed=0.999x",
@@ -219,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogEntry::rec("[하네 | Hane] chunk_0140.ts sealed. Pushed to cloud upload queue."),
         LogEntry::clean("[하네 | Hane] Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)"),
         LogEntry::rec(
-            "[너불] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/b1a23456_20260930_1158",
+            "[너불] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/[2026-09-30_1158] 너불 - 교정야호 교통정비공사 사장 황인정",
         ),
         LogEntry::cloud("Initialized 'title_history.txt' on remote storage for 너불"),
         LogEntry::chat("[너불] Connected to live chat WebSocket (kr-ss2.chat.naver.com)"),
