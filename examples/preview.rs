@@ -213,6 +213,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogEntry::cloud(
             "Remote folder ready: 'remote:chzzk/[2026-09-30_1158] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)'",
         ),
+        LogEntry::cloud("Initialized 'metadata.jsonl' on remote storage for 하네 | Hane"),
         LogEntry::chat("[하네 | Hane] Connected to live chat WebSocket (kr-ss1.chat.naver.com)"),
         LogEntry::ffmpeg(
             "frame= 1800 fps= 60 q=-1.0 size= 28416kB time=00:01:00.00 bitrate=3878.4kbits/s speed=0.999x",
@@ -228,6 +229,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogEntry::rec("[너불] chunk_0047.ts sealed. Pushed to cloud upload queue."),
         LogEntry::clean("[너불] Uploaded & deleted chunk_0047.ts (reclaimed 27.8 MB)"),
         LogEntry::chat("[너불] Buffered 500 messages (64 KB). Flushed to chat_0000.jsonl"),
+        LogEntry::rec(
+            "[너불] Stream metadata changed (category: 'TALK' -> 'GAME' [Valorant], title: '교통정비공사 -> 발로란트 시참'). Updated 'metadata.jsonl'",
+        ),
+        LogEntry::cloud(
+            "Synced stream metadata update to 'metadata.jsonl' on remote storage for 너불",
+        ),
         LogEntry::warn(
             "Stream cooldown active for channel a9a34351 (live_id '3829140' deduplicated, 14s remaining)",
         ),
@@ -326,9 +333,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.handle_event(AppEvent::Log(LogEntry::chat(
                             "[하네 | Hane] Live chat donation captured: 5,000 Cheese from '치즈도둑'",
                         )));
+                    } else if key.code == KeyCode::Char('m') {
+                        let new_title = "쌀먹쥐 2부 - 마작 대회 (봉누도2)".to_string();
+                        if let Some(ch) = app.channels.iter_mut().find(|c| c.id == channel_hane) {
+                            ch.title = new_title.clone();
+                        }
+                        app.handle_event(AppEvent::Log(LogEntry::rec(
+                            "[하네 | Hane] Stream metadata changed (category: 'GAME' [봉누도2], title: '쌀먹쥐 2부 - 마작 대회 (봉누도2)'). Updated 'metadata.jsonl'",
+                        )));
+                        app.handle_event(AppEvent::Log(LogEntry::cloud(
+                            "Synced stream metadata update to 'metadata.jsonl' on remote storage for 하네 | Hane",
+                        )));
                     } else if key.code == KeyCode::Char('p') {
+                        let new_title = "신곡 녹음 후기 & 잡담".to_string();
+                        if let Some(ch) = app.channels.iter_mut().find(|c| c.id == channel_pokijjang) {
+                            ch.title = new_title.clone();
+                        }
                         app.handle_event(AppEvent::Log(LogEntry::poll(
-                            "Polled channel '포키쨩': title changed to '신곡 녹음 후기 & 잡담'",
+                            "Polled channel '포키쨩': metadata transition -> category: 'TALK', title: '신곡 녹음 후기 & 잡담'",
                         )));
                     } else {
                         app.handle_event(AppEvent::Key(key));
@@ -492,9 +514,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )));
                     }
                     2 => {
-                        app.handle_event(AppEvent::Log(LogEntry::cloud(
-                            "Synced stream metadata update to 'metadata.jsonl' on remote storage",
-                        )));
+                        let transitions = [
+                            ("하네 | Hane", &channel_hane, "쌀먹쥐 3부 - 심야 낚시", "GAME", "봉누도2"),
+                            ("너불", &channel_lilpa, "황인정 사장의 야간 순찰", "TALK", "소통"),
+                            ("강퀴", &channel_kangqui, "엄마한턴만더하고끌게 / 1루트 클래식 하드 4부", "GAME", "전략"),
+                        ];
+                        let (name, chan_id, new_title, cat, val) = transitions[(sim_cycle / 8) % transitions.len()];
+                        if let Some(ch) = app.channels.iter_mut().find(|c| c.id == *chan_id) {
+                            ch.title = new_title.to_string();
+                        }
+                        app.handle_event(AppEvent::Log(LogEntry::rec(format!(
+                            "[{name}] Stream metadata changed (category: '{cat}' [{val}], title: '{new_title}'). Updated 'metadata.jsonl'"
+                        ))));
+                        app.handle_event(AppEvent::Log(LogEntry::cloud(format!(
+                            "Synced stream metadata update to 'metadata.jsonl' on remote storage for {name}"
+                        ))));
                     }
                     3 => {
                         app.handle_event(AppEvent::Log(LogEntry::warn(
