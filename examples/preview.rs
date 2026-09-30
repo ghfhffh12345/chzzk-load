@@ -200,18 +200,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Streamer names are prepended to chunk and chat event logs.
     app.logs = VecDeque::from([
         LogEntry::info(
-            "Loaded configuration from 'settings.toml' (upload_concurrency: 3, record_chat: true)",
+            "Loaded configuration from 'settings.toml' (upload_concurrency: 3, record_chat: true, skip_connection_check: false)",
         ),
+        LogEntry::cloud("Verifying rclone remote 'remote:chzzk' in background..."),
         LogEntry::cloud("Rclone remote 'remote:chzzk' verified successfully (v1.68.0)"),
         LogEntry::poll("Polling 12 monitored channels (cycle #142): 6 online, 3 recording"),
         LogEntry::rec(
-            "[하네 | Hane] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/[2026-09-30_1158] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)",
+            "[하네 | Hane] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/[2026-10-01_0100] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)",
         ),
         LogEntry::rec(
             "[하네 | Hane] Direct CDN stream extracted: 1080p single-variant (p2p bypass)",
         ),
         LogEntry::cloud(
-            "Remote folder ready: 'remote:chzzk/[2026-09-30_1158] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)'",
+            "Remote folder ready: 'remote:chzzk/[2026-10-01_0100] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)'",
         ),
         LogEntry::cloud("Initialized 'metadata.jsonl' on remote storage for 하네 | Hane"),
         LogEntry::chat("[하네 | Hane] Connected to live chat WebSocket (kr-ss1.chat.naver.com)"),
@@ -222,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogEntry::rec("[하네 | Hane] chunk_0140.ts sealed. Pushed to cloud upload queue."),
         LogEntry::clean("[하네 | Hane] Uploaded & deleted chunk_0140.ts (reclaimed 27.9 MB)"),
         LogEntry::rec(
-            "[너불] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/[2026-09-30_1158] 너불 - 교정야호 교통정비공사 사장 황인정",
+            "[너불] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/[2026-10-01_0100] 너불 - 교정야호 교통정비공사 사장 황인정",
         ),
         LogEntry::cloud("Initialized 'metadata.jsonl' on remote storage for 너불"),
         LogEntry::chat("[너불] Connected to live chat WebSocket (kr-ss2.chat.naver.com)"),
@@ -351,6 +352,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         app.handle_event(AppEvent::Log(LogEntry::poll(
                             "Polled channel '포키쨩': metadata transition -> category: 'TALK', title: '신곡 녹음 후기 & 잡담'",
+                        )));
+                    } else if key.code == KeyCode::Char('s') {
+                        app.handle_event(AppEvent::Log(LogEntry::cloud(
+                            "Rclone remote connection check skipped (--skip-rclone-check)",
+                        )));
+                    } else if key.code == KeyCode::Char('b') {
+                        app.handle_event(AppEvent::Log(LogEntry::cloud(
+                            "Verifying rclone remote 'remote:chzzk' in background...",
+                        )));
+                        app.handle_event(AppEvent::Log(LogEntry::cloud(
+                            "Rclone remote 'remote:chzzk' verified successfully (v1.68.0)",
                         )));
                     } else {
                         app.handle_event(AppEvent::Key(key));
@@ -498,7 +510,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 4. Simulate periodic realistic background events (FFmpeg, Poll, Cloud, Warn, Error restriction)
             _ = sim_interval.tick() => {
-                match sim_cycle % 8 {
+                match sim_cycle % 9 {
                     0 => {
                         let frame = 3600 + sim_cycle * 600;
                         let size = 56832 + sim_cycle * 9472;
@@ -519,7 +531,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ("너불", &channel_lilpa, "황인정 사장의 야간 순찰", "TALK", "소통"),
                             ("강퀴", &channel_kangqui, "엄마한턴만더하고끌게 / 1루트 클래식 하드 4부", "GAME", "전략"),
                         ];
-                        let (name, chan_id, new_title, cat, val) = transitions[(sim_cycle / 8) % transitions.len()];
+                        let (name, chan_id, new_title, cat, val) = transitions[(sim_cycle / 9) % transitions.len()];
                         if let Some(ch) = app.channels.iter_mut().find(|c| c.id == *chan_id) {
                             ch.title = new_title.to_string();
                         }
@@ -548,6 +560,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     6 => {
                         app.handle_event(AppEvent::Log(LogEntry::poll(
                             "Channel status update: '강소연' live session verified (standby)",
+                        )));
+                    }
+                    7 => {
+                        app.handle_event(AppEvent::Log(LogEntry::cloud(
+                            "Background rclone remote check: 'remote:chzzk' verified successfully (latency: 182ms)",
                         )));
                     }
                     _ => {
