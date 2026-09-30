@@ -1473,7 +1473,9 @@ impl EngineOrchestrator {
                             .event_tx
                             .send(AppEvent::Log(LogEntry::poll(format!(
                                 "Channel {} ({}) stream recently concluded (liveId: {:?}). Waiting for API cache to close...",
-                                channel.id, channel.name, info.live_id
+                                channel.id,
+                                channel.display_label(),
+                                info.live_id
                             ))))
                             .await;
 
@@ -1481,7 +1483,7 @@ impl EngineOrchestrator {
                             .event_tx
                             .send(AppEvent::ChannelUpdate {
                                 channel_id: channel.id.clone(),
-                                channel_name: channel.name.clone(),
+                                channel_name: channel.display_label().to_string(),
                                 is_live: false,
                                 title: "Stream Concluded (Cooldown)".to_string(),
                             })
@@ -1634,7 +1636,7 @@ impl EngineOrchestrator {
                         .event_tx
                         .send(AppEvent::ChannelUpdate {
                             channel_id: channel.id.clone(),
-                            channel_name: channel.name.clone(),
+                            channel_name: channel.display_label().to_string(),
                             is_live: false,
                             title: "Offline".to_string(),
                         })

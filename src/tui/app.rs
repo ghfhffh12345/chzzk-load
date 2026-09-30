@@ -112,7 +112,7 @@ impl App {
         for ch in &settings.channels {
             app.channels.push(ChannelItem {
                 id: ch.id.clone(),
-                name: ch.name.clone(),
+                name: ch.display_label().to_string(),
                 is_live: false,
                 is_active: false,
                 title: "Checking...".to_string(),
