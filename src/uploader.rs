@@ -2,9 +2,11 @@ use std::path::PathBuf;
 
 pub mod backend;
 pub mod rclone;
+pub mod worker;
 
 pub use backend::{BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend};
 pub use rclone::{RcloneBackend, RcloneStats, format_destination, parse_rclone_log_line};
+pub use worker::UploadWorker;
 
 /// Returns the broadcast identifier for logging, prioritizing the streamer/channel name
 /// and falling back to channel_id if empty or whitespace-only.

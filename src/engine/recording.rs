@@ -1,0 +1,620 @@
+use chrono::Local;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc::Sender;
+use tokio_util::sync::CancellationToken;
+
+use crate::app_path::resolve_path;
+use crate::chzzk::chat::ChzzkChatClient;
+use crate::chzzk::client::ChzzkClient;
+use crate::chzzk::models::LiveStreamInfo;
+use crate::config::Settings;
+use crate::engine::dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
+use crate::engine::session::{ActiveSessionState, FinishedSession};
+use crate::engine::state::EngineState;
+use crate::recorder::ffmpeg::{
+    build_ffmpeg_command, build_ffmpeg_command_with_bin, is_ffmpeg_key_forbidden_error,
+};
+use crate::recorder::watcher::SegmentWatcher;
+use crate::tui::event::{AppEvent, LogEntry};
+use crate::uploader::{UploadBackend, UploadTask, broadcast_identifier};
+
+/// Executes the complete lifecycle of a single recording session for a live channel.
+pub struct RecordingSession;
+
+impl RecordingSession {
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn(
+        channel_id: String,
+        info: LiveStreamInfo,
+        upload_tx: Sender<UploadTask>,
+        settings: Settings,
+        backend_opt: Option<Arc<dyn UploadBackend>>,
+        chzzk: ChzzkClient,
+        event_tx: Sender<AppEvent>,
+        state: EngineState,
+        cancel_token: CancellationToken,
+        ffmpeg_bin: Option<String>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let _ = event_tx
+                .send(AppEvent::RecordingStarted {
+                    channel_id: channel_id.clone(),
+                    session_title: info.title.clone(),
+                })
+                .await;
+
+            let alias = settings
+                .channels
+                .iter()
+                .find(|c| c.id == channel_id)
+                .and_then(|c| c.alias.clone());
+
+            let (session_folder_name, start_timestamp, initial_metadata_jsonl) = {
+                let mut sessions = state.active_sessions.lock().await;
+                let session = sessions.entry(channel_id.clone()).or_insert_with(|| {
+                    let start_timestamp = Local::now().format("%Y-%m-%d_%H%M%S").to_string();
+                    ActiveSessionState::new(
+                        start_timestamp,
+                        info.streamer_name.clone(),
+                        alias.clone(),
+                        info.metadata.clone(),
+                    )
+                });
+                (
+                    session.folder_name(),
+                    session.start_timestamp.clone(),
+                    session.format_metadata_jsonl(),
+                )
+            };
+
+            let recordings_base = resolve_path(Path::new(&settings.general.recordings_dir));
+            let session_dir = recordings_base.join(&session_folder_name);
+
+            if let Err(e) = tokio::fs::create_dir_all(&session_dir).await {
+                let _ = event_tx
+                    .send(AppEvent::Log(LogEntry::error(format!(
+                        "Failed to create session directory {}: {}",
+                        session_dir.display(),
+                        e
+                    ))))
+                    .await;
+                let mut active = state.active_recordings.lock().await;
+                active.remove(&channel_id);
+                let mut sessions = state.active_sessions.lock().await;
+                sessions.remove(&channel_id);
+                let _ = event_tx
+                    .send(AppEvent::RecordingEnded {
+                        channel_id: channel_id.clone(),
+                    })
+                    .await;
+                return;
+            }
+
+            let metadata_path = session_dir.join("metadata.jsonl");
+            if let Err(e) = tokio::fs::write(&metadata_path, &initial_metadata_jsonl).await {
+                let _ = event_tx
+                    .send(AppEvent::Log(LogEntry::rec(format!(
+                        "[{channel_id}] Failed to write 'metadata.jsonl': {e}"
+                    ))))
+                    .await;
+            }
+
+            if let Some(ref backend) = backend_opt {
+                let backend = backend.clone();
+                let remote_dir = session_folder_name.clone();
+                let initial_jsonl = initial_metadata_jsonl.clone();
+                let event_tx_clone = event_tx.clone();
+                let channel_id_clone = channel_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = backend
+                        .upload_text(&remote_dir, "metadata.jsonl", &initial_jsonl)
+                        .await
+                    {
+                        let _ = event_tx_clone
+                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                "[{channel_id_clone}] Failed to upload initial 'metadata.jsonl': {e}"
+                            ))))
+                            .await;
+                    } else {
+                        let _ = event_tx_clone
+                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                "[{channel_id_clone}] Uploaded initial 'metadata.jsonl'"
+                            ))))
+                            .await;
+                    }
+                });
+            }
+            let session_cancel = cancel_token.child_token();
+            {
+                let mut tokens = state.session_cancel_tokens.lock().await;
+                tokens.insert(channel_id.clone(), session_cancel.clone());
+            }
+
+            let (chat_sealed_tx, mut chat_sealed_rx) = tokio::sync::mpsc::channel::<PathBuf>(32);
+            let chat_forward_handle = {
+                let upload_tx = upload_tx.clone();
+                let event_tx = event_tx.clone();
+                let channel_id = channel_id.clone();
+                let session_folder = session_folder_name.clone();
+                let streamer = info.streamer_name.clone();
+                let backend_active = backend_opt.is_some();
+
+                tokio::spawn(async move {
+                    while let Some(chat_path) = chat_sealed_rx.recv().await {
+                        process_sealed_chunk(
+                            &chat_path,
+                            &session_folder,
+                            &channel_id,
+                            &streamer,
+                            &upload_tx,
+                            &event_tx,
+                            backend_active,
+                        )
+                        .await;
+                    }
+                })
+            };
+
+            let chat_session_cancel = session_cancel.clone();
+            let chat_task = if settings.general.record_chat {
+                if let Some(chat_cid) = info.chat_channel_id.clone() {
+                    let chzzk_chat = chzzk.clone();
+                    let event_tx_chat = event_tx.clone();
+                    let chat_cid_id = channel_id.clone();
+                    let chat_session_dir = session_dir.clone();
+                    let flush_sec = settings.general.chat_flush_interval_seconds;
+                    let chat_chunk_sealed_tx = chat_sealed_tx.clone();
+
+                    Some(tokio::spawn(async move {
+                        let access_token = tokio::select! {
+                            _ = chat_session_cancel.cancelled() => return,
+                            res = chzzk_chat.get_chat_access_token(&chat_cid) => match res {
+                                Ok(t) => {
+                                    let _ = event_tx_chat
+                                        .send(AppEvent::Log(LogEntry::chat(format!(
+                                            "Retrieved chat access token for channel {chat_cid_id}"
+                                        ))))
+                                        .await;
+                                    t
+                                }
+                                Err(e) => {
+                                    let _ = event_tx_chat
+                                        .send(AppEvent::Log(LogEntry::warn(format!(
+                                            "Failed to retrieve chat access token for channel {chat_cid_id}: {e}"
+                                        ))))
+                                        .await;
+                                    return;
+                                }
+                            }
+                        };
+
+                        if chat_session_cancel.is_cancelled() {
+                            return;
+                        }
+
+                        let (stats_tx, mut stats_rx) = tokio::sync::mpsc::channel::<u64>(50);
+                        let forward_cid = chat_cid_id.clone();
+                        let forward_tx = event_tx_chat.clone();
+                        let forward_handle = tokio::spawn(async move {
+                            while let Some(count) = stats_rx.recv().await {
+                                let _ = forward_tx.try_send(AppEvent::ChatStats {
+                                    channel_id: forward_cid.clone(),
+                                    message_count: count,
+                                });
+                            }
+                        });
+
+                        let chunk_dur =
+                            Duration::from_secs(settings.general.chunk_duration_seconds);
+                        let mut client = ChzzkChatClient::new(
+                            chat_cid,
+                            access_token,
+                            chat_session_dir,
+                            chunk_dur,
+                            Duration::from_secs(flush_sec),
+                            chat_session_cancel,
+                        );
+                        if let Some(ws_url) = chzzk_chat.chat_ws_url() {
+                            client = client.with_custom_ws_url(ws_url);
+                        }
+
+                        let _ = event_tx_chat
+                            .send(AppEvent::Log(LogEntry::chat(format!(
+                                "Started real-time chat recording for channel {chat_cid_id}"
+                            ))))
+                            .await;
+
+                        match client.run(Some(stats_tx), Some(chat_chunk_sealed_tx)).await {
+                            Ok(total_msgs) => {
+                                let _ = event_tx_chat
+                                    .send(AppEvent::Log(LogEntry::chat(format!(
+                                        "Chat recording finished for channel {chat_cid_id} ({total_msgs} messages)"
+                                    ))))
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = event_tx_chat
+                                    .send(AppEvent::Log(LogEntry::warn(format!(
+                                        "Chat recording error for channel {chat_cid_id}: {e}"
+                                    ))))
+                                    .await;
+                            }
+                        }
+
+                        let _ = forward_handle.await;
+                    }))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            drop(chat_sealed_tx);
+
+            let output_pattern = session_dir.join("chunk_%04d.ts");
+            let chunk_dur = settings.general.chunk_duration_seconds;
+            let cookie = chzzk.cookie_header();
+            let mut cmd = match ffmpeg_bin.as_deref() {
+                Some(bin) => build_ffmpeg_command_with_bin(
+                    bin,
+                    &info.hls_url,
+                    &output_pattern,
+                    chunk_dur,
+                    cookie,
+                ),
+                None => build_ffmpeg_command(&info.hls_url, &output_pattern, chunk_dur, cookie),
+            };
+
+            let key_forbidden = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let key_forbidden_notify = Arc::new(tokio::sync::Notify::new());
+
+            let mut child = match cmd.spawn() {
+                Ok(mut child) => {
+                    if let Some(stderr) = child.stderr.take() {
+                        let event_tx_stderr = event_tx.clone();
+                        let key_forbidden_stderr = key_forbidden.clone();
+                        let key_forbidden_notify = key_forbidden_notify.clone();
+                        tokio::spawn(async move {
+                            use std::sync::atomic::Ordering;
+                            use tokio::io::{AsyncBufReadExt, BufReader};
+                            let mut reader = BufReader::new(stderr);
+                            let mut byte_buf = Vec::new();
+                            while let Ok(n) = reader.read_until(b'\n', &mut byte_buf).await {
+                                if n == 0 {
+                                    break;
+                                }
+                                let lossy_line = String::from_utf8_lossy(&byte_buf);
+                                let trimmed = lossy_line.trim();
+                                if !trimmed.is_empty() {
+                                    let is_key_error = is_ffmpeg_key_forbidden_error(trimmed);
+
+                                    if is_key_error {
+                                        key_forbidden_stderr.store(true, Ordering::SeqCst);
+                                        key_forbidden_notify.notify_one();
+                                    }
+
+                                    if !key_forbidden_stderr.load(Ordering::SeqCst) {
+                                        let _ = event_tx_stderr
+                                            .try_send(AppEvent::Log(LogEntry::ffmpeg(trimmed)));
+                                    }
+                                }
+                                byte_buf.clear();
+                            }
+                        });
+                    }
+
+                    let _ = event_tx
+                        .send(AppEvent::Log(LogEntry::rec(format!(
+                            "Spawned FFmpeg segmenter ({}s TS chunks) -> {}",
+                            chunk_dur,
+                            session_dir.display()
+                        ))))
+                        .await;
+                    child
+                }
+                Err(e) => {
+                    let _ = event_tx
+                        .send(AppEvent::Log(LogEntry::error(format!(
+                            "Failed to spawn FFmpeg: {e}"
+                        ))))
+                        .await;
+                    session_cancel.cancel();
+                    {
+                        let mut tokens = state.session_cancel_tokens.lock().await;
+                        tokens.remove(&channel_id);
+                    }
+                    if let Some(mut chat_handle) = chat_task
+                        && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
+                            .await
+                            .is_err()
+                    {
+                        chat_handle.abort();
+                    }
+                    if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
+                        while let Ok(Some(entry)) = rd.next_entry().await {
+                            let _ = tokio::fs::remove_file(entry.path()).await;
+                        }
+                    }
+                    let _ = tokio::fs::remove_dir(&session_dir).await;
+                    let mut active = state.active_recordings.lock().await;
+                    active.remove(&channel_id);
+                    let mut sessions = state.active_sessions.lock().await;
+                    sessions.remove(&channel_id);
+                    let _ = event_tx
+                        .send(AppEvent::RecordingEnded {
+                            channel_id: channel_id.clone(),
+                        })
+                        .await;
+                    return;
+                }
+            };
+
+            let mut watcher = SegmentWatcher::new(session_dir.clone());
+            let mut restricted_abort = false;
+
+            loop {
+                tokio::select! {
+                    _ = key_forbidden_notify.notified() => {
+                        restricted_abort = true;
+                        break;
+                    }
+                    _ = session_cancel.cancelled() => {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                "Cancellation received for channel {channel_id}, stopping FFmpeg gracefully..."
+                            ))))
+                            .await;
+
+                        if let Some(mut stdin) = child.stdin.take() {
+                            use tokio::io::AsyncWriteExt;
+                            let _ = stdin.write_all(b"q\n").await;
+                            let _ = stdin.flush().await;
+                            drop(stdin);
+                        }
+
+                        match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+                            Ok(Ok(status)) => {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(format!(
+                                        "FFmpeg process exited cleanly: {status}"
+                                    ))))
+                                    .await;
+                            }
+                            _ => {
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(
+                                        "FFmpeg did not exit within timeout, terminating process...",
+                                    )))
+                                    .await;
+                            }
+                        }
+
+                        // Collect lingering chunks on cancellation
+                        seal_and_enqueue_chunks(
+                            &mut watcher,
+                            &session_folder_name,
+                            &channel_id,
+                            &info.streamer_name,
+                            &upload_tx,
+                            &event_tx,
+                            backend_opt.is_some(),
+                            true,
+                        )
+                        .await;
+
+                        break;
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        if key_forbidden.load(std::sync::atomic::Ordering::SeqCst) {
+                            restricted_abort = true;
+                            break;
+                        }
+
+                        let is_finished = match child.try_wait() {
+                            Ok(Some(status)) => {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(format!(
+                                        "FFmpeg process exited with status: {status}"
+                                    ))))
+                                    .await;
+                                true
+                            }
+                            Ok(None) => false,
+                            Err(e) => {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::warn(format!(
+                                        "Error waiting on FFmpeg child: {e}"
+                                    ))))
+                                    .await;
+                                true
+                            }
+                        };
+
+                        seal_and_enqueue_chunks(
+                            &mut watcher,
+                            &session_folder_name,
+                            &channel_id,
+                            &info.streamer_name,
+                            &upload_tx,
+                            &event_tx,
+                            backend_opt.is_some(),
+                            is_finished,
+                        )
+                        .await;
+
+                        if is_finished {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if restricted_abort {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+
+                session_cancel.cancel();
+                if let Some(mut chat_handle) = chat_task
+                    && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
+                        .await
+                        .is_err()
+                {
+                    chat_handle.abort();
+                }
+
+                // Clean up session directory and any empty/partial files
+                if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
+                    while let Ok(Some(entry)) = rd.next_entry().await {
+                        let _ = tokio::fs::remove_file(entry.path()).await;
+                    }
+                }
+                let _ = tokio::fs::remove_dir(&session_dir).await;
+
+                {
+                    let mut tokens = state.session_cancel_tokens.lock().await;
+                    tokens.remove(&channel_id);
+                }
+                {
+                    let mut active = state.active_recordings.lock().await;
+                    active.remove(&channel_id);
+                }
+                {
+                    let mut sessions = state.active_sessions.lock().await;
+                    sessions.remove(&channel_id);
+                }
+
+                let is_newly_restricted = {
+                    let mut restricted = state.restricted_channels.lock().await;
+                    restricted.insert(channel_id.clone())
+                };
+
+                if let Some(lid) = info.live_id {
+                    let mut r_ids = state.restricted_live_ids.lock().await;
+                    r_ids.insert(channel_id.clone(), lid);
+                }
+
+                if is_newly_restricted {
+                    let log_msg = format!(
+                        "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
+                        channel_id, info.streamer_name
+                    );
+                    let _ = event_tx.send(AppEvent::Log(LogEntry::error(log_msg))).await;
+                }
+
+                let _ = event_tx
+                    .send(AppEvent::RecordingEnded {
+                        channel_id: channel_id.clone(),
+                    })
+                    .await;
+
+                let _ = event_tx
+                    .send(AppEvent::ChannelUpdate {
+                        channel_id: channel_id.clone(),
+                        channel_name: info.streamer_name.clone(),
+                        is_live: true,
+                        title: info.title.clone(),
+                    })
+                    .await;
+
+                return;
+            }
+
+            session_cancel.cancel();
+            if let Some(mut chat_handle) = chat_task
+                && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
+                    .await
+                    .is_err()
+            {
+                chat_handle.abort();
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(2), chat_forward_handle).await;
+
+            let metadata_jsonl = {
+                let sessions = state.active_sessions.lock().await;
+                sessions
+                    .get(&channel_id)
+                    .map(|s| s.format_metadata_jsonl())
+                    .unwrap_or_default()
+            };
+            if !metadata_jsonl.is_empty()
+                && let Some(ref backend) = backend_opt
+            {
+                match backend
+                    .upload_text(&session_folder_name, "metadata.jsonl", &metadata_jsonl)
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                "Uploaded 'metadata.jsonl' for {channel_id}"
+                            ))))
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::warn(format!(
+                                "Failed to upload 'metadata.jsonl' for {channel_id}: {e}"
+                            ))))
+                            .await;
+                    }
+                }
+            }
+
+            {
+                let mut tokens = state.session_cancel_tokens.lock().await;
+                tokens.remove(&channel_id);
+            }
+            {
+                let mut active = state.active_recordings.lock().await;
+                active.remove(&channel_id);
+            }
+            {
+                let mut sessions = state.active_sessions.lock().await;
+                if sessions
+                    .get(&channel_id)
+                    .is_some_and(|s| s.start_timestamp == start_timestamp)
+                {
+                    sessions.remove(&channel_id);
+                }
+            }
+            {
+                let mut finished = state.finished_sessions.lock().await;
+                finished.insert(
+                    channel_id.clone(),
+                    FinishedSession {
+                        live_id: info.live_id,
+                        finished_at: std::time::Instant::now(),
+                    },
+                );
+            }
+            let _ = event_tx
+                .send(AppEvent::RecordingEnded {
+                    channel_id: channel_id.clone(),
+                })
+                .await;
+            let _ = event_tx
+                .send(AppEvent::Log(LogEntry::rec(format!(
+                    "Recording session ended for channel {} (liveId: {:?})",
+                    channel_id, info.live_id
+                ))))
+                .await;
+
+            // Clean up session directory if empty (e.g. no chunks were saved or all chunks/chat were already uploaded)
+            let target = broadcast_identifier(&info.streamer_name, &channel_id);
+            if let Ok(true) =
+                crate::engine::cleanup::cleanup_session_dir_if_empty(&session_dir).await
+            {
+                let _ = event_tx
+                    .send(AppEvent::Log(LogEntry::clean(format!(
+                        "[{target}] Cleaned up empty session folder '{}'",
+                        session_dir.display()
+                    ))))
+                    .await;
+            }
+        })
+    }
+}

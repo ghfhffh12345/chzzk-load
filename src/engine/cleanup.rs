@@ -1,0 +1,128 @@
+use std::collections::HashSet;
+use std::path::Path;
+
+/// Checks if a session directory is empty or contains only `metadata.jsonl`.
+/// If so, removes `metadata.jsonl` (if present) and removes the directory.
+/// Returns `Ok(true)` if the directory was removed, `Ok(false)` if it contained other files
+/// or was preserved, or `Err(e)` on I/O error.
+pub async fn cleanup_session_dir_if_empty(session_dir: &Path) -> std::io::Result<bool> {
+    if !session_dir.exists() || !session_dir.is_dir() {
+        return Ok(false);
+    }
+
+    let mut sub_entries = match tokio::fs::read_dir(session_dir).await {
+        Ok(rd) => rd,
+        Err(e) => return Err(e),
+    };
+
+    let mut is_empty_or_metadata_only = true;
+    let mut has_metadata = false;
+
+    while let Ok(Some(sub_entry)) = sub_entries.next_entry().await {
+        if sub_entry.file_name() == "metadata.jsonl" {
+            has_metadata = true;
+        } else {
+            is_empty_or_metadata_only = false;
+            break;
+        }
+    }
+
+    if is_empty_or_metadata_only {
+        if has_metadata {
+            let _ = tokio::fs::remove_file(session_dir.join("metadata.jsonl")).await;
+        }
+        if tokio::fs::remove_dir(session_dir).await.is_ok() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Cleans up empty or metadata-only session directories inside the recordings directory,
+/// strictly excluding any currently active session directory names or channel prefixes.
+pub async fn cleanup_empty_session_dirs_excluding(
+    recordings_dir: &Path,
+    active_channels: &HashSet<String>,
+) -> std::io::Result<usize> {
+    if !recordings_dir.exists() || !recordings_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let mut removed_count = 0;
+    let mut entries = tokio::fs::read_dir(recordings_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let is_dir = match entry.file_type().await {
+            Ok(ft) => ft.is_dir(),
+            Err(_) => entry.path().is_dir(),
+        };
+        if is_dir {
+            let path = entry.path();
+            let dir_name = entry.file_name();
+            let dir_name_str = dir_name.to_string_lossy();
+
+            let is_active = active_channels.iter().any(|item| {
+                dir_name_str == item.as_str() || dir_name_str.starts_with(&format!("{item}_"))
+            });
+            if is_active {
+                continue;
+            }
+
+            if let Ok(true) = cleanup_session_dir_if_empty(&path).await {
+                removed_count += 1;
+            }
+        }
+    }
+
+    Ok(removed_count)
+}
+
+/// Cleans up all empty or metadata-only session directories inside the recordings directory.
+pub async fn cleanup_empty_session_dirs(recordings_dir: &Path) -> std::io::Result<usize> {
+    cleanup_empty_session_dirs_excluding(recordings_dir, &HashSet::new()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_cleanup_session_dir_if_empty_with_metadata_jsonl() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_cleanup_meta_{}", rand::random::<u32>()));
+        let session_dir = temp_dir.join("session_123");
+        tokio::fs::create_dir_all(&session_dir).await.unwrap();
+
+        let meta_file = session_dir.join("metadata.jsonl");
+        tokio::fs::write(&meta_file, b"{\"event\":\"INITIAL_STATE\"}\n")
+            .await
+            .unwrap();
+
+        assert!(session_dir.exists());
+        assert!(meta_file.exists());
+
+        let removed = cleanup_session_dir_if_empty(&session_dir).await.unwrap();
+        assert!(removed);
+        assert!(!session_dir.exists());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_session_dir_if_empty_preserves_dir_with_chunks() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_cleanup_preserve_{}", rand::random::<u32>()));
+        let session_dir = temp_dir.join("session_123");
+        tokio::fs::create_dir_all(&session_dir).await.unwrap();
+
+        let chunk_file = session_dir.join("chunk_0000.ts");
+        tokio::fs::write(&chunk_file, b"video data").await.unwrap();
+
+        let removed = cleanup_session_dir_if_empty(&session_dir).await.unwrap();
+        assert!(!removed);
+        assert!(session_dir.exists());
+        assert!(chunk_file.exists());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+}
