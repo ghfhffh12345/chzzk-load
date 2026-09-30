@@ -73,7 +73,7 @@ fn test_parse_rclone_log_non_json_or_notice() {
 #[test]
 fn test_rclone_backend_command_builder() {
     let config = RcloneConfig {
-        remote_path: "gdrive:Chzzk_Recordings".to_string(),
+        remote_path: "remote:chzzk".to_string(),
         upload_concurrency: 3,
         rclone_bin: "rclone".to_string(),
         extra_args: vec!["--fast-list".to_string(), "--transfers=4".to_string()],
@@ -81,7 +81,7 @@ fn test_rclone_backend_command_builder() {
     let backend = RcloneBackend::new(config);
     let cmd = backend.build_copy_command(
         Path::new("recordings/chunk_0000.ts"),
-        "gdrive:Chzzk_Recordings/session/chunk_0000.ts",
+        "remote:chzzk/session/chunk_0000.ts",
     );
     let std_cmd = cmd.as_std();
     let args: Vec<String> = std_cmd
@@ -91,7 +91,7 @@ fn test_rclone_backend_command_builder() {
 
     assert_eq!(args[0], "copyto");
     assert!(args[1].ends_with("chunk_0000.ts"));
-    assert_eq!(args[2], "gdrive:Chzzk_Recordings/session/chunk_0000.ts");
+    assert_eq!(args[2], "remote:chzzk/session/chunk_0000.ts");
     assert!(args.contains(&"--use-json-log".to_string()));
     assert!(args.contains(&"--stats".to_string()));
     assert!(args.contains(&"250ms".to_string()));

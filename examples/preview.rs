@@ -202,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogEntry::info(
             "Loaded configuration from 'settings.toml' (upload_concurrency: 3, record_chat: true)",
         ),
-        LogEntry::cloud("Rclone remote 'gdrive:chzzk' verified successfully (v1.68.0)"),
+        LogEntry::cloud("Rclone remote 'remote:chzzk' verified successfully (v1.68.0)"),
         LogEntry::poll("Polling 12 monitored channels (cycle #142): 6 online, 3 recording"),
         LogEntry::rec(
             "[하네 | Hane] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/[2026-09-30_1158] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)",
@@ -211,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "[하네 | Hane] Direct CDN stream extracted: 1080p single-variant (p2p bypass)",
         ),
         LogEntry::cloud(
-            "Remote folder ready: 'gdrive:chzzk/[2026-09-30_1158] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)'",
+            "Remote folder ready: 'remote:chzzk/[2026-09-30_1158] [Hane] 하네 - 쌀먹쥐 ~~~쌀쌀의 생활(봉누도2)'",
         ),
         LogEntry::chat("[하네 | Hane] Connected to live chat WebSocket (kr-ss1.chat.naver.com)"),
         LogEntry::ffmpeg(

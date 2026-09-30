@@ -23,7 +23,7 @@ fn test_general_config_chat_settings_custom() {
 #[test]
 fn test_default_rclone_config() {
     let cfg = RcloneConfig::default();
-    assert_eq!(cfg.remote_path, "gdrive:Chzzk_Recordings");
+    assert_eq!(cfg.remote_path, "remote:chzzk");
     assert_eq!(cfg.upload_concurrency, 3);
     assert_eq!(cfg.rclone_bin, "rclone");
     assert!(cfg.extra_args.is_empty());
