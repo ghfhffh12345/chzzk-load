@@ -67,12 +67,12 @@ function createMockBinary(tempDir) {
       '  echo "Usage: chzzk-load [OPTIONS]"',
       '  exit 0',
       'fi',
-      'config_file="settings.json"',
+      'config_file="settings.toml"',
       'if [ "$1" = "-c" ] || [ "$1" = "--config" ]; then',
       '  config_file="$2"',
       'fi',
       'if [ -f "$config_file" ]; then',
-      '  echo "Error: Failed to parse JSON in $(pwd)/$config_file" >&2',
+      '  echo "Error: Failed to parse TOML in $(pwd)/$config_file" >&2',
       '  exit 1',
       'fi',
       'echo "mock binary running with args: $*"',
@@ -103,10 +103,10 @@ fn main() {
     let cwd = std::env::current_dir().unwrap_or_default();
     let settings_path = match config_arg {
         Some(p) => cwd.join(p),
-        None => cwd.join("settings.json"),
+        None => cwd.join("settings.toml"),
     };
     if settings_path.exists() {
-        eprintln!("Error: Failed to parse JSON in {}", settings_path.display());
+        eprintln!("Error: Failed to parse TOML in {}", settings_path.display());
         std::process::exit(1);
     }
     std::process::exit(0);
@@ -340,7 +340,7 @@ if (testBinary) {
     assert.ok(output.includes('chzzk-load'), `Output should contain chzzk-load: ${result.stdout}`);
   });
 
-  runTest('Launcher execution: respects settings.json in current working directory', () => {
+  runTest('Launcher execution: respects settings.toml in current working directory', () => {
     const tmpEnvDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chzzk-load-cwd-test-'));
     const nodeModules = path.join(tmpEnvDir, 'node_modules');
     const mainPkgDir = path.join(nodeModules, 'chzzk-load');
@@ -358,11 +358,11 @@ if (testBinary) {
       fs.chmodSync(targetBinary, 0o755);
     }
 
-    // Create a working directory with intentional malformed settings.json
+    // Create a working directory with intentional malformed settings.toml
     const userWorkDir = path.join(tmpEnvDir, 'user-work-dir');
     fs.mkdirSync(userWorkDir, { recursive: true });
-    const userSettingsPath = path.join(userWorkDir, 'settings.json');
-    fs.writeFileSync(userSettingsPath, '{ MALFORMED_JSON_TEST_MARKER }');
+    const userSettingsPath = path.join(userWorkDir, 'settings.toml');
+    fs.writeFileSync(userSettingsPath, 'invalid toml = =');
 
     const stagedLauncher = path.join(mainPkgDir, 'bin', 'chzzk-load.js');
     const envClean = { ...process.env };
@@ -376,8 +376,8 @@ if (testBinary) {
 
     const output = (result.stderr || '') + (result.stdout || '');
     assert.ok(
-      output.includes('Failed to parse JSON') || output.includes('settings.json'),
-      `Should attempt to load settings.json from CWD and fail parsing. Got output:\n${output}`
+      output.includes('Failed to parse TOML') || output.includes('settings.toml'),
+      `Should attempt to load settings.toml from CWD and fail parsing. Got output:\n${output}`
     );
     assert.ok(
       output.includes('user-work-dir'),
@@ -390,7 +390,7 @@ if (testBinary) {
 const tmpMockEnvDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chzzk-load-mock-launcher-'));
 const standaloneMockBin = createMockBinary(tmpMockEnvDir);
 if (standaloneMockBin) {
-  runTest('Mock binary fallback behavior: handles --version, --help, and settings.json in CWD', () => {
+  runTest('Mock binary fallback behavior: handles --version, --help, and settings.toml in CWD', () => {
     // 1. --version
     const verRes = spawnSync(standaloneMockBin, ['--version'], { encoding: 'utf8' });
     assert.strictEqual(verRes.status, 0, `Expected 0 from --version, got ${verRes.status}`);
@@ -404,16 +404,16 @@ if (standaloneMockBin) {
       'Expected help output to contain usage or chzzk'
     );
 
-    // 3. settings.json in CWD
+    // 3. settings.toml in CWD
     const userWorkDir = path.join(tmpMockEnvDir, 'mock-work-dir');
     fs.mkdirSync(userWorkDir, { recursive: true });
-    fs.writeFileSync(path.join(userWorkDir, 'settings.json'), '{ MALFORMED }');
+    fs.writeFileSync(path.join(userWorkDir, 'settings.toml'), 'invalid toml = =');
 
     const cwdRes = spawnSync(standaloneMockBin, [], { cwd: userWorkDir, encoding: 'utf8' });
     const output = (cwdRes.stderr || '') + (cwdRes.stdout || '');
     assert.ok(
-      output.includes('Failed to parse JSON') || output.includes('settings.json'),
-      `Should fail parsing settings.json in CWD. Got: ${output}`
+      output.includes('Failed to parse TOML') || output.includes('settings.toml'),
+      `Should fail parsing settings.toml in CWD. Got: ${output}`
     );
     assert.ok(output.includes('mock-work-dir'), `Error should include working dir. Got: ${output}`);
     assert.strictEqual(cwdRes.status, 1, `Expected exit code 1 for malformed settings. Got: ${cwdRes.status}`);

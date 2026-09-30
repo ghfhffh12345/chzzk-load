@@ -988,7 +988,10 @@ async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
             poll_interval_seconds: 60,
             ..Default::default()
         },
-        channels: vec![ChannelConfig::with_alias("chan_shutdown", "ShutdownStreamer")],
+        channels: vec![ChannelConfig::with_alias(
+            "chan_shutdown",
+            "ShutdownStreamer",
+        )],
         ..Default::default()
     };
     let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
@@ -1772,7 +1775,10 @@ async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupt
             stream_cooldown_seconds: 1, // 1 second cooldown
             ..Default::default()
         },
-        channels: vec![ChannelConfig::with_alias("chan_interrupt", "StreamerInterrupt")],
+        channels: vec![ChannelConfig::with_alias(
+            "chan_interrupt",
+            "StreamerInterrupt",
+        )],
         ..Default::default()
     };
 
@@ -2564,7 +2570,10 @@ async fn test_engine_orchestrator_poll_channel_restricted_stream_sets_live_and_l
             recordings_dir: temp_dir.to_string_lossy().to_string(),
             ..Default::default()
         },
-        channels: vec![ChannelConfig::with_alias("chan_restricted", "RestrictedStreamer")],
+        channels: vec![ChannelConfig::with_alias(
+            "chan_restricted",
+            "RestrictedStreamer",
+        )],
         ..Default::default()
     };
 
@@ -3848,8 +3857,10 @@ async fn test_engine_orchestrator_channel_update_uses_alias() {
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
     let (upload_tx, _upload_rx) = tokio::sync::mpsc::channel(32);
 
-    let mut settings = Settings::default();
-    settings.channels = vec![ChannelConfig::with_alias("chan_alias", "MyAlias")];
+    let settings = Settings {
+        channels: vec![ChannelConfig::with_alias("chan_alias", "MyAlias")],
+        ..Default::default()
+    };
 
     let chzzk_config = ChzzkConfig::default();
     let client = ChzzkClient::new(&chzzk_config).with_base_url(format!("http://127.0.0.1:{port}"));
@@ -3877,4 +3888,3 @@ async fn test_engine_orchestrator_channel_update_uses_alias() {
     }
     assert!(received_update, "Expected ChannelUpdate event");
 }
-

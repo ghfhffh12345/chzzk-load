@@ -34,7 +34,7 @@
 ## 사전 요구사항
 
 - **FFmpeg**: 시스템의 `PATH` 환경 변수에 등록되어 있어야 합니다 (또는 `CHZZK_LOAD_FFMPEG_BIN` 환경 변수로 실행 파일 경로 지정 가능).
-- **Rclone**: (로컬 전용 모드에서는 선택 사항, 클라우드 업로드 사용 시 필수) 시스템의 `PATH`에 등록되어 있어야 합니다 (또는 `settings.json`의 `rclone.rclone_bin` 또는 `CHZZK_LOAD_RCLONE_BIN` 환경 변수로 실행 파일 경로 지정 가능).
+- **Rclone**: (로컬 전용 모드에서는 선택 사항, 클라우드 업로드 사용 시 필수) 시스템의 `PATH`에 등록되어 있어야 합니다 (또는 `settings.toml`의 `rclone.rclone_bin` 또는 `CHZZK_LOAD_RCLONE_BIN` 환경 변수로 실행 파일 경로 지정 가능).
 
 ```bash
 ffmpeg -version
@@ -54,47 +54,48 @@ npm install -g chzzk-load
 애플리케이션 실행:
 
 ```bash
-# 기본 설정으로 실행 (설정 파일이 없으면 자동으로 settings.json 템플릿 생성)
+# 기본 설정으로 실행 (설정 파일이 없으면 자동으로 settings.toml 템플릿 생성)
 chzzk-load
 
 # 또는 사용자 지정 설정 파일 경로 지정
-chzzk-load --config /path/to/my-settings.json
+chzzk-load --config /path/to/my-settings.toml
 ```
 
-최초 실행 시 현재 작업 디렉터리에 `settings.json` 파일이 존재하지 않는 경우 기본 템플릿이 자동으로 생성됩니다.
+최초 실행 시 현재 작업 디렉터리에 `settings.toml` 파일이 존재하지 않는 경우 기본 템플릿이 자동으로 생성됩니다.
 
 ---
 
-## 설정 가이드 (`settings.json`)
+## 설정 가이드 (`settings.toml`)
 
-```json
-{
-  "general": {
-    "chunk_duration_seconds": 600,
-    "poll_interval_seconds": 20,
-    "stream_cooldown_seconds": 60,
-    "recordings_dir": "recordings",
-    "min_free_disk_gb": 2.0,
-    "record_chat": true,
-    "chat_flush_interval_seconds": 30
-  },
-  "rclone": {
-    "remote_path": "gdrive:Chzzk_Recordings",
-    "upload_concurrency": 3,
-    "rclone_bin": "rclone",
-    "extra_args": []
-  },
-  "chzzk": {
-    "nid_aut": "",
-    "nid_ses": ""
-  },
-  "channels": [
-    {
-      "id": "1a1dd9ce56fb61a37ffb6f69f6d5b978",
-      "name": "강퀴"
-    }
-  ]
-}
+```toml
+# chzzk-load 설정 파일
+
+[general]
+chunk_duration_seconds = 600
+poll_interval_seconds = 20
+stream_cooldown_seconds = 60
+recordings_dir = "recordings"
+min_free_disk_gb = 2.0
+record_chat = true
+chat_flush_interval_seconds = 30
+
+[rclone]
+remote_path = "gdrive:Chzzk_Recordings"
+upload_concurrency = 3
+rclone_bin = "rclone"
+extra_args = []
+
+[chzzk]
+nid_aut = ""
+nid_ses = ""
+
+# 채널별 별칭(alias)을 지정하여 모니터링:
+[[channels]]
+id = "1a1dd9ce56fb61a37ffb6f69f6d5b978"
+alias = "강퀴"
+
+# 또는 축약형 문자열 배열로 모니터링 (공식 스트리머 이름이 API를 통해 자동 확인됨):
+# channels = ["1a1dd9ce56fb61a37ffb6f69f6d5b978"]
 ```
 
 ### 주요 설정 항목
@@ -113,7 +114,7 @@ chzzk-load --config /path/to/my-settings.json
 | `rclone.rclone_bin` | `"rclone"` | rclone 실행 파일의 경로 또는 명령어 이름. |
 | `rclone.extra_args` | `[]` | rclone 호출 시 전달할 추가 CLI 인자 목록 (예: `["--drive-chunk-size=64M"]`). |
 | `chzzk.nid_aut` / `nid_ses` | `""` | 연령 제한 또는 구독자 전용 방송 녹화를 위한 네이버 로그인 세션 쿠키 값 (선택 사항). |
-| `channels` | - | 모니터링할 치지직 채널 목록 (`id`: 채널 URL의 고유 식별자, `name`: TUI 표시용 이름). |
+| `channels` | - | 모니터링할 치지직 채널 목록. `[[channels]]`에 `id` 및 선택적 `alias`를 지정하거나 축약형 문자열 `channels = ["<id>"]` 지정 가능 (공식 스트리머 이름이 API로부터 자동 확인됨). |
 
 ### SBC(라즈베리 파이 등) 권장 설정
 
@@ -121,34 +122,29 @@ microSD 카드를 사용하는 라즈베리 파이(Raspberry Pi) 및 ARM64 단�
 
 `chzzk-load`는 클라우드 업로드 성공 시 로컬 세그먼트를 즉시 삭제하여 활성 스트림당 1~2개의 영상 세그먼트 및 활성 채팅 청크만 디스크에 유지하므로, `/dev/shm`을 임시 디렉터리로 사용하면 영상 및 채팅 세그먼트가 메모리에만 기록된 후 클라우드 스토리지로 직접 전송되어 microSD 및 플래시 메모리의 쓰기 수명 마모를 완전히 방지할 수 있습니다:
 
-```json
-{
-  "general": {
-    "chunk_duration_seconds": 120,
-    "poll_interval_seconds": 20,
-    "stream_cooldown_seconds": 0,
-    "recordings_dir": "/dev/shm/chzzk-load",
-    "min_free_disk_gb": 2.0,
-    "record_chat": true,
-    "chat_flush_interval_seconds": 30
-  },
-  "rclone": {
-    "remote_path": "gdrive:Chzzk_Recordings",
-    "upload_concurrency": 2,
-    "rclone_bin": "rclone",
-    "extra_args": []
-  },
-  "chzzk": {
-    "nid_aut": "",
-    "nid_ses": ""
-  },
-  "channels": [
-    {
-      "id": "1a1dd9ce56fb61a37ffb6f69f6d5b978",
-      "name": "강퀴"
-    }
-  ]
-}
+```toml
+[general]
+chunk_duration_seconds = 120
+poll_interval_seconds = 20
+stream_cooldown_seconds = 0
+recordings_dir = "/dev/shm/chzzk-load"
+min_free_disk_gb = 2.0
+record_chat = true
+chat_flush_interval_seconds = 30
+
+[rclone]
+remote_path = "gdrive:Chzzk_Recordings"
+upload_concurrency = 2
+rclone_bin = "rclone"
+extra_args = []
+
+[chzzk]
+nid_aut = ""
+nid_ses = ""
+
+[[channels]]
+id = "1a1dd9ce56fb61a37ffb6f69f6d5b978"
+alias = "강퀴"
 ```
 
 - **`recordings_dir: "/dev/shm/chzzk-load"`**: Linux 공유 메모리(RAM 디스크 / tmpfs)를 사용하여 microSD 및 플래시 메모리에 대한 쓰기 작업을 원천 차단합니다.
@@ -183,7 +179,7 @@ microSD 카드를 사용하는 라즈베리 파이(Raspberry Pi) 및 ARM64 단�
    ```bash
    rclone lsd gdrive:
    ```
-4. `settings.json`의 `remote_path` 항목에 대상 원격지 및 디렉터리 경로를 지정합니다 (예: `"remote_path": "gdrive:Chzzk_Recordings"` 또는 `"remote_path": "onedrive:Recordings"`).
+4. `settings.toml`의 `remote_path` 항목에 대상 원격지 및 디렉터리 경로를 지정합니다 (예: `remote_path = "gdrive:Chzzk_Recordings"` 또는 `remote_path = "onedrive:Recordings"`).
 5. `chzzk-load`를 실행합니다. 프로그램 시작 시 rclone 원격지 연결을 자동으로 검증하고, 녹화 완료된 세그먼트를 클라우드로 실시간 전송합니다.
 
 ---

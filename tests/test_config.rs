@@ -15,8 +15,7 @@ fn test_general_config_chat_settings_custom() {
         record_chat = false
         chat_flush_interval_seconds = 60
     "#;
-    let cfg: GeneralConfig =
-        toml::from_str(toml_data).expect("Failed to parse custom chat config");
+    let cfg: GeneralConfig = toml::from_str(toml_data).expect("Failed to parse custom chat config");
     assert!(!cfg.record_chat);
     assert_eq!(cfg.chat_flush_interval_seconds, 60);
 }
@@ -97,8 +96,7 @@ fn test_channel_config_table_with_and_without_alias() {
     struct Wrapper {
         channels: Vec<ChannelConfig>,
     }
-    let parsed: Wrapper =
-        toml::from_str(toml_data).expect("Failed to parse table channels");
+    let parsed: Wrapper = toml::from_str(toml_data).expect("Failed to parse table channels");
     assert_eq!(parsed.channels.len(), 2);
     assert_eq!(parsed.channels[0].id, "dc7fb0d085cfbbe90e11836e3b85b784");
     assert_eq!(parsed.channels[0].alias.as_deref(), Some("Soyeon"));
@@ -113,7 +111,10 @@ fn test_settings_toml_roundtrip() {
     let deserialized: Settings = toml::from_str(&toml_str).expect("Deserialize from toml");
     assert_eq!(deserialized.general.chunk_duration_seconds, 600);
     assert_eq!(deserialized.channels.len(), 1);
-    assert_eq!(deserialized.channels[0].id, "4c3b44869c9b1399723ec28ec236f736");
+    assert_eq!(
+        deserialized.channels[0].id,
+        "4c3b44869c9b1399723ec28ec236f736"
+    );
     assert_eq!(
         deserialized.channels[0].alias.as_deref(),
         Some("SampleStreamer")

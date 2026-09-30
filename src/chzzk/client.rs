@@ -334,7 +334,10 @@ impl ChzzkClient {
             bail!("Chzzk API returned error code {}: {}", body.code, msg);
         }
 
-        let streamer_name = body.content.as_ref().map(|c| c.channel.channel_name.clone());
+        let streamer_name = body
+            .content
+            .as_ref()
+            .map(|c| c.channel.channel_name.clone());
 
         if let Some(content) = body.content.filter(|c| c.status == "OPEN") {
             let live_id = content.live_id;

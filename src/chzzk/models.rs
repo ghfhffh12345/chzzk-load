@@ -145,7 +145,5 @@ pub enum LiveDetail {
         adult: bool,
     },
     /// Channel is CLOSE (offline).
-    Close {
-        streamer_name: Option<String>,
-    },
+    Close { streamer_name: Option<String> },
 }
