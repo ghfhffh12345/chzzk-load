@@ -28,7 +28,7 @@ use chzzk_load::uploader::{RcloneBackend, UploadBackend};
     about = "Real-time Chzzk stream recording and cloud storage syncing"
 )]
 pub struct Cli {
-    #[arg(short, long, help = "Path to dedicated settings.json file")]
+    #[arg(short, long, help = "Path to dedicated settings.toml file")]
     pub config: Option<PathBuf>,
 }
 
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     let config_path = args
         .config
-        .unwrap_or_else(|| resolve_path(&PathBuf::from("settings.json")));
+        .unwrap_or_else(|| resolve_path(&PathBuf::from("settings.toml")));
 
     let settings = Settings::load_or_create_default(&config_path)?;
 
