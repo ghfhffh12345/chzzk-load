@@ -223,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         LogEntry::rec(
             "[너불] Spawned FFmpeg segmenter (60s TS chunks) -> recordings/[2026-09-30_1158] 너불 - 교정야호 교통정비공사 사장 황인정",
         ),
-        LogEntry::cloud("Initialized 'title_history.txt' on remote storage for 너불"),
+        LogEntry::cloud("Initialized 'metadata.jsonl' on remote storage for 너불"),
         LogEntry::chat("[너불] Connected to live chat WebSocket (kr-ss2.chat.naver.com)"),
         LogEntry::rec("[너불] chunk_0047.ts sealed. Pushed to cloud upload queue."),
         LogEntry::clean("[너불] Uploaded & deleted chunk_0047.ts (reclaimed 27.8 MB)"),
@@ -493,7 +493,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     2 => {
                         app.handle_event(AppEvent::Log(LogEntry::cloud(
-                            "Synced stream title update to 'title_history.txt' on remote storage",
+                            "Synced stream metadata update to 'metadata.jsonl' on remote storage",
                         )));
                     }
                     3 => {

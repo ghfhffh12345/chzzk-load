@@ -123,7 +123,7 @@ fn test_rclone_backend_rcat_command_builder() {
         extra_args: vec!["--drive-chunk-size=32M".to_string()],
     };
     let backend = RcloneBackend::new(config);
-    let cmd = backend.build_rcat_command("gdrive:Chzzk/session/title_history.txt");
+    let cmd = backend.build_rcat_command("gdrive:Chzzk/session/metadata.jsonl");
     let std_cmd = cmd.as_std();
     let args: Vec<String> = std_cmd
         .get_args()
@@ -131,7 +131,7 @@ fn test_rclone_backend_rcat_command_builder() {
         .collect();
 
     assert_eq!(args[0], "rcat");
-    assert_eq!(args[1], "gdrive:Chzzk/session/title_history.txt");
+    assert_eq!(args[1], "gdrive:Chzzk/session/metadata.jsonl");
     assert!(args.contains(&"--drive-chunk-size=32M".to_string()));
 }
 

@@ -150,8 +150,8 @@ mod tests {
         let mock = MockUploadBackend::default();
         mock.upload_text(
             "remote_dir_2",
-            "title_history.txt",
-            "2026-09-29 Stream Title",
+            "metadata.jsonl",
+            "{\"event\":\"INITIAL_STATE\"}",
         )
         .await
         .expect("upload_text should succeed");
@@ -162,8 +162,8 @@ mod tests {
             texts[0],
             (
                 "remote_dir_2".to_string(),
-                "title_history.txt".to_string(),
-                "2026-09-29 Stream Title".to_string(),
+                "metadata.jsonl".to_string(),
+                "{\"event\":\"INITIAL_STATE\"}".to_string(),
             )
         );
     }
@@ -175,8 +175,8 @@ mod tests {
         let res = mock
             .upload_text(
                 "remote_dir_2",
-                "title_history.txt",
-                "2026-09-29 Stream Title",
+                "metadata.jsonl",
+                "{\"event\":\"INITIAL_STATE\"}",
             )
             .await;
         assert!(res.is_err());
