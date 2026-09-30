@@ -54,8 +54,9 @@ pub struct BroadcastPolicies {
 }
 
 /// Channel chat interaction rules and access requirements.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatRulesState {
+    #[serde(default = "default_true")]
     pub chat_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_available_group: Option<String>,
@@ -67,7 +68,27 @@ pub struct ChatRulesState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_slow_mode_sec: Option<u32>,
     pub chat_emoji_mode: bool,
+    #[serde(default = "default_true")]
     pub chat_donation_ranking_exposure: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+impl Default for ChatRulesState {
+    fn default() -> Self {
+        Self {
+            chat_active: true,
+            chat_available_group: None,
+            chat_available_condition: None,
+            min_follower_minute: None,
+            allow_subscriber_in_follower_mode: false,
+            chat_slow_mode_sec: None,
+            chat_emoji_mode: false,
+            chat_donation_ranking_exposure: true,
+        }
+    }
 }
 
 /// Complete normalized snapshot of broadcast state at a specific point in time.

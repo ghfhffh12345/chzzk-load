@@ -1221,7 +1221,7 @@ async fn test_engine_orchestrator_concurrent_uploads() {
 }
 
 #[tokio::test]
-async fn test_engine_orchestrator_stream_title_change_uploads_title_history_text() {
+async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl() {
     let chzzk_server = Server::http("127.0.0.1:0").unwrap();
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
 
@@ -1293,6 +1293,10 @@ async fn test_engine_orchestrator_stream_title_change_uploads_title_history_text
     let orchestrator =
         EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
+    let mut initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState::default();
+    initial_meta.channel_name = "RenameStreamer".to_string();
+    initial_meta.live_title = "Initial Stream Title".to_string();
+
     // Initialize active recording state
     {
         let active = orchestrator.active_recordings();
@@ -1305,24 +1309,28 @@ async fn test_engine_orchestrator_stream_title_change_uploads_title_history_text
                 "2026-09-22_1000".to_string(),
                 "RenameStreamer".to_string(),
                 Some("RenameStreamer".to_string()),
-                "Initial Stream Title".to_string(),
+                initial_meta,
             ),
         );
     }
 
-    // Poll 1: Channel is polled with same initial title (no title history upload expected)
+    // Poll 1: Channel is polled with same initial title (no metadata upload expected)
     orchestrator.poll_channels_once(&upload_tx).await;
     assert!(mock_backend.texts.lock().await.is_empty());
 
     // Poll 2: Streamer changed title to "Updated Stream Title? Playing Now?"
     orchestrator.poll_channels_once(&upload_tx).await;
 
-    // Verify backend received title_history.txt upload
+    // Verify backend received metadata.jsonl upload
     let texts = mock_backend.texts.lock().await;
     assert_eq!(texts.len(), 1);
-    assert_eq!(texts[0].1, "title_history.txt");
-    assert!(texts[0].2.contains("Initial Stream Title"));
-    assert!(texts[0].2.contains("Updated Stream Title? Playing Now?"));
+    assert_eq!(texts[0].1, "metadata.jsonl");
+    let content = &texts[0].2;
+    assert!(content.contains("\"INITIAL_STATE\""));
+    assert!(content.contains("\"stream_offset_ms\":0"));
+    assert!(content.contains("\"METADATA_CHANGED\""));
+    assert!(content.contains("Initial Stream Title"));
+    assert!(content.contains("Updated Stream Title? Playing Now?"));
 
     // Verify ChannelUpdate event had new title
     let mut got_updated_title_event = false;
@@ -1342,7 +1350,7 @@ async fn test_engine_orchestrator_stream_title_change_uploads_title_history_text
 }
 
 #[tokio::test]
-async fn test_engine_orchestrator_stream_title_change_updates_title_history_file() {
+async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_file() {
     let chzzk_server = Server::http("127.0.0.1:0").unwrap();
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
 
@@ -1369,7 +1377,7 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
             let _ = request.respond(response);
         }
 
-        // Poll 2: Streamer changes title to "Updated Stream Title"
+        // Poll 2: Streamer changes title to "Updated Stream Title? Playing Now?"
         if let Ok(request) = chzzk_server.recv() {
             let mock_body = r#"{
                 "code": 200,
@@ -1415,6 +1423,28 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
     let orchestrator =
         EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
+    let mut initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState::default();
+    initial_meta.channel_name = "RenameStreamer".to_string();
+    initial_meta.live_title = "Initial Stream Title".to_string();
+
+    let session_folder = "[2026-09-22_1000] [RenameStreamer] RenameStreamer - Initial Stream Title";
+    let session_dir = temp_dir.join(session_folder);
+    fs::create_dir_all(&session_dir).unwrap();
+    let initial_jsonl = format!(
+        "{}\n",
+        serde_json::to_string(&chzzk_load::chzzk::models_metadata::MetadataEvent {
+            version: 1,
+            event: chzzk_load::chzzk::models_metadata::MetadataEventType::InitialState,
+            timestamp: "2026-09-22T10:00:00Z".to_string(),
+            time_local: "2026-09-22 10:00:00".to_string(),
+            stream_offset_ms: 0,
+            changes: None,
+            state: initial_meta.clone(),
+        })
+        .unwrap()
+    );
+    fs::write(session_dir.join("metadata.jsonl"), &initial_jsonl).unwrap();
+
     {
         let active = orchestrator.active_recordings();
         active.lock().await.insert("chan_rename".to_string());
@@ -1422,17 +1452,12 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
         let sessions = orchestrator.active_sessions();
         sessions.lock().await.insert(
             "chan_rename".to_string(),
-            chzzk_load::engine::ActiveSessionState {
-                start_timestamp: "2026-09-22_1000".to_string(),
-                streamer_name: "RenameStreamer".to_string(),
-                alias: Some("RenameStreamer".to_string()),
-                initial_title: "Initial Stream Title".to_string(),
-                current_title: "Initial Stream Title".to_string(),
-                title_history: vec![(
-                    "2026-09-22 10:00:00".to_string(),
-                    "Initial Stream Title".to_string(),
-                )],
-            },
+            chzzk_load::engine::ActiveSessionState::new(
+                "2026-09-22_1000".to_string(),
+                "RenameStreamer".to_string(),
+                Some("RenameStreamer".to_string()),
+                initial_meta,
+            ),
         );
     }
 
@@ -1440,21 +1465,31 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
     orchestrator.poll_channels_once(&upload_tx).await;
     assert!(mock_backend.texts.lock().await.is_empty());
 
-    // Poll 2: Streamer changed title to "Updated Stream Title"
+    // Poll 2: Streamer changed title to "Updated Stream Title? Playing Now?"
     orchestrator.poll_channels_once(&upload_tx).await;
 
     let texts = mock_backend.texts.lock().await;
     assert_eq!(texts.len(), 1);
-    assert_eq!(texts[0].1, "title_history.txt");
+    assert_eq!(texts[0].1, "metadata.jsonl");
     let content = &texts[0].2;
-    assert!(content.contains("[2026-09-22 10:00:00] Initial Stream Title"));
+    assert!(content.contains("\"INITIAL_STATE\""));
+    assert!(content.contains("Initial Stream Title"));
+    assert!(content.contains("\"METADATA_CHANGED\""));
     assert!(content.contains("Updated Stream Title? Playing Now?"));
+
+    // Verify local file exists and has both JSON Lines
+    let local_file = fs::read_to_string(session_dir.join("metadata.jsonl")).unwrap();
+    let local_lines: Vec<&str> = local_file.trim().lines().collect();
+    assert_eq!(local_lines.len(), 2);
+    assert!(local_lines[0].contains("\"INITIAL_STATE\""));
+    assert!(local_lines[1].contains("\"METADATA_CHANGED\""));
+    assert!(local_lines[1].contains("Updated Stream Title? Playing Now?"));
 
     {
         let sessions = orchestrator.active_sessions();
         let guard = sessions.lock().await;
         let session = guard.get("chan_rename").unwrap();
-        assert_eq!(session.title_history.len(), 2);
+        assert_eq!(session.metadata_history.len(), 2);
     }
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -1534,6 +1569,10 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         let active = orchestrator.active_recordings();
         active.lock().await.insert("chan_pre".to_string());
 
+        let mut initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState::default();
+        initial_meta.channel_name = "PreStreamer".to_string();
+        initial_meta.live_title = "Early Title 1".to_string();
+
         let sessions = orchestrator.active_sessions();
         sessions.lock().await.insert(
             "chan_pre".to_string(),
@@ -1541,7 +1580,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
                 "2026-09-22_1000".to_string(),
                 "PreStreamer".to_string(),
                 Some("PreStreamer".to_string()),
-                "Early Title 1".to_string(),
+                initial_meta,
             ),
         );
     }
@@ -1564,18 +1603,142 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         let guard = sessions.lock().await;
         let session = guard.get("chan_pre").expect("Session should exist");
         assert_eq!(session.current_title, "Early Title 2? Pending?");
+        assert_eq!(session.metadata_history.len(), 2);
     }
 
     let mut got_title_change_log = false;
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(msg) = ev
-            && msg.contains("Stream title changed for chan_pre")
-            && msg.contains("Early Title 2? Pending?")
+            && msg.contains("chan_pre")
+            && msg.contains("Stream metadata changed")
         {
             got_title_change_log = true;
         }
     }
-    assert!(got_title_change_log, "Expected title change log message");
+    assert!(got_title_change_log, "Expected metadata change log message");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_transition() {
+    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
+    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        // Poll 1: Talk category, no watch party
+        if let Ok(request) = chzzk_server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 888111,
+                    "liveTitle": "Just Chatting",
+                    "categoryType": "TALK",
+                    "liveCategory": "talk",
+                    "liveCategoryValue": "Just Chatting",
+                    "channel": {
+                        "channelId": "chan_trans",
+                        "channelName": "TransStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+
+        // Poll 2: Valorant game category + Watch party 520 ("2026아시안게임")
+        if let Ok(request) = chzzk_server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 888111,
+                    "liveTitle": "Watch Party Asian Games!",
+                    "categoryType": "GAME",
+                    "liveCategory": "game",
+                    "liveCategoryValue": "Valorant",
+                    "watchPartyNo": 520,
+                    "watchPartyTag": "2026아시안게임",
+                    "watchPartyType": "RS",
+                    "channel": {
+                        "channelId": "chan_trans",
+                        "channelName": "TransStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = Response::from_string(mock_body).with_header(
+                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let temp_dir = std::env::temp_dir().join(format!("test_orch_trans_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig::with_alias("chan_trans", "TransStreamer")],
+        ..Default::default()
+    };
+
+    let chzzk =
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+
+    let mock_backend = Arc::new(MockUploadBackend::default());
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
+    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    let orchestrator =
+        EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
+
+    let mut initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState::default();
+    initial_meta.channel_name = "TransStreamer".to_string();
+    initial_meta.live_title = "Just Chatting".to_string();
+    initial_meta.category_type = Some(chzzk_load::chzzk::models_metadata::CategoryType::Talk);
+    initial_meta.live_category = Some("talk".to_string());
+    initial_meta.live_category_value = Some("Just Chatting".to_string());
+
+    {
+        let active = orchestrator.active_recordings();
+        active.lock().await.insert("chan_trans".to_string());
+
+        let sessions = orchestrator.active_sessions();
+        sessions.lock().await.insert(
+            "chan_trans".to_string(),
+            chzzk_load::engine::ActiveSessionState::new(
+                "2026-09-30_1400".to_string(),
+                "TransStreamer".to_string(),
+                Some("TransStreamer".to_string()),
+                initial_meta,
+            ),
+        );
+    }
+
+    // Poll 1: Channel polled with same initial metadata
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(mock_backend.texts.lock().await.is_empty());
+
+    // Poll 2: Channel metadata changes to Game + Watch Party
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    let texts = mock_backend.texts.lock().await;
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].1, "metadata.jsonl");
+    let content = &texts[0].2;
+    assert!(content.contains("\"METADATA_CHANGED\""));
+    assert!(content.contains("Valorant"));
+    assert!(content.contains("2026아시안게임"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -3827,7 +3990,11 @@ fn test_engine_folder_naming_with_alias() {
         "2026-09-30_1100".to_string(),
         "StreamerName".to_string(),
         Some("CustomAlias".to_string()),
-        "Gaming Stream".to_string(),
+        chzzk_load::chzzk::models_metadata::StreamMetadataState {
+            channel_name: "StreamerName".to_string(),
+            live_title: "Gaming Stream".to_string(),
+            ..Default::default()
+        },
     );
     assert_eq!(
         state.folder_name(),
@@ -3841,7 +4008,11 @@ fn test_engine_folder_naming_without_alias() {
         "2026-09-30_1100".to_string(),
         "StreamerName".to_string(),
         None,
-        "Gaming Stream".to_string(),
+        chzzk_load::chzzk::models_metadata::StreamMetadataState {
+            channel_name: "StreamerName".to_string(),
+            live_title: "Gaming Stream".to_string(),
+            ..Default::default()
+        },
     );
     assert_eq!(
         state.folder_name(),
@@ -3855,7 +4026,11 @@ fn test_engine_folder_naming_empty_alias_fallback() {
         "2026-09-30_1100".to_string(),
         "StreamerName".to_string(),
         Some("   ".to_string()),
-        "Gaming Stream".to_string(),
+        chzzk_load::chzzk::models_metadata::StreamMetadataState {
+            channel_name: "StreamerName".to_string(),
+            live_title: "Gaming Stream".to_string(),
+            ..Default::default()
+        },
     );
     assert_eq!(
         state.folder_name(),
@@ -3869,7 +4044,11 @@ fn test_engine_folder_naming_sanitizes_illegal_and_trailing_chars() {
         "2026-09-30_1100".to_string(),
         "Streamer/Name...".to_string(),
         Some("Alias:Special ".to_string()),
-        "Gaming Stream? Playing Now... ".to_string(),
+        chzzk_load::chzzk::models_metadata::StreamMetadataState {
+            channel_name: "Streamer/Name...".to_string(),
+            live_title: "Gaming Stream? Playing Now... ".to_string(),
+            ..Default::default()
+        },
     );
     assert_eq!(
         state.folder_name(),

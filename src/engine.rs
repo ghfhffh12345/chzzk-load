@@ -533,11 +533,25 @@ impl EngineOrchestrator {
                     continue;
                 }
 
-                if let Ok(mut sub_entries) = tokio::fs::read_dir(&path).await
-                    && let Ok(None) = sub_entries.next_entry().await
-                    && tokio::fs::remove_dir(&path).await.is_ok()
-                {
-                    removed_count += 1;
+                let mut is_empty_or_metadata_only = true;
+                let mut has_metadata = false;
+                if let Ok(mut sub_entries) = tokio::fs::read_dir(&path).await {
+                    while let Ok(Some(sub_entry)) = sub_entries.next_entry().await {
+                        if sub_entry.file_name() == "metadata.jsonl" {
+                            has_metadata = true;
+                        } else {
+                            is_empty_or_metadata_only = false;
+                            break;
+                        }
+                    }
+                    if is_empty_or_metadata_only {
+                        if has_metadata {
+                            let _ = tokio::fs::remove_file(path.join("metadata.jsonl")).await;
+                        }
+                        if tokio::fs::remove_dir(&path).await.is_ok() {
+                            removed_count += 1;
+                        }
+                    }
                 }
             }
         }
@@ -1407,16 +1421,30 @@ impl EngineOrchestrator {
 
             // Clean up session directory if empty (e.g. no chunks were saved or all chunks/chat were already uploaded)
             let target = broadcast_identifier(&info.streamer_name, &channel_id);
-            if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await
-                && rd.next_entry().await.ok().flatten().is_none()
-                && tokio::fs::remove_dir(&session_dir).await.is_ok()
-            {
-                let _ = event_tx
-                    .send(AppEvent::Log(LogEntry::clean(format!(
-                        "[{target}] Cleaned up empty session folder '{}'",
-                        session_dir.display()
-                    ))))
-                    .await;
+            let mut is_empty_or_metadata_only = true;
+            let mut has_metadata = false;
+            if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
+                while let Ok(Some(sub_entry)) = rd.next_entry().await {
+                    if sub_entry.file_name() == "metadata.jsonl" {
+                        has_metadata = true;
+                    } else {
+                        is_empty_or_metadata_only = false;
+                        break;
+                    }
+                }
+                if is_empty_or_metadata_only {
+                    if has_metadata {
+                        let _ = tokio::fs::remove_file(session_dir.join("metadata.jsonl")).await;
+                    }
+                    if tokio::fs::remove_dir(&session_dir).await.is_ok() {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::clean(format!(
+                                "[{target}] Cleaned up empty session folder '{}'",
+                                session_dir.display()
+                            ))))
+                            .await;
+                    }
+                }
             }
         });
 
