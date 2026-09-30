@@ -284,3 +284,45 @@ async fn test_two_ffmpeg_processes_simultaneously() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_segment_watcher_high_load_100_chunks() {
+    let temp_dir = std::env::temp_dir().join(format!("test_watcher_100_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let mut watcher = SegmentWatcher::new(&temp_dir);
+
+    // Write 100 chunks
+    for i in 0..100 {
+        let chunk_file = temp_dir.join(format!("chunk_{i:04}.ts"));
+        let mut f = File::create(&chunk_file).unwrap();
+        writeln!(f, "chunk payload {i}").unwrap();
+    }
+
+    // Chunks 0..98 should be sealed (because chunk 99 exists with > 0 bytes)
+    let sealed_initial = watcher.detect_sealed(false);
+    assert_eq!(sealed_initial.len(), 99);
+    for (i, p) in sealed_initial.iter().enumerate() {
+        assert_eq!(
+            p.file_name().unwrap().to_str().unwrap(),
+            format!("chunk_{i:04}.ts")
+        );
+    }
+
+    // Subsequent call before finish seals nothing
+    let sealed_none = watcher.detect_sealed(false);
+    assert!(sealed_none.is_empty());
+
+    // Concluding stream seals the final 100th chunk (chunk_0099.ts)
+    let sealed_final = watcher.detect_sealed(true);
+    assert_eq!(sealed_final.len(), 1);
+    assert_eq!(
+        sealed_final[0].file_name().unwrap().to_str().unwrap(),
+        "chunk_0099.ts"
+    );
+
+    // Total enqueued chunks must be 100
+    assert_eq!(watcher.enqueued_chunks().len(), 100);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
