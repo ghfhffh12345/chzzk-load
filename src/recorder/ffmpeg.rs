@@ -6,7 +6,7 @@ pub fn sanitize_filename(name: &str) -> String {
     let mut result = String::with_capacity(trimmed.len());
     for c in trimmed.chars() {
         match c {
-            '\\' | '/' | ':' | '*' | '"' | '<' | '>' | '|' => result.push('_'),
+            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => result.push('_'),
             c if c.is_control() => result.push('_'),
             other => result.push(other),
         }
@@ -83,14 +83,14 @@ mod tests {
     fn test_sanitize_filename_basic() {
         let input = "a/b\\c:d*e?f\"g<h>i|j";
         let output = sanitize_filename(input);
-        assert_eq!(output, "a_b_c_d_e?f_g_h_i_j");
+        assert_eq!(output, "a_b_c_d_e_f_g_h_i_j");
     }
 
     #[test]
-    fn test_sanitize_filename_preserves_question_marks() {
+    fn test_sanitize_filename_replaces_question_marks() {
         let input = "Title? With questions? Yes!";
         let output = sanitize_filename(input);
-        assert_eq!(output, "Title? With questions? Yes!");
+        assert_eq!(output, "Title_ With questions_ Yes!");
     }
 
     #[test]

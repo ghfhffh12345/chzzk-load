@@ -28,17 +28,24 @@ pub struct FinishedSession {
 pub struct ActiveSessionState {
     pub start_timestamp: String,
     pub streamer_name: String,
+    pub alias: Option<String>,
     pub initial_title: String,
     pub current_title: String,
     pub title_history: Vec<(String, String)>,
 }
 
 impl ActiveSessionState {
-    pub fn new(start_timestamp: String, streamer_name: String, initial_title: String) -> Self {
+    pub fn new(
+        start_timestamp: String,
+        streamer_name: String,
+        alias: Option<String>,
+        initial_title: String,
+    ) -> Self {
         let initial_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         Self {
             start_timestamp,
             streamer_name,
+            alias,
             title_history: vec![(initial_time, initial_title.clone())],
             current_title: initial_title.clone(),
             initial_title,
@@ -47,9 +54,35 @@ impl ActiveSessionState {
 
     pub fn folder_name(&self) -> String {
         let streamer = sanitize_filename(&self.streamer_name);
+        let streamer = streamer.trim_end_matches([' ', '.']);
+        let streamer = if streamer.is_empty() {
+            "Unknown"
+        } else {
+            streamer
+        };
+
         let title = sanitize_filename(&self.initial_title);
+        let title = title.trim_end_matches([' ', '.']);
         let timestamp = &self.start_timestamp;
-        format!("[{timestamp}] {streamer} - {title}")
+
+        let sanitized_alias = self
+            .alias
+            .as_deref()
+            .map(|a| sanitize_filename(a).trim_matches([' ', '.']).to_string())
+            .filter(|a| !a.is_empty());
+
+        let folder = if let Some(alias) = sanitized_alias {
+            if title.is_empty() {
+                format!("[{timestamp}] [{alias}] {streamer}")
+            } else {
+                format!("[{timestamp}] [{alias}] {streamer} - {title}")
+            }
+        } else if title.is_empty() {
+            format!("[{timestamp}] {streamer}")
+        } else {
+            format!("[{timestamp}] {streamer} - {title}")
+        };
+        folder.trim_end_matches([' ', '.']).to_string()
     }
 
     pub fn record_title_change(&mut self, new_title: String, timestamp: String) {
@@ -278,6 +311,7 @@ impl EngineOrchestrator {
                                         chunk_name: name,
                                         streamer_name: streamer,
                                         remote_dir,
+                                        session_folder_id,
                                         ..
                                     } = task;
 
@@ -328,7 +362,11 @@ impl EngineOrchestrator {
                                                 let is_session_dir = parent
                                                     .file_name()
                                                     .and_then(|n| n.to_str())
-                                                    .map(|n| n.starts_with(&format!("{cid}_")))
+                                                    .map(|n| {
+                                                        n == remote_dir
+                                                            || n == session_folder_id
+                                                            || n.starts_with(&format!("{cid}_"))
+                                                    })
                                                     .unwrap_or(false);
 
                                                 if is_session_dir
@@ -431,9 +469,9 @@ impl EngineOrchestrator {
                 let dir_name = entry.file_name();
                 let dir_name_str = dir_name.to_string_lossy();
 
-                let is_active = active_channels
-                    .iter()
-                    .any(|cid| dir_name_str.starts_with(&format!("{cid}_")));
+                let is_active = active_channels.iter().any(|item| {
+                    dir_name_str == item.as_str() || dir_name_str.starts_with(&format!("{item}_"))
+                });
                 if is_active {
                     continue;
                 }
@@ -568,28 +606,28 @@ impl EngineOrchestrator {
                 })
                 .await;
 
-            let start_timestamp = {
-                let sessions = active_sessions.lock().await;
-                sessions
-                    .get(&channel_id)
-                    .map(|s| s.start_timestamp.clone())
-                    .unwrap_or_else(|| Local::now().format("%Y-%m-%d_%H%M%S").to_string())
-            };
-            {
+            let alias = settings
+                .channels
+                .iter()
+                .find(|c| c.id == channel_id)
+                .and_then(|c| c.alias.clone());
+
+            let (session_folder_name, start_timestamp) = {
                 let mut sessions = active_sessions.lock().await;
-                sessions.entry(channel_id.clone()).or_insert_with(|| {
+                let session = sessions.entry(channel_id.clone()).or_insert_with(|| {
+                    let start_timestamp = Local::now().format("%Y-%m-%d_%H%M%S").to_string();
                     ActiveSessionState::new(
-                        start_timestamp.clone(),
+                        start_timestamp,
                         info.streamer_name.clone(),
+                        alias.clone(),
                         info.title.clone(),
                     )
                 });
-            }
+                (session.folder_name(), session.start_timestamp.clone())
+            };
 
-            let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-            let folder_name = format!("{channel_id}_{timestamp}");
             let recordings_base = resolve_path(Path::new(&settings.general.recordings_dir));
-            let session_dir = recordings_base.join(&folder_name);
+            let session_dir = recordings_base.join(&session_folder_name);
 
             if let Err(e) = tokio::fs::create_dir_all(&session_dir).await {
                 let _ = event_tx
@@ -610,21 +648,6 @@ impl EngineOrchestrator {
                     .await;
                 return;
             }
-
-            let session_folder_name = {
-                let sessions = active_sessions.lock().await;
-                sessions
-                    .get(&channel_id)
-                    .map(|s| s.folder_name())
-                    .unwrap_or_else(|| {
-                        ActiveSessionState::new(
-                            start_timestamp.clone(),
-                            info.streamer_name.clone(),
-                            info.title.clone(),
-                        )
-                        .folder_name()
-                    })
-            };
             let session_cancel = cancel_token.child_token();
             {
                 let mut tokens = session_cancel_tokens.lock().await;
@@ -1537,13 +1560,15 @@ impl EngineOrchestrator {
                             let mut active = self.active_recordings.lock().await;
                             active.insert(channel.id.clone());
                         }
+                        let alias = channel.alias.clone();
                         {
                             let mut sessions = self.active_sessions.lock().await;
                             sessions.insert(
                                 channel.id.clone(),
                                 ActiveSessionState::new(
                                     start_timestamp,
-                                    display_name.clone(),
+                                    info.streamer_name.clone(),
+                                    alias,
                                     info.title.clone(),
                                 ),
                             );
@@ -1664,9 +1689,17 @@ impl EngineOrchestrator {
 
                     let recordings_base =
                         resolve_path(Path::new(&self.settings.general.recordings_dir));
-                    let active = self.active_recordings.lock().await.clone();
+                    let active_dirs = {
+                        let sessions = self.active_sessions.lock().await;
+                        let active_rec = self.active_recordings.lock().await;
+                        let mut set: HashSet<String> =
+                            sessions.values().map(|s| s.folder_name()).collect();
+                        set.extend(active_rec.iter().cloned());
+                        set
+                    };
                     if let Ok(count) =
-                        Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active).await
+                        Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active_dirs)
+                            .await
                         && count > 0
                     {
                         let _ = self
@@ -1720,9 +1753,15 @@ impl EngineOrchestrator {
             self.poll_channels_once(&upload_tx).await;
 
             let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
-            let active = self.active_recordings.lock().await.clone();
+            let active_dirs = {
+                let sessions = self.active_sessions.lock().await;
+                let active_rec = self.active_recordings.lock().await;
+                let mut set: HashSet<String> = sessions.values().map(|s| s.folder_name()).collect();
+                set.extend(active_rec.iter().cloned());
+                set
+            };
             if let Ok(count) =
-                Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active).await
+                Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active_dirs).await
                 && count > 0
             {
                 let _ = self
@@ -1800,6 +1839,7 @@ mod tests {
         let mut session = ActiveSessionState::new(
             "2026-09-29_120000".to_string(),
             "Streamer".to_string(),
+            None,
             "Initial Title".to_string(),
         );
         let initial_folder = session.folder_name();
@@ -1818,10 +1858,117 @@ mod tests {
     }
 
     #[test]
+    fn test_active_session_state_folder_name_with_alias() {
+        let session = ActiveSessionState::new(
+            "2026-09-30_1100".to_string(),
+            "Streamer".to_string(),
+            Some("MyAlias".to_string()),
+            "My Stream".to_string(),
+        );
+        assert_eq!(
+            session.folder_name(),
+            "[2026-09-30_1100] [MyAlias] Streamer - My Stream"
+        );
+    }
+
+    #[test]
+    fn test_active_session_state_folder_name_without_alias() {
+        let session = ActiveSessionState::new(
+            "2026-09-30_1100".to_string(),
+            "Streamer".to_string(),
+            None,
+            "My Stream".to_string(),
+        );
+        assert_eq!(
+            session.folder_name(),
+            "[2026-09-30_1100] Streamer - My Stream"
+        );
+    }
+
+    #[test]
+    fn test_active_session_state_folder_name_empty_alias_fallback() {
+        let session = ActiveSessionState::new(
+            "2026-09-30_1100".to_string(),
+            "Streamer".to_string(),
+            Some("   ".to_string()),
+            "My Stream".to_string(),
+        );
+        assert_eq!(
+            session.folder_name(),
+            "[2026-09-30_1100] Streamer - My Stream"
+        );
+    }
+
+    #[test]
+    fn test_active_session_state_folder_name_sanitization() {
+        let session = ActiveSessionState::new(
+            "2026-09-30_1100".to_string(),
+            "Streamer/Name...".to_string(),
+            Some("Alias:Special ".to_string()),
+            "Gaming Stream? Playing Now... ".to_string(),
+        );
+        assert_eq!(
+            session.folder_name(),
+            "[2026-09-30_1100] [Alias_Special] Streamer_Name - Gaming Stream_ Playing Now"
+        );
+    }
+
+    #[test]
+    fn test_active_session_state_folder_name_dots_alias_fallback() {
+        let session = ActiveSessionState::new(
+            "2026-09-30_1100".to_string(),
+            "Streamer".to_string(),
+            Some("...".to_string()),
+            "My Stream".to_string(),
+        );
+        assert_eq!(
+            session.folder_name(),
+            "[2026-09-30_1100] Streamer - My Stream"
+        );
+    }
+
+    #[test]
+    fn test_active_session_state_folder_name_empty_title() {
+        let session = ActiveSessionState::new(
+            "2026-09-30_1100".to_string(),
+            "Streamer".to_string(),
+            Some("MyAlias".to_string()),
+            "...".to_string(),
+        );
+        assert_eq!(
+            session.folder_name(),
+            "[2026-09-30_1100] [MyAlias] Streamer"
+        );
+
+        let session_no_alias = ActiveSessionState::new(
+            "2026-09-30_1100".to_string(),
+            "Streamer".to_string(),
+            None,
+            "   ".to_string(),
+        );
+        assert_eq!(session_no_alias.folder_name(), "[2026-09-30_1100] Streamer");
+    }
+
+    #[test]
+    fn test_active_session_state_folder_name_empty_streamer() {
+        let session = ActiveSessionState::new(
+            "2026-09-30_1100".to_string(),
+            "...".to_string(),
+            Some("MyAlias".to_string()),
+            "My Stream".to_string(),
+        );
+        assert_eq!(
+            session.folder_name(),
+            "[2026-09-30_1100] [MyAlias] Unknown - My Stream"
+        );
+    }
+
+    #[test]
     fn test_active_session_state_title_history_formatting() {
         let mut session = ActiveSessionState::new(
             "2026-09-29_120000".to_string(),
             "Streamer".to_string(),
+            None,
             "Title 1".to_string(),
         );
         session.title_history.clear();

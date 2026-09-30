@@ -1304,6 +1304,7 @@ async fn test_engine_orchestrator_stream_title_change_uploads_title_history_text
             chzzk_load::engine::ActiveSessionState::new(
                 "2026-09-22_1000".to_string(),
                 "RenameStreamer".to_string(),
+                Some("RenameStreamer".to_string()),
                 "Initial Stream Title".to_string(),
             ),
         );
@@ -1424,6 +1425,7 @@ async fn test_engine_orchestrator_stream_title_change_updates_title_history_file
             chzzk_load::engine::ActiveSessionState {
                 start_timestamp: "2026-09-22_1000".to_string(),
                 streamer_name: "RenameStreamer".to_string(),
+                alias: Some("RenameStreamer".to_string()),
                 initial_title: "Initial Stream Title".to_string(),
                 current_title: "Initial Stream Title".to_string(),
                 title_history: vec![(
@@ -1538,6 +1540,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
             chzzk_load::engine::ActiveSessionState::new(
                 "2026-09-22_1000".to_string(),
                 "PreStreamer".to_string(),
+                Some("PreStreamer".to_string()),
                 "Early Title 1".to_string(),
             ),
         );
@@ -1703,7 +1706,7 @@ async fn test_engine_orchestrator_graceful_shutdown_cleans_empty_session_dirs() 
 }
 
 #[test]
-fn test_active_session_state_folder_name_preserves_question_marks() {
+fn test_active_session_state_folder_name_sanitizes_question_marks() {
     let session = ActiveSessionState {
         start_timestamp: "2026-09-22_2200".to_string(),
         streamer_name: "Streamer?Name".to_string(),
@@ -1715,10 +1718,11 @@ fn test_active_session_state_folder_name_preserves_question_marks() {
     let folder_name = session.folder_name();
     assert_eq!(
         folder_name,
-        "[2026-09-22_2200] Streamer?Name - Is this live? Yes! Special_ 100% _Stream_"
+        "[2026-09-22_2200] Streamer_Name - Is this live_ Yes! Special_ 100% _Stream_"
     );
-    assert!(folder_name.contains("Streamer?Name"));
-    assert!(folder_name.contains("Is this live? Yes!"));
+    assert!(folder_name.contains("Streamer_Name"));
+    assert!(folder_name.contains("Is this live_ Yes!"));
+    assert!(!folder_name.contains('?'));
     assert!(!folder_name.contains(':'));
     assert!(!folder_name.contains('<'));
     assert!(!folder_name.contains('>'));
@@ -1737,7 +1741,7 @@ fn test_active_session_state_folder_name_formatting_and_sanitization() {
     let folder_name = session.folder_name();
     assert_eq!(
         folder_name,
-        "[2026-09-22_1530] Chzzk Streamer _ Channel - What's Next? Let's Play _ Ep. 1 _Final_"
+        "[2026-09-22_1530] Chzzk Streamer _ Channel - What's Next_ Let's Play _ Ep. 1 _Final_"
     );
 }
 
@@ -2322,9 +2326,9 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
                 if entry.file_type().unwrap().is_dir() {
                     let path = entry.path();
                     let name = path.file_name().unwrap().to_str().unwrap();
-                    if name.starts_with("chan_multi_1_") {
+                    if name.contains("chan_multi_1") || name.starts_with("chan_multi_1_") {
                         session_dir_1 = Some(path.clone());
-                    } else if name.starts_with("chan_multi_2_") {
+                    } else if name.contains("chan_multi_2") || name.starts_with("chan_multi_2_") {
                         session_dir_2 = Some(path.clone());
                     }
                 }
@@ -2486,7 +2490,7 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
                 if entry.file_type().unwrap().is_dir() {
                     let path = entry.path();
                     let name = path.file_name().unwrap().to_str().unwrap();
-                    if name.starts_with("chan_retry_") {
+                    if name.contains("StreamerRetry") || name.starts_with("chan_retry_") {
                         session_dir = Some(path.clone());
                         break;
                     }
@@ -2905,7 +2909,7 @@ fn main() {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|name| name.starts_with("chan_trans_"))
+            .filter(|name| name.contains("TransStreamer") || name.starts_with("chan_trans_"))
             .collect();
         if entries_after_poll1.len() == 1 {
             break;
@@ -3015,7 +3019,7 @@ fn main() {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().is_dir())
             .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|name| name.starts_with("chan_trans_"))
+            .filter(|name| name.contains("TransStreamer") || name.starts_with("chan_trans_"))
             .collect();
         if entries_after_poll3.len() >= 2 {
             break;
@@ -3819,12 +3823,55 @@ async fn test_upload_consumer_logs_broadcast_identifier_on_success_and_failure()
 fn test_engine_folder_naming_with_alias() {
     let state = ActiveSessionState::new(
         "2026-09-30_1100".to_string(),
-        "CustomAlias".to_string(),
+        "StreamerName".to_string(),
+        Some("CustomAlias".to_string()),
         "Gaming Stream".to_string(),
     );
     assert_eq!(
         state.folder_name(),
-        "[2026-09-30_1100] CustomAlias - Gaming Stream"
+        "[2026-09-30_1100] [CustomAlias] StreamerName - Gaming Stream"
+    );
+}
+
+#[test]
+fn test_engine_folder_naming_without_alias() {
+    let state = ActiveSessionState::new(
+        "2026-09-30_1100".to_string(),
+        "StreamerName".to_string(),
+        None,
+        "Gaming Stream".to_string(),
+    );
+    assert_eq!(
+        state.folder_name(),
+        "[2026-09-30_1100] StreamerName - Gaming Stream"
+    );
+}
+
+#[test]
+fn test_engine_folder_naming_empty_alias_fallback() {
+    let state = ActiveSessionState::new(
+        "2026-09-30_1100".to_string(),
+        "StreamerName".to_string(),
+        Some("   ".to_string()),
+        "Gaming Stream".to_string(),
+    );
+    assert_eq!(
+        state.folder_name(),
+        "[2026-09-30_1100] StreamerName - Gaming Stream"
+    );
+}
+
+#[test]
+fn test_engine_folder_naming_sanitizes_illegal_and_trailing_chars() {
+    let state = ActiveSessionState::new(
+        "2026-09-30_1100".to_string(),
+        "Streamer/Name...".to_string(),
+        Some("Alias:Special ".to_string()),
+        "Gaming Stream? Playing Now... ".to_string(),
+    );
+    assert_eq!(
+        state.folder_name(),
+        "[2026-09-30_1100] [Alias_Special] Streamer_Name - Gaming Stream_ Playing Now"
     );
 }
 
@@ -3887,4 +3934,15 @@ async fn test_engine_orchestrator_channel_update_uses_alias() {
         }
     }
     assert!(received_update, "Expected ChannelUpdate event");
+
+    let sessions = orchestrator.active_sessions();
+    let guard = sessions.lock().await;
+    let session = guard.get("chan_alias").expect("Session must exist");
+    assert_eq!(
+        session.folder_name(),
+        format!(
+            "[{}] [MyAlias] OfficialKoreanName - Live Stream",
+            session.start_timestamp
+        )
+    );
 }
