@@ -7,9 +7,12 @@ use crate::recorder::ffmpeg::{
     build_ffmpeg_command, build_ffmpeg_command_with_bin, sanitize_filename,
 };
 use crate::recorder::watcher::SegmentWatcher;
+use crate::chzzk::models_metadata::{
+    MetadataDelta, MetadataEvent, MetadataEventType, StreamMetadataState,
+};
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{ProgressCallback, UploadBackend, UploadTask, broadcast_identifier};
-use chrono::Local;
+use chrono::{Local, Utc};
 use futures_util::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -24,14 +27,31 @@ pub struct FinishedSession {
     pub finished_at: std::time::Instant,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ActiveSessionState {
     pub start_timestamp: String,
+    pub session_start_instant: std::time::Instant,
     pub streamer_name: String,
     pub alias: Option<String>,
     pub initial_title: String,
     pub current_title: String,
-    pub title_history: Vec<(String, String)>,
+    pub current_metadata: StreamMetadataState,
+    pub metadata_history: Vec<MetadataEvent>,
+}
+
+impl Default for ActiveSessionState {
+    fn default() -> Self {
+        Self {
+            start_timestamp: String::new(),
+            session_start_instant: std::time::Instant::now(),
+            streamer_name: String::new(),
+            alias: None,
+            initial_title: String::new(),
+            current_title: String::new(),
+            current_metadata: StreamMetadataState::default(),
+            metadata_history: Vec::new(),
+        }
+    }
 }
 
 impl ActiveSessionState {
@@ -39,16 +59,31 @@ impl ActiveSessionState {
         start_timestamp: String,
         streamer_name: String,
         alias: Option<String>,
-        initial_title: String,
+        initial_metadata: StreamMetadataState,
     ) -> Self {
-        let initial_time = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let now = Local::now();
+        let utc_now = Utc::now();
+        let initial_title = initial_metadata.live_title.clone();
+
+        let initial_event = MetadataEvent {
+            version: 1,
+            event: MetadataEventType::InitialState,
+            timestamp: utc_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            time_local: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+            stream_offset_ms: 0,
+            changes: None,
+            state: initial_metadata.clone(),
+        };
+
         Self {
             start_timestamp,
+            session_start_instant: std::time::Instant::now(),
             streamer_name,
             alias,
-            title_history: vec![(initial_time, initial_title.clone())],
-            current_title: initial_title.clone(),
-            initial_title,
+            initial_title: initial_title.clone(),
+            current_title: initial_title,
+            current_metadata: initial_metadata,
+            metadata_history: vec![initial_event],
         }
     }
 
@@ -85,16 +120,38 @@ impl ActiveSessionState {
         folder.trim_end_matches([' ', '.']).to_string()
     }
 
-    pub fn record_title_change(&mut self, new_title: String, timestamp: String) {
-        self.current_title = new_title.clone();
-        self.title_history.push((timestamp, new_title));
+    pub fn record_metadata_change(
+        &mut self,
+        new_metadata: StreamMetadataState,
+    ) -> Option<(MetadataDelta, MetadataEvent)> {
+        let delta = self.current_metadata.compute_delta(&new_metadata)?;
+        let now = Local::now();
+        let utc_now = Utc::now();
+        let stream_offset_ms = self.session_start_instant.elapsed().as_millis() as u64;
+
+        let event = MetadataEvent {
+            version: 1,
+            event: MetadataEventType::MetadataChanged,
+            timestamp: utc_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            time_local: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+            stream_offset_ms,
+            changes: Some(delta.clone()),
+            state: new_metadata.clone(),
+        };
+
+        self.current_title = new_metadata.live_title.clone();
+        self.current_metadata = new_metadata;
+        self.metadata_history.push(event.clone());
+        Some((delta, event))
     }
 
-    pub fn format_title_history(&self) -> String {
+    pub fn format_metadata_jsonl(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
-        for (timestamp, title) in &self.title_history {
-            let _ = writeln!(out, "[{timestamp}] {title}");
+        for event in &self.metadata_history {
+            if let Ok(line) = serde_json::to_string(event) {
+                let _ = writeln!(out, "{line}");
+            }
         }
         out
     }
@@ -612,7 +669,7 @@ impl EngineOrchestrator {
                 .find(|c| c.id == channel_id)
                 .and_then(|c| c.alias.clone());
 
-            let (session_folder_name, start_timestamp) = {
+            let (session_folder_name, start_timestamp, initial_metadata_jsonl) = {
                 let mut sessions = active_sessions.lock().await;
                 let session = sessions.entry(channel_id.clone()).or_insert_with(|| {
                     let start_timestamp = Local::now().format("%Y-%m-%d_%H%M%S").to_string();
@@ -620,10 +677,14 @@ impl EngineOrchestrator {
                         start_timestamp,
                         info.streamer_name.clone(),
                         alias.clone(),
-                        info.title.clone(),
+                        info.metadata.clone(),
                     )
                 });
-                (session.folder_name(), session.start_timestamp.clone())
+                (
+                    session.folder_name(),
+                    session.start_timestamp.clone(),
+                    session.format_metadata_jsonl(),
+                )
             };
 
             let recordings_base = resolve_path(Path::new(&settings.general.recordings_dir));
@@ -647,6 +708,41 @@ impl EngineOrchestrator {
                     })
                     .await;
                 return;
+            }
+
+            let metadata_path = session_dir.join("metadata.jsonl");
+            if let Err(e) = tokio::fs::write(&metadata_path, &initial_metadata_jsonl).await {
+                let _ = event_tx
+                    .send(AppEvent::Log(LogEntry::rec(format!(
+                        "[{channel_id}] Failed to write 'metadata.jsonl': {e}"
+                    ))))
+                    .await;
+            }
+
+            if let Some(ref backend) = backend_opt {
+                let backend = backend.clone();
+                let remote_dir = session_folder_name.clone();
+                let initial_jsonl = initial_metadata_jsonl.clone();
+                let event_tx_clone = event_tx.clone();
+                let channel_id_clone = channel_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = backend
+                        .upload_text(&remote_dir, "metadata.jsonl", &initial_jsonl)
+                        .await
+                    {
+                        let _ = event_tx_clone
+                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                "[{channel_id_clone}] Failed to upload initial 'metadata.jsonl': {e}"
+                            ))))
+                            .await;
+                    } else {
+                        let _ = event_tx_clone
+                            .send(AppEvent::Log(LogEntry::rec(format!(
+                                "[{channel_id_clone}] Uploaded initial 'metadata.jsonl'"
+                            ))))
+                            .await;
+                    }
+                });
             }
             let session_cancel = cancel_token.child_token();
             {
@@ -1239,31 +1335,31 @@ impl EngineOrchestrator {
             }
             let _ = tokio::time::timeout(Duration::from_secs(2), chat_forward_handle).await;
 
-            let history = {
+            let metadata_jsonl = {
                 let sessions = active_sessions.lock().await;
                 sessions
                     .get(&channel_id)
-                    .map(|s| s.format_title_history())
+                    .map(|s| s.format_metadata_jsonl())
                     .unwrap_or_default()
             };
-            if !history.is_empty()
+            if !metadata_jsonl.is_empty()
                 && let Some(ref backend) = backend_opt
             {
                 match backend
-                    .upload_text(&session_folder_name, "title_history.txt", &history)
+                    .upload_text(&session_folder_name, "metadata.jsonl", &metadata_jsonl)
                     .await
                 {
                     Ok(_) => {
                         let _ = event_tx
                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                "Uploaded 'title_history.txt' for {channel_id}"
+                                "Uploaded 'metadata.jsonl' for {channel_id}"
                             ))))
                             .await;
                     }
                     Err(e) => {
                         let _ = event_tx
                             .send(AppEvent::Log(LogEntry::warn(format!(
-                                "Failed to upload 'title_history.txt' for {channel_id}: {e}"
+                                "Failed to upload 'metadata.jsonl' for {channel_id}: {e}"
                             ))))
                             .await;
                     }
@@ -1452,18 +1548,15 @@ impl EngineOrchestrator {
                     };
 
                     if is_recording {
-                        let title_change = {
+                        let metadata_change = {
                             let mut sessions = self.active_sessions.lock().await;
                             if let Some(session) = sessions.get_mut(&channel.id) {
-                                if session.current_title != info.title {
-                                    let old_title = session.current_title.clone();
-                                    let new_title = info.title.clone();
-                                    let now_str =
-                                        Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                                    session.record_title_change(new_title.clone(), now_str);
+                                if let Some((delta, event)) =
+                                    session.record_metadata_change(info.metadata.clone())
+                                {
                                     let remote_dir = session.folder_name();
-                                    let history_content = session.format_title_history();
-                                    Some((old_title, new_title, remote_dir, history_content))
+                                    let full_jsonl = session.format_metadata_jsonl();
+                                    Some((delta, event, remote_dir, full_jsonl))
                                 } else {
                                     None
                                 }
@@ -1472,20 +1565,37 @@ impl EngineOrchestrator {
                             }
                         };
 
-                        if let Some((old_title, new_title, remote_dir, history_content)) =
-                            title_change
-                        {
-                            if let Some(backend) = self.backend.as_ref() {
-                                match backend
-                                    .upload_text(&remote_dir, "title_history.txt", &history_content)
+                        if let Some((delta, event, remote_dir, full_jsonl)) = metadata_change {
+                            // 1. Append locally to <session_dir>/metadata.jsonl
+                            let recordings_base =
+                                resolve_path(Path::new(&self.settings.general.recordings_dir));
+                            let session_dir = recordings_base.join(&remote_dir);
+                            let event_line = serde_json::to_string(&event).unwrap_or_default();
+                            if !event_line.is_empty() {
+                                use tokio::io::AsyncWriteExt;
+                                if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(session_dir.join("metadata.jsonl"))
                                     .await
                                 {
+                                    let _ =
+                                        file.write_all(format!("{event_line}\n").as_bytes()).await;
+                                }
+                            }
+
+                            // 2. Synchronize to cloud storage via rcat
+                            if let Some(backend) = self.backend.as_ref() {
+                                let res = backend
+                                    .upload_text(&remote_dir, "metadata.jsonl", &full_jsonl)
+                                    .await;
+                                match res {
                                     Ok(_) => {
                                         let channel_id = &channel.id;
                                         let _ = self
                                             .event_tx
                                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                                "Stream title changed ('{old_title}' -> '{new_title}'). Updated 'title_history.txt' for {channel_id}"
+                                                "[{channel_id}] Stream metadata changed. Updated 'metadata.jsonl'"
                                             ))))
                                             .await;
                                     }
@@ -1494,7 +1604,7 @@ impl EngineOrchestrator {
                                         let _ = self
                                             .event_tx
                                             .send(AppEvent::Log(LogEntry::warn(format!(
-                                                "Failed to update 'title_history.txt' for {channel_id}: {e}"
+                                                "[{channel_id}] Failed to update 'metadata.jsonl': {e}"
                                             ))))
                                             .await;
                                     }
@@ -1504,8 +1614,20 @@ impl EngineOrchestrator {
                                 let _ = self
                                     .event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "Stream title changed for {channel_id} ('{old_title}' -> '{new_title}')"
+                                        "[{channel_id}] Stream metadata changed. Updated 'metadata.jsonl'"
                                     ))))
+                                    .await;
+                            }
+
+                            if delta.live_title.is_some() {
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::ChannelUpdate {
+                                        channel_id: channel.id.clone(),
+                                        channel_name: display_name.clone(),
+                                        is_live: true,
+                                        title: info.title.clone(),
+                                    })
                                     .await;
                             }
                         }
@@ -1569,7 +1691,7 @@ impl EngineOrchestrator {
                                     start_timestamp,
                                     info.streamer_name.clone(),
                                     alias,
-                                    info.title.clone(),
+                                    info.metadata.clone(),
                                 ),
                             );
                         }
@@ -1834,13 +1956,31 @@ impl EngineOrchestrator {
 mod tests {
     use super::*;
 
+    fn test_session(
+        start_timestamp: &str,
+        streamer_name: &str,
+        alias: Option<&str>,
+        title: &str,
+    ) -> ActiveSessionState {
+        ActiveSessionState::new(
+            start_timestamp.to_string(),
+            streamer_name.to_string(),
+            alias.map(|s| s.to_string()),
+            StreamMetadataState {
+                channel_name: streamer_name.to_string(),
+                live_title: title.to_string(),
+                ..Default::default()
+            },
+        )
+    }
+
     #[test]
     fn test_active_session_state_stable_folder_name() {
-        let mut session = ActiveSessionState::new(
-            "2026-09-29_120000".to_string(),
-            "Streamer".to_string(),
+        let mut session = test_session(
+            "2026-09-29_120000",
+            "Streamer",
             None,
-            "Initial Title".to_string(),
+            "Initial Title",
         );
         let initial_folder = session.folder_name();
         assert_eq!(
@@ -1849,21 +1989,20 @@ mod tests {
         );
         assert_eq!(session.initial_title, "Initial Title");
 
-        session.record_title_change(
-            "Updated Title".to_string(),
-            "2026-09-29 12:05:00".to_string(),
-        );
+        let mut updated_meta = session.current_metadata.clone();
+        updated_meta.live_title = "Updated Title".to_string();
+        session.record_metadata_change(updated_meta);
         assert_eq!(session.current_title, "Updated Title");
         assert_eq!(session.folder_name(), initial_folder);
     }
 
     #[test]
     fn test_active_session_state_folder_name_with_alias() {
-        let session = ActiveSessionState::new(
-            "2026-09-30_1100".to_string(),
-            "Streamer".to_string(),
-            Some("MyAlias".to_string()),
-            "My Stream".to_string(),
+        let session = test_session(
+            "2026-09-30_1100",
+            "Streamer",
+            Some("MyAlias"),
+            "My Stream",
         );
         assert_eq!(
             session.folder_name(),
@@ -1873,11 +2012,11 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_without_alias() {
-        let session = ActiveSessionState::new(
-            "2026-09-30_1100".to_string(),
-            "Streamer".to_string(),
+        let session = test_session(
+            "2026-09-30_1100",
+            "Streamer",
             None,
-            "My Stream".to_string(),
+            "My Stream",
         );
         assert_eq!(
             session.folder_name(),
@@ -1887,11 +2026,11 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_empty_alias_fallback() {
-        let session = ActiveSessionState::new(
-            "2026-09-30_1100".to_string(),
-            "Streamer".to_string(),
-            Some("   ".to_string()),
-            "My Stream".to_string(),
+        let session = test_session(
+            "2026-09-30_1100",
+            "Streamer",
+            Some("   "),
+            "My Stream",
         );
         assert_eq!(
             session.folder_name(),
@@ -1901,11 +2040,11 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_sanitization() {
-        let session = ActiveSessionState::new(
-            "2026-09-30_1100".to_string(),
-            "Streamer/Name...".to_string(),
-            Some("Alias:Special ".to_string()),
-            "Gaming Stream? Playing Now... ".to_string(),
+        let session = test_session(
+            "2026-09-30_1100",
+            "Streamer/Name...",
+            Some("Alias:Special "),
+            "Gaming Stream? Playing Now... ",
         );
         assert_eq!(
             session.folder_name(),
@@ -1915,11 +2054,11 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_dots_alias_fallback() {
-        let session = ActiveSessionState::new(
-            "2026-09-30_1100".to_string(),
-            "Streamer".to_string(),
-            Some("...".to_string()),
-            "My Stream".to_string(),
+        let session = test_session(
+            "2026-09-30_1100",
+            "Streamer",
+            Some("..."),
+            "My Stream",
         );
         assert_eq!(
             session.folder_name(),
@@ -1929,33 +2068,33 @@ mod tests {
 
     #[test]
     fn test_active_session_state_folder_name_empty_title() {
-        let session = ActiveSessionState::new(
-            "2026-09-30_1100".to_string(),
-            "Streamer".to_string(),
-            Some("MyAlias".to_string()),
-            "...".to_string(),
+        let session = test_session(
+            "2026-09-30_1100",
+            "Streamer",
+            Some("MyAlias"),
+            "...",
         );
         assert_eq!(
             session.folder_name(),
             "[2026-09-30_1100] [MyAlias] Streamer"
         );
 
-        let session_no_alias = ActiveSessionState::new(
-            "2026-09-30_1100".to_string(),
-            "Streamer".to_string(),
+        let session_no_alias = test_session(
+            "2026-09-30_1100",
+            "Streamer",
             None,
-            "   ".to_string(),
+            "   ",
         );
         assert_eq!(session_no_alias.folder_name(), "[2026-09-30_1100] Streamer");
     }
 
     #[test]
     fn test_active_session_state_folder_name_empty_streamer() {
-        let session = ActiveSessionState::new(
-            "2026-09-30_1100".to_string(),
-            "...".to_string(),
-            Some("MyAlias".to_string()),
-            "My Stream".to_string(),
+        let session = test_session(
+            "2026-09-30_1100",
+            "...",
+            Some("MyAlias"),
+            "My Stream",
         );
         assert_eq!(
             session.folder_name(),
@@ -1964,23 +2103,37 @@ mod tests {
     }
 
     #[test]
-    fn test_active_session_state_title_history_formatting() {
-        let mut session = ActiveSessionState::new(
-            "2026-09-29_120000".to_string(),
-            "Streamer".to_string(),
-            None,
-            "Title 1".to_string(),
-        );
-        session.title_history.clear();
-        session.record_title_change("Title 1".to_string(), "2026-09-29 12:00:00".to_string());
-        session.record_title_change("Title 2".to_string(), "2026-09-29 12:30:00".to_string());
-        session.record_title_change("Title 3".to_string(), "2026-09-29 13:00:00".to_string());
+    fn test_active_session_state_metadata_jsonl_formatting() {
+        use crate::chzzk::models_metadata::{MetadataEventType, StreamMetadataState};
 
-        let history = session.format_title_history();
-        assert_eq!(
-            history,
-            "[2026-09-29 12:00:00] Title 1\n[2026-09-29 12:30:00] Title 2\n[2026-09-29 13:00:00] Title 3\n"
+        let mut initial_meta = StreamMetadataState::default();
+        initial_meta.channel_name = "TestStreamer".to_string();
+        initial_meta.live_title = "Initial Title".to_string();
+
+        let mut session = ActiveSessionState::new(
+            "2026-09-30_140000".to_string(),
+            "TestStreamer".to_string(),
+            Some("Alias".to_string()),
+            initial_meta.clone(),
         );
+
+        assert_eq!(session.metadata_history.len(), 1);
+        assert_eq!(session.metadata_history[0].event, MetadataEventType::InitialState);
+        assert_eq!(session.metadata_history[0].stream_offset_ms, 0);
+
+        let mut updated_meta = initial_meta.clone();
+        updated_meta.live_title = "Second Title".to_string();
+        let change = session.record_metadata_change(updated_meta);
+        assert!(change.is_some());
+        assert_eq!(session.metadata_history.len(), 2);
+        assert_eq!(session.metadata_history[1].event, MetadataEventType::MetadataChanged);
+
+        let jsonl = session.format_metadata_jsonl();
+        let lines: Vec<&str> = jsonl.trim().lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"INITIAL_STATE\""));
+        assert!(lines[1].contains("\"METADATA_CHANGED\""));
+        assert!(lines[1].contains("\"Second Title\""));
     }
 
     #[tokio::test]
