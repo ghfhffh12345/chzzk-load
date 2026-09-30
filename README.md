@@ -59,6 +59,9 @@ chzzk-load
 
 # Or specify a custom configuration file
 chzzk-load --config /path/to/my-settings.toml
+
+# Or bypass remote connection check at startup
+chzzk-load --skip-rclone-check
 ```
 
 On first startup, `chzzk-load` generates a default `settings.toml` template in the current working directory if one does not exist.
@@ -83,6 +86,7 @@ chat_flush_interval_seconds = 30
 remote_path = "remote:chzzk"
 upload_concurrency = 3
 rclone_bin = "rclone"
+skip_connection_check = false
 extra_args = []
 
 [chzzk]
@@ -112,6 +116,7 @@ alias = "SampleStreamer"
 | `rclone.remote_path` | `"remote:chzzk"` | Destination remote and folder path in rclone format (`<remote>:<path>`). Set to `""` for **local-only recording mode**. |
 | `rclone.upload_concurrency` | `3` | Maximum number of concurrent channel upload streams (intra-channel uploads remain strictly serialized). |
 | `rclone.rclone_bin` | `"rclone"` | Path or command name for the rclone executable. |
+| `rclone.skip_connection_check` | `false` | Skip remote connection check at startup (runs in background with 10s timeout by default). |
 | `rclone.extra_args` | `[]` | Optional extra CLI flags passed to rclone invocations (e.g. `["--drive-chunk-size=64M"]`). |
 | `chzzk.nid_aut` / `nid_ses` | `""` | Optional Naver session cookies for adult/subscriber-only streams. |
 | `channels` | - | Monitored Chzzk channels. Specify `[[channels]]` with `id` and optional `alias`, or use shorthand string syntax `channels = ["<id>"]` (official streamer name is resolved automatically from the API). |

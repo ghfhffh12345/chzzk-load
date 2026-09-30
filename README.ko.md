@@ -59,6 +59,9 @@ chzzk-load
 
 # 또는 사용자 지정 설정 파일 경로 지정
 chzzk-load --config /path/to/my-settings.toml
+
+# 또는 시작 시 원격지 연결 확인 건너뛰기
+chzzk-load --skip-rclone-check
 ```
 
 최초 실행 시 현재 작업 디렉터리에 `settings.toml` 파일이 존재하지 않는 경우 기본 템플릿이 자동으로 생성됩니다.
@@ -83,6 +86,7 @@ chat_flush_interval_seconds = 30
 remote_path = "remote:chzzk"
 upload_concurrency = 3
 rclone_bin = "rclone"
+skip_connection_check = false
 extra_args = []
 
 [chzzk]
@@ -112,6 +116,7 @@ alias = "SampleStreamer"
 | `rclone.remote_path` | `"remote:chzzk"` | rclone 형식의 대상 원격지 및 경로 (`<원격지이름>:<경로>`). 빈 문자열(`""`)로 설정 시 **로컬 전용 녹화 모드**로 동작합니다. |
 | `rclone.upload_concurrency` | `3` | 채널 간 동시 업로드 가능한 최대 스트림 수 (동일 채널 내 청크는 엄격한 FIFO 순서로 직렬 업로드됨). |
 | `rclone.rclone_bin` | `"rclone"` | rclone 실행 파일의 경로 또는 명령어 이름. |
+| `rclone.skip_connection_check` | `false` | 시작 시 원격지 연결 확인 건너뛰기 여부 (기본값에서는 백그라운드에서 10초 타임아웃으로 비동기 실행). |
 | `rclone.extra_args` | `[]` | rclone 호출 시 전달할 추가 CLI 인자 목록 (예: `["--drive-chunk-size=64M"]`). |
 | `chzzk.nid_aut` / `nid_ses` | `""` | 연령 제한 또는 구독자 전용 방송 녹화를 위한 네이버 로그인 세션 쿠키 값 (선택 사항). |
 | `channels` | - | 모니터링할 치지직 채널 목록. `[[channels]]`에 `id` 및 선택적 `alias`를 지정하거나 축약형 문자열 `channels = ["<id>"]` 지정 가능 (공식 스트리머 이름이 API로부터 자동 확인됨). |
