@@ -8,7 +8,7 @@ use crate::recorder::ffmpeg::{
 };
 use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::{AppEvent, LogEntry};
-use crate::uploader::{ProgressCallback, UploadBackend, UploadTask};
+use crate::uploader::{ProgressCallback, UploadBackend, UploadTask, broadcast_identifier};
 use chrono::Local;
 use futures_util::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -287,6 +287,7 @@ impl EngineOrchestrator {
                                         )
                                         .await;
 
+                                    let target = broadcast_identifier(&streamer, &cid);
                                     match upload_res {
                                         Ok(reclaimed) => {
                                             let _ = event_tx
@@ -298,7 +299,7 @@ impl EngineOrchestrator {
                                                 .await;
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::clean(format!(
-                                                    "Uploaded & deleted {name} (reclaimed {:.1} MB)",
+                                                    "[{target}] Uploaded & deleted {name} (reclaimed {:.1} MB)",
                                                     reclaimed as f64 / 1_048_576.0
                                                 ))))
                                                 .await;
@@ -324,7 +325,7 @@ impl EngineOrchestrator {
                                                 {
                                                     let _ = event_tx
                                                         .send(AppEvent::Log(LogEntry::clean(format!(
-                                                            "Cleaned up empty session folder '{}'",
+                                                            "[{target}] Cleaned up empty session folder '{}'",
                                                             parent.display()
                                                         ))))
                                                         .await;
@@ -334,13 +335,13 @@ impl EngineOrchestrator {
                                         Err(e) => {
                                             let _ = event_tx
                                                 .send(AppEvent::UploadFailed {
-                                                    channel_id: cid,
+                                                    channel_id: cid.clone(),
                                                     chunk_name: name.clone(),
                                                 })
                                                 .await;
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::error(format!(
-                                                    "Upload failed for {name}: {e}"
+                                                    "[{target}] Upload failed for {name}: {e}"
                                                 ))))
                                                 .await;
                                         }
@@ -454,6 +455,8 @@ impl EngineOrchestrator {
                 })
                 .await;
 
+            let target = broadcast_identifier(streamer_name, channel_id);
+
             if backend_active {
                 let send_res = upload_tx
                     .send(UploadTask {
@@ -469,20 +472,20 @@ impl EngineOrchestrator {
                 if send_res.is_ok() {
                     let _ = event_tx
                         .send(AppEvent::Log(LogEntry::rec(format!(
-                            "{chunk_name} sealed. Pushed to cloud upload queue."
+                            "[{target}] {chunk_name} sealed. Pushed to cloud upload queue."
                         ))))
                         .await;
                 } else {
                     let _ = event_tx
                         .send(AppEvent::Log(LogEntry::rec(format!(
-                            "{chunk_name} sealed (saved locally)."
+                            "[{target}] {chunk_name} sealed (saved locally)."
                         ))))
                         .await;
                 }
             } else {
                 let _ = event_tx
                     .send(AppEvent::Log(LogEntry::rec(format!(
-                        "{chunk_name} sealed (saved locally)."
+                        "[{target}] {chunk_name} sealed (saved locally)."
                     ))))
                     .await;
             }
@@ -636,6 +639,8 @@ impl EngineOrchestrator {
                             })
                             .await;
 
+                        let target = broadcast_identifier(&streamer, &channel_id);
+
                         if backend_active {
                             let send_res = upload_tx
                                 .send(UploadTask {
@@ -651,20 +656,20 @@ impl EngineOrchestrator {
                             if send_res.is_ok() {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "{chunk_name} sealed. Pushed to cloud upload queue."
+                                        "[{target}] {chunk_name} sealed. Pushed to cloud upload queue."
                                     ))))
                                     .await;
                             } else {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "{chunk_name} sealed (saved locally)."
+                                        "[{target}] {chunk_name} sealed (saved locally)."
                                     ))))
                                     .await;
                             }
                         } else {
                             let _ = event_tx
                                 .send(AppEvent::Log(LogEntry::rec(format!(
-                                    "{chunk_name} sealed (saved locally)."
+                                    "[{target}] {chunk_name} sealed (saved locally)."
                                 ))))
                                 .await;
                         }
@@ -931,6 +936,7 @@ impl EngineOrchestrator {
                             pending_chunks.push_back(chunk_path);
                         }
 
+                        let target = broadcast_identifier(&info.streamer_name, &channel_id);
                         if backend_opt.is_some() {
                             while let Some(chunk_path) = pending_chunks.pop_front() {
                                 if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
@@ -948,13 +954,13 @@ impl EngineOrchestrator {
                                     if send_res.is_ok() {
                                         let _ = event_tx
                                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                                "{chunk_name} sealed. Pushed to cloud upload queue."
+                                                "[{target}] {chunk_name} sealed. Pushed to cloud upload queue."
                                             ))))
                                             .await;
                                     } else {
                                         let _ = event_tx
                                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                                "{chunk_name} sealed (saved locally)."
+                                                "[{target}] {chunk_name} sealed (saved locally)."
                                             ))))
                                             .await;
                                     }
@@ -965,7 +971,7 @@ impl EngineOrchestrator {
                                 if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
                                     let _ = event_tx
                                         .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{chunk_name} sealed (saved locally)."
+                                            "[{target}] {chunk_name} sealed (saved locally)."
                                         ))))
                                         .await;
                                 }
@@ -1017,6 +1023,7 @@ impl EngineOrchestrator {
                             pending_chunks.push_back(chunk_path);
                         }
 
+                        let target = broadcast_identifier(&info.streamer_name, &channel_id);
                         if backend_opt.is_some() {
                             while let Some(chunk_path) = pending_chunks.pop_front() {
                                 if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
@@ -1034,13 +1041,13 @@ impl EngineOrchestrator {
                                     if send_res.is_ok() {
                                         let _ = event_tx
                                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                                "{chunk_name} sealed. Pushed to cloud upload queue."
+                                                "[{target}] {chunk_name} sealed. Pushed to cloud upload queue."
                                             ))))
                                             .await;
                                     } else {
                                         let _ = event_tx
                                             .send(AppEvent::Log(LogEntry::rec(format!(
-                                                "{chunk_name} sealed (saved locally)."
+                                                "[{target}] {chunk_name} sealed (saved locally)."
                                             ))))
                                             .await;
                                     }
@@ -1051,7 +1058,7 @@ impl EngineOrchestrator {
                                 if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
                                     let _ = event_tx
                                         .send(AppEvent::Log(LogEntry::rec(format!(
-                                            "{chunk_name} sealed (saved locally)."
+                                            "[{target}] {chunk_name} sealed (saved locally)."
                                         ))))
                                         .await;
                                 }
@@ -1137,6 +1144,7 @@ impl EngineOrchestrator {
 
             // Drain any remaining chunks if the process finished and chunks were queued
             if !pending_chunks.is_empty() {
+                let target = broadcast_identifier(&info.streamer_name, &channel_id);
                 if backend_opt.is_some() {
                     while let Some(chunk_path) = pending_chunks.pop_front() {
                         if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
@@ -1154,13 +1162,13 @@ impl EngineOrchestrator {
                             if send_res.is_ok() {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "{chunk_name} sealed. Pushed to cloud upload queue."
+                                        "[{target}] {chunk_name} sealed. Pushed to cloud upload queue."
                                     ))))
                                     .await;
                             } else {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "{chunk_name} sealed (saved locally)."
+                                        "[{target}] {chunk_name} sealed (saved locally)."
                                     ))))
                                     .await;
                             }
@@ -1171,7 +1179,7 @@ impl EngineOrchestrator {
                         if let Some(chunk_name) = chunk_path.file_name().and_then(|n| n.to_str()) {
                             let _ = event_tx
                                 .send(AppEvent::Log(LogEntry::rec(format!(
-                                    "{chunk_name} sealed (saved locally)."
+                                    "[{target}] {chunk_name} sealed (saved locally)."
                                 ))))
                                 .await;
                         }
@@ -1260,13 +1268,14 @@ impl EngineOrchestrator {
                 .await;
 
             // Clean up session directory if empty (e.g. no chunks were saved or all chunks/chat were already uploaded)
+            let target = broadcast_identifier(&info.streamer_name, &channel_id);
             if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await
                 && rd.next_entry().await.ok().flatten().is_none()
                 && tokio::fs::remove_dir(&session_dir).await.is_ok()
             {
                 let _ = event_tx
                     .send(AppEvent::Log(LogEntry::clean(format!(
-                        "Cleaned up empty session folder '{}'",
+                        "[{target}] Cleaned up empty session folder '{}'",
                         session_dir.display()
                     ))))
                     .await;

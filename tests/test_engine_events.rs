@@ -14,7 +14,7 @@ use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::engine::{ActiveSessionState, EngineOrchestrator};
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::uploader::{
-    BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend, UploadTask,
+    BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend, UploadTask, broadcast_identifier,
 };
 
 struct ConcurrencyMockBackend {
@@ -774,7 +774,9 @@ async fn test_process_sealed_chunk_no_backend_saves_locally() {
                 assert_eq!(size_bytes, 17);
                 got_chunk_sealed = true;
             }
-            AppEvent::Log(msg) if msg == "[REC] chunk_0000.ts sealed (saved locally)." => {
+            AppEvent::Log(msg)
+                if msg == "[REC] [Streamer] chunk_0000.ts sealed (saved locally)." =>
+            {
                 got_saved_locally_log = true;
             }
             _ => {}
@@ -820,7 +822,7 @@ async fn test_process_sealed_chunk_backend_active_pushes_task() {
     let mut got_pushed_log = false;
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(msg) = ev
-            && msg == "[REC] chunk_0001.ts sealed. Pushed to cloud upload queue."
+            && msg == "[REC] [StreamerSub] chunk_0001.ts sealed. Pushed to cloud upload queue."
         {
             got_pushed_log = true;
         }
@@ -858,7 +860,7 @@ async fn test_process_sealed_chunk_upload_channel_closed_saves_locally() {
     let mut got_saved_locally_log = false;
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(msg) = ev
-            && msg == "[REC] chunk_0002.ts sealed (saved locally)."
+            && msg == "[REC] [StreamerFail] chunk_0002.ts sealed (saved locally)."
         {
             got_saved_locally_log = true;
         }
@@ -899,7 +901,7 @@ async fn test_process_sealed_chunk_existing_folder_id_skips_retry() {
     let mut got_pushed_log = false;
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(msg) = ev
-            && msg == "[REC] chunk_0003.ts sealed. Pushed to cloud upload queue."
+            && msg == "[REC] [StreamerExist] chunk_0003.ts sealed. Pushed to cloud upload queue."
         {
             got_pushed_log = true;
         }
@@ -3723,6 +3725,139 @@ fn main() {
             .await
             .contains_key("chan_sports"),
         "Channel must be cleared from restricted_live_ids on CLOSE"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_broadcast_identifier_resolution() {
+    use std::path::PathBuf;
+
+    assert_eq!(broadcast_identifier("Streamer", "chan_123"), "Streamer");
+    assert_eq!(broadcast_identifier("  Streamer  ", "chan_123"), "Streamer");
+    assert_eq!(broadcast_identifier("", "chan_123"), "chan_123");
+    assert_eq!(broadcast_identifier("   ", "chan_123"), "chan_123");
+
+    let task1 = UploadTask {
+        channel_id: "chan_1".to_string(),
+        session_folder_id: "s1".to_string(),
+        remote_dir: "s1".to_string(),
+        chunk_path: PathBuf::from("chunk_0000.ts"),
+        chunk_name: "chunk_0000.ts".to_string(),
+        streamer_name: "StreamerOne".to_string(),
+    };
+    assert_eq!(task1.broadcast_identifier(), "StreamerOne");
+
+    let task2 = UploadTask {
+        channel_id: "chan_2".to_string(),
+        session_folder_id: "s2".to_string(),
+        remote_dir: "s2".to_string(),
+        chunk_path: PathBuf::from("chunk_0000.ts"),
+        chunk_name: "chunk_0000.ts".to_string(),
+        streamer_name: "   ".to_string(),
+    };
+    assert_eq!(task2.broadcast_identifier(), "chan_2");
+}
+
+#[tokio::test]
+async fn test_upload_consumer_logs_broadcast_identifier_on_success_and_failure() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_broadcast_id_logs_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk_path = temp_dir.join("chunk_0001.ts");
+    fs::write(&chunk_path, vec![0u8; 1024 * 1024]).unwrap();
+
+    let chat_path = temp_dir.join("chat_0001.jsonl");
+    fs::write(&chat_path, b"{\"test\":true}\n").unwrap();
+
+    let chunk_path_fallback = temp_dir.join("chunk_0002.ts");
+    fs::write(&chunk_path_fallback, vec![0u8; 512 * 1024]).unwrap();
+
+    let mock_backend = Arc::new(MockUploadBackend::new());
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+
+    EngineOrchestrator::spawn_upload_consumer_with_concurrency(
+        Some(mock_backend.clone()),
+        event_tx.clone(),
+        upload_rx,
+        2,
+    );
+
+    // Send video chunk task with streamer_name
+    upload_tx
+        .send(UploadTask {
+            channel_id: "chan_streamer_1".to_string(),
+            session_folder_id: "session_1".to_string(),
+            remote_dir: "session_1".to_string(),
+            chunk_path: chunk_path.clone(),
+            chunk_name: "chunk_0001.ts".to_string(),
+            streamer_name: "StreamerOne".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Send chat chunk task with streamer_name
+    upload_tx
+        .send(UploadTask {
+            channel_id: "chan_streamer_1".to_string(),
+            session_folder_id: "session_1".to_string(),
+            remote_dir: "session_1".to_string(),
+            chunk_path: chat_path.clone(),
+            chunk_name: "chat_0001.jsonl".to_string(),
+            streamer_name: "StreamerOne".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Send video chunk task with whitespace streamer_name (should fallback to channel_id)
+    upload_tx
+        .send(UploadTask {
+            channel_id: "chan_fallback_id".to_string(),
+            session_folder_id: "session_2".to_string(),
+            remote_dir: "session_2".to_string(),
+            chunk_path: chunk_path_fallback.clone(),
+            chunk_name: "chunk_0002.ts".to_string(),
+            streamer_name: "   ".to_string(),
+        })
+        .await
+        .unwrap();
+
+    // Drop upload_tx and event_tx to signal completion
+    drop(upload_tx);
+    drop(event_tx);
+
+    let mut got_video_clean_log = false;
+    let mut got_chat_clean_log = false;
+    let mut got_fallback_clean_log = false;
+
+    while let Some(event) = event_rx.recv().await {
+        if let AppEvent::Log(msg) = event {
+            if msg.contains("[StreamerOne] Uploaded & deleted chunk_0001.ts") {
+                got_video_clean_log = true;
+            }
+            if msg.contains("[StreamerOne] Uploaded & deleted chat_0001.jsonl") {
+                got_chat_clean_log = true;
+            }
+            if msg.contains("[chan_fallback_id] Uploaded & deleted chunk_0002.ts") {
+                got_fallback_clean_log = true;
+            }
+        }
+    }
+
+    assert!(
+        got_video_clean_log,
+        "Must log [StreamerOne] on video chunk upload & delete"
+    );
+    assert!(
+        got_chat_clean_log,
+        "Must log [StreamerOne] on chat chunk upload & delete"
+    );
+    assert!(
+        got_fallback_clean_log,
+        "Must log [chan_fallback_id] fallback when streamer name is whitespace"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
