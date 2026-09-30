@@ -9,7 +9,7 @@
 
 네이버 치지직(Chzzk) 라이브 방송을 자동으로 감지하여 실시간 영상 및 라이브 채팅을 녹화하고 클라우드 스토리지([rclone](https://rclone.org/) 연동)로 동기화하는 고성능 독립 실행형 CLI 도구입니다. [Ratatui](https://github.com/ratatui/ratatui) 기반의 대화형 터미널 사용자 인터페이스(TUI)를 제공합니다.
 
-`chzzk-load`는 방송 상태를 실시간 모니터링하며, FFmpeg 스트림 복사(`-c copy`)를 통해 원본 손실 없이 영상을 MPEG-TS 세그먼트로 분할 저장하고 WebSocket을 통해 실시간 라이브 채팅을 구조화된 JSON Lines(`chat.jsonl`) 형식으로 동시 수집합니다. 분할 완료된 영상 세그먼트와 채팅 로그는 백그라운드에서 rclone을 통해 클라우드 스토리지로 즉시 업로드되며 (또는 로컬 전용 모드로 로컬에 보관), 업로드 성공이 확인되는 즉시 로컬 파일을 삭제하여 디스크 사용량을 최소한으로 엄격히 유지합니다.
+`chzzk-load`는 방송 상태를 실시간 모니터링하며, FFmpeg 스트림 복사(`-c copy`)를 통해 원본 손실 없이 영상을 MPEG-TS 세그먼트로 분할 저장하고 WebSocket을 통해 실시간 라이브 채팅을 구조화된 JSON Lines(`chat_%04d.jsonl`) 형식으로 동시 수집합니다. 분할 완료된 영상 세그먼트와 채팅 로그는 백그라운드에서 rclone을 통해 클라우드 스토리지로 즉시 업로드되며 (또는 로컬 전용 모드로 로컬에 보관), 업로드 성공이 확인되는 즉시 로컬 파일을 삭제하여 디스크 사용량을 최소한으로 엄격히 유지합니다.
 
 ![chzzk-load TUI 대시보드](assets/tui-preview.png)
 
@@ -91,11 +91,11 @@ nid_ses = ""
 
 # 채널별 별칭(alias)을 지정하여 모니터링:
 [[channels]]
-id = "1a1dd9ce56fb61a37ffb6f69f6d5b978"
-alias = "강퀴"
+id = "4c3b44869c9b1399723ec28ec236f736"
+alias = "SampleStreamer"
 
 # 또는 축약형 문자열 배열로 모니터링 (공식 스트리머 이름이 API를 통해 자동 확인됨):
-# channels = ["1a1dd9ce56fb61a37ffb6f69f6d5b978"]
+# channels = ["4c3b44869c9b1399723ec28ec236f736"]
 ```
 
 ### 주요 설정 항목
@@ -143,8 +143,8 @@ nid_aut = ""
 nid_ses = ""
 
 [[channels]]
-id = "1a1dd9ce56fb61a37ffb6f69f6d5b978"
-alias = "강퀴"
+id = "4c3b44869c9b1399723ec28ec236f736"
+alias = "SampleStreamer"
 ```
 
 - **`recordings_dir: "/dev/shm/chzzk-load"`**: Linux 공유 메모리(RAM 디스크 / tmpfs)를 사용하여 microSD 및 플래시 메모리에 대한 쓰기 작업을 원천 차단합니다.

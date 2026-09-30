@@ -9,7 +9,7 @@
 
 A high-performance, standalone tool for automated Naver Chzzk live stream recording, real-time live chat archiving, and cloud storage syncing (via [rclone](https://rclone.org/)), featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
 
-`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat.jsonl`), concurrently uploads completed chunks and logs to cloud storage via rclone (or keeps them locally in local-only mode), and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
+`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat_%04d.jsonl`), concurrently uploads completed chunks and logs to cloud storage via rclone (or keeps them locally in local-only mode), and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
 
 ![chzzk-load TUI Dashboard](assets/tui-preview.png)
 
@@ -91,11 +91,11 @@ nid_ses = ""
 
 # Channels can be defined with an optional custom alias:
 [[channels]]
-id = "1a1dd9ce56fb61a37ffb6f69f6d5b978"
-alias = "강퀴"
+id = "4c3b44869c9b1399723ec28ec236f736"
+alias = "SampleStreamer"
 
 # Or using shorthand string syntax (official channel name is resolved automatically):
-# channels = ["1a1dd9ce56fb61a37ffb6f69f6d5b978"]
+# channels = ["4c3b44869c9b1399723ec28ec236f736"]
 ```
 
 ### Key Settings
@@ -143,8 +143,8 @@ nid_aut = ""
 nid_ses = ""
 
 [[channels]]
-id = "1a1dd9ce56fb61a37ffb6f69f6d5b978"
-alias = "강퀴"
+id = "4c3b44869c9b1399723ec28ec236f736"
+alias = "SampleStreamer"
 ```
 
 - **`recordings_dir: "/dev/shm/chzzk-load"`**: Points to Linux shared memory (RAM disk / tmpfs). Video chunks and chat logs are buffered in RAM and deleted immediately upon verified upload, resulting in zero disk writes to your microSD card.
