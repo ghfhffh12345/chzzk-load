@@ -98,10 +98,99 @@ pub struct ChzzkConfig {
     pub nid_ses: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub const DEFAULT_SETTINGS_TOML: &str = r#"# chzzk-load configuration
+
+[general]
+# Chunk duration for MPEG-TS video segments in seconds
+chunk_duration_seconds = 600
+# Interval between stream polling cycles in seconds
+poll_interval_seconds = 20
+# Cooldown window in seconds to prevent duplicate sessions from CDN caching
+stream_cooldown_seconds = 60
+# Directory to store local session recordings
+recordings_dir = "recordings"
+# Minimum required free disk space in GB before pausing/warning
+min_free_disk_gb = 2.0
+# Record live chat messages concurrently into JSON Lines chunks
+record_chat = true
+# Buffer flush interval for chat writer in seconds
+chat_flush_interval_seconds = 30
+
+[rclone]
+# Target remote path (e.g. "gdrive:Chzzk_Recordings" or "" for local-only mode)
+remote_path = "gdrive:Chzzk_Recordings"
+# Maximum concurrent uploads across different channels
+upload_concurrency = 3
+# Path to rclone binary
+rclone_bin = "rclone"
+# Additional arguments passed to rclone child process
+extra_args = []
+
+[chzzk]
+# Optional Naver session cookies for age-restricted (19+) or subscriber streams
+nid_aut = ""
+nid_ses = ""
+
+# Monitored Channels:
+# Channels can be specified as a list of strings (shorthand ID) or an array of tables.
+#
+# Option A: Shorthand string array:
+# channels = ["4c3b44869c9b1399723ec28ec236f736"]
+#
+# Option B: Array of tables with optional alias:
+[[channels]]
+id = "4c3b44869c9b1399723ec28ec236f736"
+alias = "SampleStreamer"
+"#;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ChannelConfig {
     pub id: String,
-    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
+impl ChannelConfig {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            alias: None,
+        }
+    }
+
+    pub fn with_alias(id: impl Into<String>, alias: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            alias: Some(alias.into()),
+        }
+    }
+
+    pub fn display_label(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.id)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ChannelConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum RawChannel {
+            Id(String),
+            Table {
+                id: String,
+                #[serde(default)]
+                alias: Option<String>,
+            },
+        }
+
+        match RawChannel::deserialize(deserializer)? {
+            RawChannel::Id(id) => Ok(ChannelConfig::new(id)),
+            RawChannel::Table { id, alias } => Ok(ChannelConfig { id, alias }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -117,10 +206,10 @@ pub struct Settings {
 }
 
 fn default_channels() -> Vec<ChannelConfig> {
-    vec![ChannelConfig {
-        id: "4c3b44869c9b1399723ec28ec236f736".to_string(),
-        name: "SampleStreamer".to_string(),
-    }]
+    vec![ChannelConfig::with_alias(
+        "4c3b44869c9b1399723ec28ec236f736",
+        "SampleStreamer",
+    )]
 }
 
 impl Default for Settings {
@@ -138,21 +227,21 @@ impl Settings {
     pub fn load_or_create_default(path: &Path) -> anyhow::Result<Self> {
         match fs::read_to_string(path) {
             Ok(content) => {
-                let settings: Settings = serde_json::from_str(&content)
-                    .with_context(|| format!("Failed to parse JSON in {}", path.display()))?;
+                let settings: Settings = toml::from_str(&content)
+                    .with_context(|| format!("Failed to parse TOML in {}", path.display()))?;
                 Ok(settings)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let settings = Settings::default();
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).with_context(|| {
                         format!("Failed to create parent directory for {}", parent.display())
                     })?;
                 }
-                let content = serde_json::to_string_pretty(&settings)?;
-                fs::write(path, content).with_context(|| {
+                fs::write(path, DEFAULT_SETTINGS_TOML).with_context(|| {
                     format!("Failed to write default settings to {}", path.display())
                 })?;
+                let settings: Settings = toml::from_str(DEFAULT_SETTINGS_TOML)
+                    .with_context(|| "Failed to parse built-in default settings template")?;
                 Ok(settings)
             }
             Err(e) => {

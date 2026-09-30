@@ -34,7 +34,7 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 ## Prerequisites
 
 - **FFmpeg**: Must be installed and accessible on your system's `PATH` (or configured via the `CHZZK_LOAD_FFMPEG_BIN` environment variable).
-- **Rclone**: (Optional for local-only mode, required for cloud upload) Must be installed and accessible on your system's `PATH` (or configured via `settings.json` `rclone.rclone_bin` or the `CHZZK_LOAD_RCLONE_BIN` environment variable).
+- **Rclone**: (Optional for local-only mode, required for cloud upload) Must be installed and accessible on your system's `PATH` (or configured via `settings.toml` `rclone.rclone_bin` or the `CHZZK_LOAD_RCLONE_BIN` environment variable).
 
 ```bash
 ffmpeg -version
@@ -54,47 +54,48 @@ npm install -g chzzk-load
 Start the application:
 
 ```bash
-# Run with default settings (automatically creates settings.json if missing)
+# Run with default settings (automatically creates settings.toml if missing)
 chzzk-load
 
 # Or specify a custom configuration file
-chzzk-load --config /path/to/my-settings.json
+chzzk-load --config /path/to/my-settings.toml
 ```
 
-On first startup, `chzzk-load` generates a default `settings.json` template in the current working directory if one does not exist.
+On first startup, `chzzk-load` generates a default `settings.toml` template in the current working directory if one does not exist.
 
 ---
 
-## Configuration (`settings.json`)
+## Configuration (`settings.toml`)
 
-```json
-{
-  "general": {
-    "chunk_duration_seconds": 600,
-    "poll_interval_seconds": 20,
-    "stream_cooldown_seconds": 60,
-    "recordings_dir": "recordings",
-    "min_free_disk_gb": 2.0,
-    "record_chat": true,
-    "chat_flush_interval_seconds": 30
-  },
-  "rclone": {
-    "remote_path": "gdrive:Chzzk_Recordings",
-    "upload_concurrency": 3,
-    "rclone_bin": "rclone",
-    "extra_args": []
-  },
-  "chzzk": {
-    "nid_aut": "",
-    "nid_ses": ""
-  },
-  "channels": [
-    {
-      "id": "1a1dd9ce56fb61a37ffb6f69f6d5b978",
-      "name": "강퀴"
-    }
-  ]
-}
+```toml
+# chzzk-load configuration
+
+[general]
+chunk_duration_seconds = 600
+poll_interval_seconds = 20
+stream_cooldown_seconds = 60
+recordings_dir = "recordings"
+min_free_disk_gb = 2.0
+record_chat = true
+chat_flush_interval_seconds = 30
+
+[rclone]
+remote_path = "gdrive:Chzzk_Recordings"
+upload_concurrency = 3
+rclone_bin = "rclone"
+extra_args = []
+
+[chzzk]
+nid_aut = ""
+nid_ses = ""
+
+# Channels can be defined with an optional custom alias:
+[[channels]]
+id = "1a1dd9ce56fb61a37ffb6f69f6d5b978"
+alias = "강퀴"
+
+# Or using shorthand string syntax (official channel name is resolved automatically):
+# channels = ["1a1dd9ce56fb61a37ffb6f69f6d5b978"]
 ```
 
 ### Key Settings
@@ -113,7 +114,7 @@ On first startup, `chzzk-load` generates a default `settings.json` template in t
 | `rclone.rclone_bin` | `"rclone"` | Path or command name for the rclone executable. |
 | `rclone.extra_args` | `[]` | Optional extra CLI flags passed to rclone invocations (e.g. `["--drive-chunk-size=64M"]`). |
 | `chzzk.nid_aut` / `nid_ses` | `""` | Optional Naver session cookies for adult/subscriber-only streams. |
-| `channels` | - | List of monitored Chzzk channels (`id` from channel URL, `name` for display). |
+| `channels` | - | Monitored Chzzk channels. Specify `[[channels]]` with `id` and optional `alias`, or use shorthand string syntax `channels = ["<id>"]` (official streamer name is resolved automatically from the API). |
 
 ### Recommended Configuration for SBCs (Raspberry Pi, etc.)
 
@@ -121,34 +122,29 @@ For Single Board Computers (such as a Raspberry Pi or ARM64 board running Linux 
 
 Because `chzzk-load` maintains only 1–2 video segments and active chat chunks locally and deletes them immediately upon confirmed cloud upload, using `/dev/shm` buffers temporary chunks in memory and uploads them directly to cloud storage, completely eliminating flash storage wear and protecting microSD card longevity:
 
-```json
-{
-  "general": {
-    "chunk_duration_seconds": 120,
-    "poll_interval_seconds": 20,
-    "stream_cooldown_seconds": 0,
-    "recordings_dir": "/dev/shm/chzzk-load",
-    "min_free_disk_gb": 2.0,
-    "record_chat": true,
-    "chat_flush_interval_seconds": 30
-  },
-  "rclone": {
-    "remote_path": "gdrive:Chzzk_Recordings",
-    "upload_concurrency": 2,
-    "rclone_bin": "rclone",
-    "extra_args": []
-  },
-  "chzzk": {
-    "nid_aut": "",
-    "nid_ses": ""
-  },
-  "channels": [
-    {
-      "id": "1a1dd9ce56fb61a37ffb6f69f6d5b978",
-      "name": "강퀴"
-    }
-  ]
-}
+```toml
+[general]
+chunk_duration_seconds = 120
+poll_interval_seconds = 20
+stream_cooldown_seconds = 0
+recordings_dir = "/dev/shm/chzzk-load"
+min_free_disk_gb = 2.0
+record_chat = true
+chat_flush_interval_seconds = 30
+
+[rclone]
+remote_path = "gdrive:Chzzk_Recordings"
+upload_concurrency = 2
+rclone_bin = "rclone"
+extra_args = []
+
+[chzzk]
+nid_aut = ""
+nid_ses = ""
+
+[[channels]]
+id = "1a1dd9ce56fb61a37ffb6f69f6d5b978"
+alias = "강퀴"
 ```
 
 - **`recordings_dir: "/dev/shm/chzzk-load"`**: Points to Linux shared memory (RAM disk / tmpfs). Video chunks and chat logs are buffered in RAM and deleted immediately upon verified upload, resulting in zero disk writes to your microSD card.
@@ -183,7 +179,7 @@ To enable automatic cloud storage upload:
    ```bash
    rclone lsd gdrive:
    ```
-4. Set `remote_path` in `settings.json` to your target remote and destination folder (e.g. `"remote_path": "gdrive:Chzzk_Recordings"` or `"remote_path": "onedrive:Recordings"`).
+4. Set `remote_path` in `settings.toml` to your target remote and destination folder (e.g. `remote_path = "gdrive:Chzzk_Recordings"` or `remote_path = "onedrive:Recordings"`).
 5. Run `chzzk-load`. The application will verify the rclone remote connection on startup and stream completed segments to your cloud storage.
 
 ---

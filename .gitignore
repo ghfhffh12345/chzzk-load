@@ -2,4 +2,4 @@
 recordings/
 .superpowers/
 npm/platforms/
-settings.json
+settings.toml

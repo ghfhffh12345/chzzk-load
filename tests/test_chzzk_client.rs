@@ -689,7 +689,12 @@ async fn test_get_live_detail_close_when_offline() {
         .with_base_url(format!("http://127.0.0.1:{port}"));
 
     let detail = client.get_live_detail("chan_offline").await.unwrap();
-    assert_eq!(detail, LiveDetail::Close);
+    assert_eq!(
+        detail,
+        LiveDetail::Close {
+            streamer_name: Some("OfflineStreamer".to_string())
+        }
+    );
 }
 
 #[tokio::test]

@@ -34,7 +34,7 @@ chzzk-load/
 ├── Cargo.toml                # Dependencies and binary target definitions
 ├── README.md                 # Primary documentation (English)
 ├── README.ko.md              # Documentation (Korean)
-├── settings.json             # Dedicated configuration file (portable)
+├── settings.toml             # Dedicated configuration file (portable)
 ├── npm/
 │   └── chzzk-load/           # Root npm CLI wrapper package
 │       ├── bin/
@@ -265,4 +265,5 @@ When implementing changes, AI agents must strictly preserve the following rules:
 10. **Clean HLS Stream Termination (No Reconnect Flags)**: Never add `-reconnect` or `-reconnect_at_eof` flags to `build_ffmpeg_command`. Live HLS streams must terminate cleanly and promptly upon manifest EOF when the broadcast ends.
 11. **Non-Blocking Mutex Scoping in Engine**: Never hold the `active_sessions` or `active_recordings` mutex across asynchronous network I/O, backend uploads, or rclone operations.
 12. **Rclone Binary Resolution**: `RcloneBackend` must respect the `CHZZK_LOAD_RCLONE_BIN` environment variable override before falling back to `settings.rclone.rclone_bin` and `"rclone"` on `PATH`.
+13. **TOML Configuration & Channel Aliasing**: Configuration must strictly adhere to `settings.toml` parsed with `toml = "1.1"`. Legacy `settings.json` is completely deprecated and unsupported. Channel configuration supports both shorthand string arrays and `[[channels]]` tables with `id` and optional `alias`. Folder naming follows `[{timestamp}] {alias} - {title}` (or streamer name fallback), and TUI displays `alias` (or streamer name fallback) consistently without online/offline state flipping.
 

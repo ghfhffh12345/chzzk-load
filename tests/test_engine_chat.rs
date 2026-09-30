@@ -86,10 +86,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = true;
     settings.general.chat_flush_interval_seconds = 1;
-    settings.channels = vec![ChannelConfig {
-        id: "chan_chat_test".to_string(),
-        name: "ChatStreamer".to_string(),
-    }];
+    settings.channels = vec![ChannelConfig::with_alias("chan_chat_test", "ChatStreamer")];
 
     let chzzk = ChzzkClient::new(&settings.chzzk)
         .with_game_base_url(format!("http://127.0.0.1:{port}"))
@@ -200,10 +197,7 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
     let mut settings = Settings::default();
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = false; // Chat disabled!
-    settings.channels = vec![ChannelConfig {
-        id: "chan_no_chat".to_string(),
-        name: "NoChatStreamer".to_string(),
-    }];
+    settings.channels = vec![ChannelConfig::with_alias("chan_no_chat", "NoChatStreamer")];
 
     let chzzk =
         ChzzkClient::new(&settings.chzzk).with_game_base_url(format!("http://127.0.0.1:{port}"));
@@ -555,10 +549,7 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     settings.general.record_chat = true;
     settings.general.chunk_duration_seconds = 1;
     settings.general.chat_flush_interval_seconds = 1;
-    settings.channels = vec![ChannelConfig {
-        id: "chan_chat_inc".to_string(),
-        name: "IncStreamer".to_string(),
-    }];
+    settings.channels = vec![ChannelConfig::with_alias("chan_chat_inc", "IncStreamer")];
 
     let chzzk = ChzzkClient::new(&settings.chzzk)
         .with_game_base_url(format!("http://127.0.0.1:{port}"))
