@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use std::time::Duration;
 
 use chzzk_load::config::Settings;
 use chzzk_load::tui::TuiOutcome;
@@ -218,6 +219,36 @@ fn test_app_outcome_on_double_q_returns_force_exit() {
     // Graceful outcome variants
     assert!(TuiOutcome::Graceful.is_graceful());
     assert!(!TuiOutcome::Graceful.is_force_exit());
+}
+
+#[test]
+fn test_app_outcome_timeout_expired_and_shutdown_tracking() {
+    let mut app = App::new();
+    assert_eq!(app.shutdown_started_at, None);
+    assert!(!app.has_shutdown_timed_out(Duration::from_secs(15)));
+
+    // Outcome predicates for TimeoutExpired
+    let timeout_outcome = TuiOutcome::TimeoutExpired;
+    assert!(timeout_outcome.is_timeout());
+    assert!(!timeout_outcome.is_graceful());
+    assert!(!timeout_outcome.is_force_exit());
+    assert!(!TuiOutcome::Graceful.is_timeout());
+    assert!(!TuiOutcome::ForceExit.is_timeout());
+
+    // First 'q' sets is_shutting_down and records shutdown_started_at
+    let q_key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+    app.handle_event(AppEvent::Key(q_key));
+    assert!(app.is_shutting_down);
+    assert!(app.shutdown_started_at.is_some());
+
+    // Timeout checks
+    assert!(app.has_shutdown_timed_out(Duration::from_millis(0)));
+    assert!(!app.has_shutdown_timed_out(Duration::from_secs(60)));
+
+    // Explicit mark_timeout escalates outcome to TimeoutExpired
+    app.mark_timeout();
+    assert_eq!(app.outcome(), TuiOutcome::TimeoutExpired);
+    assert!(app.has_shutdown_timed_out(Duration::from_secs(60)));
 }
 
 #[test]

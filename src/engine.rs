@@ -41,6 +41,7 @@ pub struct EngineOrchestrator {
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
     session_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    upload_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     ffmpeg_bin: Option<String>,
 }
 
@@ -70,6 +71,7 @@ impl EngineOrchestrator {
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
+            upload_handle: Arc::new(std::sync::Mutex::new(None)),
             ffmpeg_bin: None,
         }
     }
@@ -129,6 +131,38 @@ impl EngineOrchestrator {
     pub fn cancel(&self) {
         self.cancel_token.cancel();
         self.registry.cancel_all();
+    }
+
+    pub fn abort_all(&self) -> usize {
+        self.cancel();
+        let mut count = 0;
+        if let Ok(mut guard) = self.session_handles.lock() {
+            count += guard.len();
+            for handle in guard.drain(..) {
+                handle.abort();
+            }
+        }
+        if let Ok(mut guard) = self.upload_handle.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[doc(hidden)]
+    pub fn push_session_handle_for_test(&self, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut guard) = self.session_handles.lock() {
+            guard.push(handle);
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn register_upload_handle_for_test(&self, handle: tokio::task::JoinHandle<()>) {
+        if let Ok(mut guard) = self.upload_handle.lock() {
+            *guard = Some(handle);
+        }
     }
 
     pub fn cancel_token(&self) -> CancellationToken {
@@ -582,6 +616,9 @@ impl EngineOrchestrator {
             upload_rx,
             concurrency,
         );
+        if let Ok(mut guard) = self.upload_handle.lock() {
+            *guard = Some(upload_handle);
+        }
 
         let poll_interval = Duration::from_secs(self.settings.general.poll_interval_seconds);
 
@@ -667,7 +704,14 @@ impl EngineOrchestrator {
         drop(upload_tx);
 
         // 3. Await upload consumer to finish all in-flight and queued uploads
-        let _ = upload_handle.await;
+        let upload_task = if let Ok(mut guard) = self.upload_handle.lock() {
+            guard.take()
+        } else {
+            None
+        };
+        if let Some(handle) = upload_task {
+            let _ = handle.await;
+        }
 
         // 4. Clean up any empty stream session folders inside the local recordings directory
         let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));

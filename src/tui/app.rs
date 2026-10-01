@@ -8,6 +8,7 @@ use crate::tui::event::{AppEvent, LogEntry};
 pub enum TuiOutcome {
     Graceful,
     ForceExit,
+    TimeoutExpired,
 }
 
 impl TuiOutcome {
@@ -17,6 +18,10 @@ impl TuiOutcome {
 
     pub fn is_force_exit(&self) -> bool {
         matches!(self, Self::ForceExit)
+    }
+
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::TimeoutExpired)
     }
 }
 
@@ -78,6 +83,8 @@ pub struct App {
     pub log_scroll: usize,
     pub show_logs: bool,
     pub is_shutting_down: bool,
+    pub shutdown_started_at: Option<Instant>,
+    pub timed_out: bool,
     pub should_quit: bool,
     pub refresh_requested: bool,
 }
@@ -118,6 +125,8 @@ impl App {
             log_scroll: 0,
             show_logs: true,
             is_shutting_down: false,
+            shutdown_started_at: None,
+            timed_out: false,
             should_quit: false,
             refresh_requested: false,
         }
@@ -145,9 +154,31 @@ impl App {
     pub fn outcome(&self) -> TuiOutcome {
         if self.should_quit {
             TuiOutcome::ForceExit
+        } else if self.timed_out {
+            TuiOutcome::TimeoutExpired
         } else {
             TuiOutcome::Graceful
         }
+    }
+
+    pub fn initiate_shutdown(&mut self) {
+        if !self.is_shutting_down {
+            self.is_shutting_down = true;
+            if self.shutdown_started_at.is_none() {
+                self.shutdown_started_at = Some(Instant::now());
+            }
+        }
+    }
+
+    pub fn mark_timeout(&mut self) {
+        self.timed_out = true;
+    }
+
+    pub fn has_shutdown_timed_out(&self, grace_period: Duration) -> bool {
+        self.timed_out
+            || self
+                .shutdown_started_at
+                .is_some_and(|started| started.elapsed() >= grace_period)
     }
 
     pub fn scroll_channels_down(&mut self) {
@@ -366,7 +397,7 @@ impl App {
                             if self.is_shutting_down {
                                 self.should_quit = true;
                             } else {
-                                self.is_shutting_down = true;
+                                self.initiate_shutdown();
                             }
                         }
                     }

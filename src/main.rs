@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Unified signal handling: SIGINT, SIGTERM, SIGHUP
-    // First signal triggers graceful shutdown with 15s timeout; second signal forces immediate exit
+    // First signal triggers graceful shutdown; second signal forces immediate exit
     let cancel_token_signal = cancel_token.clone();
     tokio::spawn(async move {
         let mut signal_count = 0;
@@ -160,17 +160,6 @@ async fn main() -> anyhow::Result<()> {
                         "[SHUTDOWN] Signal received. Initiating graceful shutdown (15s timeout)..."
                     );
                 }
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(15)).await;
-                    if !is_headless {
-                        let _ = disable_raw_mode();
-                        let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
-                        chzzk_load::tui::ConsoleCodePageGuard::restore_original();
-                    } else {
-                        eprintln!("[SHUTDOWN] Shutdown grace period expired (15s). Force exiting.");
-                    }
-                    std::process::exit(1);
-                });
             } else {
                 if !is_headless {
                     let _ = disable_raw_mode();
@@ -185,8 +174,7 @@ async fn main() -> anyhow::Result<()> {
     let mut orch_handle = tokio::spawn(orchestrator.clone().run());
 
     let outcome = if is_headless {
-        run_headless(&mut event_rx, cancel_token.clone(), &mut orch_handle).await?;
-        TuiOutcome::Graceful
+        run_headless(&mut event_rx, cancel_token.clone(), &mut orch_handle).await?
     } else {
         run_tui(
             &settings,
@@ -202,33 +190,16 @@ async fn main() -> anyhow::Result<()> {
     let recordings_base = resolve_path(std::path::Path::new(&settings.general.recordings_dir));
 
     match outcome {
-        TuiOutcome::ForceExit => {
-            // Immediate Force Exit requested by double 'q' in TUI:
-            // 1. Abort active orchestrator tasks immediately
-            orch_handle.abort();
-
-            // 2. Execute a rapid empty directory cleanup (<500ms)
-            let _ = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
-                &recordings_base,
-                Duration::from_millis(500),
-            )
-            .await;
-
-            // 3. Restore console code page and terminal raw mode
-            let _ = disable_raw_mode();
-            let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
-            chzzk_load::tui::ConsoleCodePageGuard::restore_original();
-
-            // 4. Terminate process immediately with code 1
-            std::process::exit(1);
+        TuiOutcome::ForceExit | TuiOutcome::TimeoutExpired => {
+            escalate_force_exit(&orchestrator, &orch_handle, &recordings_base).await;
         }
         TuiOutcome::Graceful => {
             // Drain event_rx in background so event_tx never blocks during shutdown
             tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
 
-            // Await orchestrator termination with grace period
+            // Ensure orchestrator is finished without adding redundant grace window
             if !orch_handle.is_finished() {
-                let _ = tokio::time::timeout(Duration::from_secs(15), orch_handle).await;
+                escalate_force_exit(&orchestrator, &orch_handle, &recordings_base).await;
             }
 
             // Clean up empty stream session folders inside local recordings directory on shutdown
@@ -239,24 +210,60 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+async fn escalate_force_exit(
+    orchestrator: &EngineOrchestrator,
+    orch_handle: &tokio::task::JoinHandle<()>,
+    recordings_base: &std::path::Path,
+) -> ! {
+    // 1. Abort active orchestrator and session tasks immediately
+    orchestrator.abort_all();
+    orch_handle.abort();
+
+    // 2. Execute a rapid empty directory cleanup (<500ms)
+    let _ = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
+        recordings_base,
+        Duration::from_millis(500),
+    )
+    .await;
+
+    // 3. Restore console code page and terminal raw mode (safety guard)
+    let _ = disable_raw_mode();
+    let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+    chzzk_load::tui::ConsoleCodePageGuard::restore_original();
+
+    // 4. Terminate process immediately with code 1
+    std::process::exit(1);
+}
+
 async fn run_headless(
     event_rx: &mut tokio::sync::mpsc::Receiver<AppEvent>,
     cancel_token: CancellationToken,
     orch_handle: &mut tokio::task::JoinHandle<()>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<TuiOutcome> {
     let is_tty = std::io::stdout().is_terminal();
     println!("[INFO] Running in headless mode (console logging). Press Ctrl+C to stop.");
 
+    let mut shutdown_deadline: Option<tokio::time::Instant> = None;
+
     loop {
+        if cancel_token.is_cancelled() && shutdown_deadline.is_none() {
+            shutdown_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(15));
+        }
+
         if cancel_token.is_cancelled() && orch_handle.is_finished() {
-            break;
+            return Ok(TuiOutcome::Graceful);
         }
 
         tokio::select! {
             biased;
 
             _ = &mut *orch_handle, if cancel_token.is_cancelled() => {
-                break;
+                return Ok(TuiOutcome::Graceful);
+            }
+
+            _ = tokio::time::sleep_until(shutdown_deadline.unwrap()), if shutdown_deadline.is_some() => {
+                eprintln!("[SHUTDOWN] Shutdown grace period expired (15s). Force exiting.");
+                return Ok(TuiOutcome::TimeoutExpired);
             }
 
             Some(ev) = event_rx.recv() => {
@@ -295,7 +302,7 @@ async fn run_headless(
         }
     }
 
-    Ok(())
+    Ok(TuiOutcome::Graceful)
 }
 
 async fn run_tui(
@@ -319,12 +326,17 @@ async fn run_tui(
     let mut event_reader = crossterm::event::EventStream::new();
     let mut tick_interval = tokio::time::interval(Duration::from_millis(250));
     let mut needs_redraw = true;
+    let mut shutdown_deadline: Option<tokio::time::Instant> = None;
 
     loop {
         // Check if external shutdown signal was received
         if cancel_token.is_cancelled() && !app.is_shutting_down {
-            app.is_shutting_down = true;
+            app.initiate_shutdown();
             needs_redraw = true;
+        }
+
+        if app.is_shutting_down && shutdown_deadline.is_none() {
+            shutdown_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(15));
         }
 
         // Check exit conditions
@@ -346,6 +358,12 @@ async fn run_tui(
 
             // Immediate exit when orchestrator terminates during shutdown
             _ = &mut *orch_handle, if app.is_shutting_down => {
+                break;
+            }
+
+            // Bounded grace window expiration: escalate to timeout outcome
+            _ = tokio::time::sleep_until(shutdown_deadline.unwrap()), if shutdown_deadline.is_some() => {
+                app.mark_timeout();
                 break;
             }
 

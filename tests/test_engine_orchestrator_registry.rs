@@ -579,3 +579,85 @@ async fn test_orchestrator_cleanup_empty_session_dirs_bounded() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_orchestrator_abort_all_terminates_registered_sessions_and_cancels_tokens() {
+    let settings = Settings::default();
+    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
+    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+
+    let dummy_handle = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let dummy_upload_handle = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+
+    orchestrator.push_session_handle_for_test(dummy_handle);
+    orchestrator.register_upload_handle_for_test(dummy_upload_handle);
+
+    assert!(!orchestrator.cancel_token().is_cancelled());
+    let aborted = orchestrator.abort_all();
+    assert_eq!(aborted, 2);
+    assert!(orchestrator.cancel_token().is_cancelled());
+}
+
+#[tokio::test]
+async fn test_orchestrator_grace_period_timeout_escalation() {
+    tokio::time::pause();
+    let temp_dir = std::env::temp_dir().join(format!("test_escalation_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
+    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+
+    // Simulate lingering session task that does not terminate within short grace period
+    let lingering_task = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    orchestrator.push_session_handle_for_test(lingering_task);
+
+    // Create an empty session folder that should be cleaned up on escalation
+    let empty_dir = temp_dir.join("empty_session_timeout");
+    tokio::fs::create_dir_all(&empty_dir).await.unwrap();
+
+    // Verify timeout expiration condition using virtual time (0ms wall-clock)
+    let mut run_handle = tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+
+    let timeout_res =
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut run_handle).await;
+    assert!(
+        timeout_res.is_err(),
+        "Simulated grace period must expire on lingering tasks"
+    );
+
+    // Escalation actions:
+    // 1. Abort all lingering orchestrator tasks
+    let aborted = orchestrator.abort_all();
+    run_handle.abort();
+    assert_eq!(aborted, 1);
+    assert!(orchestrator.cancel_token().is_cancelled());
+
+    // 2. Perform bounded empty directory cleanup (<500ms)
+    let cleaned = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
+        &temp_dir,
+        std::time::Duration::from_millis(500),
+    )
+    .await
+    .expect("bounded cleanup must succeed");
+    assert_eq!(cleaned, 1);
+    assert!(!empty_dir.exists());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
