@@ -1,5 +1,10 @@
 use std::path::Path;
-use tokio::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::mpsc::{self, Receiver};
+use tokio::task::JoinHandle;
 
 pub fn sanitize_filename(name: &str) -> String {
     let trimmed = name.trim();
@@ -87,6 +92,198 @@ pub fn is_ffmpeg_key_forbidden_error(line: &str) -> bool {
             && (lower.contains("access denied")
                 || lower.contains("permission denied")
                 || lower.contains("forbidden")))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfmpegEvent {
+    Log(String),
+    KeyForbidden,
+    Exited(std::process::ExitStatus),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FfmpegExit {
+    Clean(std::process::ExitStatus),
+    Killed(std::process::ExitStatus),
+}
+
+/// Encapsulates child process execution, piped I/O, stderr log parsing,
+/// AES key error detection, and graceful termination escalation.
+pub struct FfmpegSession {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    event_rx: Receiver<FfmpegEvent>,
+    _reader_handle: JoinHandle<()>,
+    key_forbidden: Arc<AtomicBool>,
+    exit_status: Option<std::process::ExitStatus>,
+    has_yielded_exited: bool,
+}
+
+impl FfmpegSession {
+    pub fn spawn(
+        m3u8_url: &str,
+        output_pattern: &Path,
+        chunk_duration_seconds: u64,
+        cookie_header: Option<&str>,
+        ffmpeg_bin: Option<&str>,
+    ) -> std::io::Result<Self> {
+        let cmd = match ffmpeg_bin {
+            Some(bin) => build_ffmpeg_command_with_bin(
+                bin,
+                m3u8_url,
+                output_pattern,
+                chunk_duration_seconds,
+                cookie_header,
+            ),
+            None => build_ffmpeg_command(
+                m3u8_url,
+                output_pattern,
+                chunk_duration_seconds,
+                cookie_header,
+            ),
+        };
+        Self::from_command(cmd)
+    }
+
+    pub fn from_command(mut cmd: Command) -> std::io::Result<Self> {
+        let mut child = cmd.spawn()?;
+        let stdin = child.stdin.take();
+        let stderr = child.stderr.take();
+
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let key_forbidden = Arc::new(AtomicBool::new(false));
+        let key_forbidden_clone = key_forbidden.clone();
+
+        let reader_handle = tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut reader = BufReader::new(stderr);
+                let mut byte_buf = Vec::new();
+                while let Ok(n) = reader.read_until(b'\n', &mut byte_buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let lossy_line = String::from_utf8_lossy(&byte_buf);
+                    let trimmed = lossy_line.trim();
+                    if !trimmed.is_empty() {
+                        let is_key_error = is_ffmpeg_key_forbidden_error(trimmed);
+                        if is_key_error {
+                            key_forbidden_clone.store(true, Ordering::SeqCst);
+                            let _ = event_tx.send(FfmpegEvent::KeyForbidden).await;
+                        }
+                        if !key_forbidden_clone.load(Ordering::SeqCst) {
+                            let _ = event_tx.send(FfmpegEvent::Log(trimmed.to_string())).await;
+                        }
+                    }
+                    byte_buf.clear();
+                }
+            }
+        });
+
+        Ok(Self {
+            child,
+            stdin,
+            event_rx,
+            _reader_handle: reader_handle,
+            key_forbidden,
+            exit_status: None,
+            has_yielded_exited: false,
+        })
+    }
+
+    pub fn child_id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
+    pub fn is_key_forbidden(&self) -> bool {
+        self.key_forbidden.load(Ordering::SeqCst)
+    }
+
+    pub async fn stop_graceful(&mut self, timeout: Duration) -> std::io::Result<FfmpegExit> {
+        if let Some(status) = self.exit_status {
+            return Ok(FfmpegExit::Clean(status));
+        }
+        if let Some(mut stdin) = self.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(b"q\n").await;
+            let _ = stdin.flush().await;
+            drop(stdin);
+        }
+        match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(Ok(status)) => {
+                self.exit_status = Some(status);
+                Ok(FfmpegExit::Clean(status))
+            }
+            _ => {
+                let _ = self.child.kill().await;
+                let status = self.child.wait().await?;
+                self.exit_status = Some(status);
+                Ok(FfmpegExit::Killed(status))
+            }
+        }
+    }
+
+    pub async fn kill(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(status) = self.exit_status {
+            return Ok(status);
+        }
+        let _ = self.stdin.take();
+        let _ = self.child.kill().await;
+        let status = self.child.wait().await?;
+        self.exit_status = Some(status);
+        Ok(status)
+    }
+
+    pub async fn recv_event(&mut self) -> Option<FfmpegEvent> {
+        if self.has_yielded_exited {
+            return None;
+        }
+        if let Ok(event) = self.event_rx.try_recv() {
+            return Some(event);
+        }
+        if let Some(status) = self.exit_status {
+            if let Some(event) = self.event_rx.recv().await {
+                return Some(event);
+            }
+            self.has_yielded_exited = true;
+            return Some(FfmpegEvent::Exited(status));
+        }
+
+        tokio::select! {
+            biased;
+            event = self.event_rx.recv() => {
+                match event {
+                    Some(ev) => Some(ev),
+                    None => {
+                        let status = self.child.wait().await.ok()?;
+                        self.exit_status = Some(status);
+                        self.has_yielded_exited = true;
+                        Some(FfmpegEvent::Exited(status))
+                    }
+                }
+            }
+            status_res = self.child.wait() => {
+                let status = status_res.ok()?;
+                self.exit_status = Some(status);
+                tokio::select! {
+                    biased;
+                    event = self.event_rx.recv() => {
+                        match event {
+                            Some(ev) => Some(ev),
+                            None => {
+                                self.has_yielded_exited = true;
+                                Some(FfmpegEvent::Exited(status))
+                            }
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                        self.has_yielded_exited = true;
+                        Some(FfmpegEvent::Exited(status))
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

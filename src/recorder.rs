@@ -3,3 +3,4 @@ pub mod ffmpeg;
 pub mod watcher;
 
 pub use chat_writer::ChatWriter;
+pub use ffmpeg::{FfmpegEvent, FfmpegExit, FfmpegSession};

@@ -13,9 +13,7 @@ use crate::config::Settings;
 use crate::engine::dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
 use crate::engine::registry::{ChannelLifecycleRegistry, RestrictionReason};
 use crate::engine::session::ActiveSessionState;
-use crate::recorder::ffmpeg::{
-    build_ffmpeg_command, build_ffmpeg_command_with_bin, is_ffmpeg_key_forbidden_error,
-};
+use crate::recorder::ffmpeg::{FfmpegEvent, FfmpegExit, FfmpegSession};
 use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{UploadBackend, UploadTask, broadcast_identifier};
@@ -260,55 +258,14 @@ impl RecordingSession {
             let output_pattern = session_dir.join("chunk_%04d.ts");
             let chunk_dur = settings.general.chunk_duration_seconds;
             let cookie = chzzk.cookie_header();
-            let mut cmd = match ffmpeg_bin.as_deref() {
-                Some(bin) => build_ffmpeg_command_with_bin(
-                    bin,
-                    &info.hls_url,
-                    &output_pattern,
-                    chunk_dur,
-                    cookie,
-                ),
-                None => build_ffmpeg_command(&info.hls_url, &output_pattern, chunk_dur, cookie),
-            };
-
-            let key_forbidden = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let key_forbidden_notify = Arc::new(tokio::sync::Notify::new());
-
-            let mut child = match cmd.spawn() {
-                Ok(mut child) => {
-                    if let Some(stderr) = child.stderr.take() {
-                        let event_tx_stderr = event_tx.clone();
-                        let key_forbidden_stderr = key_forbidden.clone();
-                        let key_forbidden_notify = key_forbidden_notify.clone();
-                        tokio::spawn(async move {
-                            use std::sync::atomic::Ordering;
-                            use tokio::io::{AsyncBufReadExt, BufReader};
-                            let mut reader = BufReader::new(stderr);
-                            let mut byte_buf = Vec::new();
-                            while let Ok(n) = reader.read_until(b'\n', &mut byte_buf).await {
-                                if n == 0 {
-                                    break;
-                                }
-                                let lossy_line = String::from_utf8_lossy(&byte_buf);
-                                let trimmed = lossy_line.trim();
-                                if !trimmed.is_empty() {
-                                    let is_key_error = is_ffmpeg_key_forbidden_error(trimmed);
-
-                                    if is_key_error {
-                                        key_forbidden_stderr.store(true, Ordering::SeqCst);
-                                        key_forbidden_notify.notify_one();
-                                    }
-
-                                    if !key_forbidden_stderr.load(Ordering::SeqCst) {
-                                        let _ = event_tx_stderr
-                                            .try_send(AppEvent::Log(LogEntry::ffmpeg(trimmed)));
-                                    }
-                                }
-                                byte_buf.clear();
-                            }
-                        });
-                    }
-
+            let mut ffmpeg_session = match FfmpegSession::spawn(
+                &info.hls_url,
+                &output_pattern,
+                chunk_dur,
+                cookie,
+                ffmpeg_bin.as_deref(),
+            ) {
+                Ok(session) => {
                     let _ = event_tx
                         .send(AppEvent::Log(LogEntry::rec(format!(
                             "Spawned FFmpeg segmenter ({}s TS chunks) -> {}",
@@ -316,7 +273,7 @@ impl RecordingSession {
                             session_dir.display()
                         ))))
                         .await;
-                    child
+                    session
                 }
                 Err(e) => {
                     let _ = event_tx
@@ -353,9 +310,50 @@ impl RecordingSession {
 
             loop {
                 tokio::select! {
-                    _ = key_forbidden_notify.notified() => {
-                        restricted_abort = true;
-                        break;
+                    event = ffmpeg_session.recv_event() => {
+                        match event {
+                            Some(FfmpegEvent::KeyForbidden) => {
+                                restricted_abort = true;
+                                break;
+                            }
+                            Some(FfmpegEvent::Log(line)) => {
+                                let _ = event_tx.try_send(AppEvent::Log(LogEntry::ffmpeg(line)));
+                            }
+                            Some(FfmpegEvent::Exited(status)) => {
+                                let _ = event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(format!(
+                                        "FFmpeg process exited with status: {status}"
+                                    ))))
+                                    .await;
+
+                                seal_and_enqueue_chunks(
+                                    &mut watcher,
+                                    &session_folder_name,
+                                    &channel_id,
+                                    &info.streamer_name,
+                                    &upload_tx,
+                                    &event_tx,
+                                    backend_opt.is_some(),
+                                    true,
+                                )
+                                .await;
+                                break;
+                            }
+                            None => {
+                                seal_and_enqueue_chunks(
+                                    &mut watcher,
+                                    &session_folder_name,
+                                    &channel_id,
+                                    &info.streamer_name,
+                                    &upload_tx,
+                                    &event_tx,
+                                    backend_opt.is_some(),
+                                    true,
+                                )
+                                .await;
+                                break;
+                            }
+                        }
                     }
                     _ = session_cancel.cancelled() => {
                         let _ = event_tx
@@ -364,24 +362,15 @@ impl RecordingSession {
                             ))))
                             .await;
 
-                        if let Some(mut stdin) = child.stdin.take() {
-                            use tokio::io::AsyncWriteExt;
-                            let _ = stdin.write_all(b"q\n").await;
-                            let _ = stdin.flush().await;
-                            drop(stdin);
-                        }
-
-                        match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-                            Ok(Ok(status)) => {
+                        match ffmpeg_session.stop_graceful(Duration::from_secs(3)).await {
+                            Ok(FfmpegExit::Clean(status)) => {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(format!(
                                         "FFmpeg process exited cleanly: {status}"
                                     ))))
                                     .await;
                             }
-                            _ => {
-                                let _ = child.kill().await;
-                                let _ = child.wait().await;
+                            Ok(FfmpegExit::Killed(_)) | Err(_) => {
                                 let _ = event_tx
                                     .send(AppEvent::Log(LogEntry::rec(
                                         "FFmpeg did not exit within timeout, terminating process...",
@@ -418,24 +407,15 @@ impl RecordingSession {
                                         ))))
                                         .await;
 
-                                    if let Some(mut stdin) = child.stdin.take() {
-                                        use tokio::io::AsyncWriteExt;
-                                        let _ = stdin.write_all(b"q\n").await;
-                                        let _ = stdin.flush().await;
-                                        drop(stdin);
-                                    }
-
-                                    match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
-                                        Ok(Ok(status)) => {
+                                    match ffmpeg_session.stop_graceful(Duration::from_secs(3)).await {
+                                        Ok(FfmpegExit::Clean(status)) => {
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::rec(format!(
                                                     "FFmpeg process exited cleanly: {status}"
                                                 ))))
                                                 .await;
                                         }
-                                        _ => {
-                                            let _ = child.kill().await;
-                                            let _ = child.wait().await;
+                                        Ok(FfmpegExit::Killed(_)) | Err(_) => {
                                             let _ = event_tx
                                                 .send(AppEvent::Log(LogEntry::rec(
                                                     "FFmpeg did not exit within timeout, terminating process...",
@@ -461,30 +441,10 @@ impl RecordingSession {
                             }
                         }
 
-                        if key_forbidden.load(std::sync::atomic::Ordering::SeqCst) {
+                        if ffmpeg_session.is_key_forbidden() {
                             restricted_abort = true;
                             break;
                         }
-
-                        let is_finished = match child.try_wait() {
-                            Ok(Some(status)) => {
-                                let _ = event_tx
-                                    .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "FFmpeg process exited with status: {status}"
-                                    ))))
-                                    .await;
-                                true
-                            }
-                            Ok(None) => false,
-                            Err(e) => {
-                                let _ = event_tx
-                                    .send(AppEvent::Log(LogEntry::warn(format!(
-                                        "Error waiting on FFmpeg child: {e}"
-                                    ))))
-                                    .await;
-                                true
-                            }
-                        };
 
                         seal_and_enqueue_chunks(
                             &mut watcher,
@@ -494,20 +454,15 @@ impl RecordingSession {
                             &upload_tx,
                             &event_tx,
                             backend_opt.is_some(),
-                            is_finished,
+                            false,
                         )
                         .await;
-
-                        if is_finished {
-                            break;
-                        }
                     }
                 }
             }
 
             if restricted_abort {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                let _ = ffmpeg_session.kill().await;
 
                 registry.mark_restricted(
                     &channel_id,

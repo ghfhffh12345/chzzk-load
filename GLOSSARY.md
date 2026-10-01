@@ -23,3 +23,7 @@ _Avoid_: Sleep, pause, debounce delay
 **Restricted Stream**:
 A live broadcast requiring authenticated Naver credentials due to pay-per-view access, channel membership, or age restriction.
 _Avoid_: Private stream, blocked channel, locked stream
+
+**Video Segmenter**:
+The subprocess capture module responsible for lossless stream copy (`-c copy`), live chunk generation (`chunk_%04d.ts`), stderr diagnostic parsing, and graceful process termination.
+_Avoid_: FFmpeg wrapper, video capture service, ffmpeg runner
