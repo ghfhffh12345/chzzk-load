@@ -16,6 +16,7 @@ pub mod cleanup;
 pub mod dispatcher;
 pub mod reconciliation;
 pub mod recording;
+pub mod registry;
 pub mod session;
 pub mod state;
 
@@ -25,6 +26,10 @@ pub use cleanup::{
 pub use dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
 pub use reconciliation::{ReconciliationReport, reconcile_orphaned_sessions};
 pub use recording::RecordingSession;
+pub use registry::{
+    ChannelLifecycleKind, ChannelLifecycleRegistry, ChannelLifecycleState, PollAction,
+    RestrictionReason,
+};
 pub use session::{ActiveSessionState, FinishedSession};
 pub use state::EngineState;
 
