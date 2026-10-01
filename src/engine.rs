@@ -426,6 +426,7 @@ impl EngineOrchestrator {
                                 {
                                     let _ =
                                         file.write_all(format!("{event_line}\n").as_bytes()).await;
+                                    let _ = file.flush().await;
                                 }
                             }
 

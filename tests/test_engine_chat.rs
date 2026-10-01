@@ -1,3 +1,5 @@
+mod common;
+
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +14,7 @@ use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::engine::EngineOrchestrator;
 use chzzk_load::tui::event::AppEvent;
 use chzzk_load::uploader::{MockUploadBackend, UploadTask};
+use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 
 async fn spawn_mock_chat_ws_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -46,25 +49,6 @@ async fn spawn_mock_chat_ws_server() -> (String, tokio::task::JoinHandle<()>) {
     (ws_url, handle)
 }
 
-async fn spawn_dummy_hls_server() -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handle = tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut buf = [0u8; 1024];
-                while let Ok(n) = stream.read(&mut buf).await {
-                    if n == 0 {
-                        break;
-                    }
-                }
-            });
-        }
-    });
-    (format!("http://127.0.0.1:{port}/dummy.m3u8"), handle)
-}
-
 #[tokio::test]
 async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     let temp_dir =
@@ -75,7 +59,8 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     let port = server.server_addr().to_ip().unwrap().port();
 
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
-    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
+    let mock_bin = get_mock_ffmpeg_bin();
+    let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
 
     let token_requested = Arc::new(AtomicBool::new(false));
     let token_req_clone = token_requested.clone();
@@ -121,7 +106,8 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         None,
         event_tx,
         cancel_token.clone(),
-    );
+    )
+    .with_ffmpeg_bin(mock_bin.to_string_lossy());
 
     let info = LiveStreamInfo {
         channel_id: "chan_chat_test".to_string(),
@@ -181,7 +167,6 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         "Expected chat access token to be requested"
     );
 
-    hls_handle.abort();
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -194,7 +179,8 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
 
-    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
+    let mock_bin = get_mock_ffmpeg_bin();
+    let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
 
     let token_requested = Arc::new(AtomicBool::new(false));
     let token_req_clone = token_requested.clone();
@@ -235,7 +221,8 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
         None,
         event_tx,
         cancel_token.clone(),
-    );
+    )
+    .with_ffmpeg_bin(mock_bin.to_string_lossy());
 
     let info = LiveStreamInfo {
         channel_id: "chan_no_chat".to_string(),
@@ -267,7 +254,6 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
         "Chat token must NOT be requested when record_chat is false"
     );
 
-    hls_handle.abort();
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -281,7 +267,8 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
     let port = server.server_addr().to_ip().unwrap().port();
 
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
-    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
+    let mock_bin = get_mock_ffmpeg_bin();
+    let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
 
     std::thread::spawn(move || {
         while let Ok(request) = server.recv() {
@@ -318,7 +305,8 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
         None, // No upload backend
         event_tx,
         cancel_token.clone(),
-    );
+    )
+    .with_ffmpeg_bin(mock_bin.to_string_lossy());
 
     let info = LiveStreamInfo {
         channel_id: "chan_local_chat".to_string(),
@@ -377,7 +365,6 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
         "Session directory containing chat_0000.jsonl must not be cleaned up as empty"
     );
 
-    hls_handle.abort();
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -391,7 +378,8 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
 
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
-    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
+    let mock_bin = get_mock_ffmpeg_bin();
+    let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
 
     std::thread::spawn(move || {
         while let Ok(request) = chzzk_server.recv() {
@@ -430,7 +418,8 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         Some(mock_backend.clone()),
         event_tx.clone(),
         cancel_token.clone(),
-    );
+    )
+    .with_ffmpeg_bin(mock_bin.to_string_lossy());
 
     let info = LiveStreamInfo {
         channel_id: "chan_backend_chat".to_string(),
@@ -461,7 +450,12 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
                     .map(|ft| ft.is_dir())
                     .unwrap_or(false)
                 {
-                    session_dir_opt = Some(entry.path());
+                    let p = entry.path();
+                    let _ = fs::write(
+                        p.join("chat_0000.jsonl"),
+                        b"{\"content\":\"stream chat message\"}\n",
+                    );
+                    session_dir_opt = Some(p);
                     break;
                 }
             }
@@ -474,8 +468,6 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
 
     let session_dir = session_dir_opt.expect("Session directory must be created within timeout");
     let chat_file_path = session_dir.join("chat_0000.jsonl");
-    fs::write(&chat_file_path, b"{\"content\":\"stream chat message\"}\n")
-        .expect("Failed to write mock chat_0000.jsonl");
 
     let session_folder = session_dir
         .file_name()
@@ -541,7 +533,6 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     );
 
     consumer_handle.abort();
-    hls_handle.abort();
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -615,7 +606,8 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         }
     });
 
-    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
+    let mock_bin = get_mock_ffmpeg_bin();
+    let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
 
     let mock_backend = Arc::new(MockUploadBackend::new());
     let mut settings = Settings::default();
@@ -638,7 +630,8 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         Some(mock_backend.clone()),
         event_tx.clone(),
         cancel_token.clone(),
-    );
+    )
+    .with_ffmpeg_bin(mock_bin.to_string_lossy());
 
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
     let consumer_handle = EngineOrchestrator::spawn_upload_consumer(
@@ -700,7 +693,6 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     );
 
     consumer_handle.abort();
-    hls_handle.abort();
     let _ = ws_handle.await;
     let _ = fs::remove_dir_all(&temp_dir);
 }
