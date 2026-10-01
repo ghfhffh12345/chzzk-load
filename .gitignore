@@ -3,3 +3,4 @@ recordings/
 .superpowers/
 npm/platforms/
 settings.toml
+.agents/
