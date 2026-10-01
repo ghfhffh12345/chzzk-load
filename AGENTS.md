@@ -57,3 +57,19 @@ cargo build --release
 - **TOML Configuration**: Adhere to `settings.toml` (`toml = "1.1"`). Directory format: `[{timestamp}] [{alias}] {streamer} - {title}` (omit `[{alias}]` if none). Sanitize `\/:*?"<>|` and control characters. Display channel alias consistently in TUI without flicker.
 - **Portable Path Resolution**: Resolve relative paths via `app_path::resolve_path(...)` (prioritizes CWD, falls back to executable directory, avoids `node_modules`).
 - **Resilient Test Ports & Paths**: Use dynamic ephemeral port binding (`127.0.0.1:0`), never hardcoded ports. All test filesystem mutations must operate strictly within `std::env::temp_dir()`.
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues via `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical five-role vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context (`GLOSSARY.md` + `docs/adr/`). See `docs/agents/domain.md`.
