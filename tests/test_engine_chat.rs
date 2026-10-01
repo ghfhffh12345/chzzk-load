@@ -46,6 +46,25 @@ async fn spawn_mock_chat_ws_server() -> (String, tokio::task::JoinHandle<()>) {
     (ws_url, handle)
 }
 
+async fn spawn_dummy_hls_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = [0u8; 1024];
+                while let Ok(n) = stream.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (format!("http://127.0.0.1:{port}/dummy.m3u8"), handle)
+}
+
 #[tokio::test]
 async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     let temp_dir =
@@ -56,6 +75,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     let port = server.server_addr().to_ip().unwrap().port();
 
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
+    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
 
     let token_requested = Arc::new(AtomicBool::new(false));
     let token_req_clone = token_requested.clone();
@@ -108,7 +128,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         live_id: Some(99991),
         streamer_name: "ChatStreamer".to_string(),
         title: "Chat Stream Title".to_string(),
-        hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
+        hls_url,
         chat_channel_id: Some("chat_ch_123".to_string()),
         metadata: Default::default(),
     };
@@ -161,6 +181,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         "Expected chat access token to be requested"
     );
 
+    hls_handle.abort();
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -172,6 +193,8 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
 
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
+
+    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
 
     let token_requested = Arc::new(AtomicBool::new(false));
     let token_req_clone = token_requested.clone();
@@ -219,7 +242,7 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
         live_id: Some(99992),
         streamer_name: "NoChatStreamer".to_string(),
         title: "No Chat Title".to_string(),
-        hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
+        hls_url,
         chat_channel_id: Some("chat_ch_999".to_string()),
         metadata: Default::default(),
     };
@@ -244,6 +267,7 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
         "Chat token must NOT be requested when record_chat is false"
     );
 
+    hls_handle.abort();
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -257,6 +281,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
     let port = server.server_addr().to_ip().unwrap().port();
 
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
+    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
 
     std::thread::spawn(move || {
         while let Ok(request) = server.recv() {
@@ -300,7 +325,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
         live_id: Some(99993),
         streamer_name: "LocalChatStreamer".to_string(),
         title: "Local Chat Title".to_string(),
-        hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
+        hls_url,
         chat_channel_id: Some("chat_ch_local".to_string()),
         metadata: Default::default(),
     };
@@ -352,6 +377,7 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
         "Session directory containing chat_0000.jsonl must not be cleaned up as empty"
     );
 
+    hls_handle.abort();
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -365,6 +391,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
 
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
+    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
 
     std::thread::spawn(move || {
         while let Ok(request) = chzzk_server.recv() {
@@ -410,7 +437,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         live_id: Some(99994),
         streamer_name: "BackendChatStreamer".to_string(),
         title: "Backend Chat Title".to_string(),
-        hls_url: "http://127.0.0.1:9999/dummy.m3u8".to_string(),
+        hls_url,
         chat_channel_id: Some("chat_ch_backend".to_string()),
         metadata: Default::default(),
     };
@@ -421,7 +448,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         event_tx.clone(),
         upload_rx,
     );
-    orchestrator.spawn_recording_session("chan_backend_chat".to_string(), info, upload_tx);
+    orchestrator.spawn_recording_session("chan_backend_chat".to_string(), info, upload_tx.clone());
 
     // Condition-based wait for session directory to be created
     let mut session_dir_opt = None;
@@ -445,19 +472,76 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let _session_dir = session_dir_opt.expect("Session directory must be created within timeout");
+    let session_dir = session_dir_opt.expect("Session directory must be created within timeout");
+    let chat_file_path = session_dir.join("chat_0000.jsonl");
+    fs::write(&chat_file_path, b"{\"content\":\"stream chat message\"}\n")
+        .expect("Failed to write mock chat_0000.jsonl");
+
+    let session_folder = session_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    upload_tx
+        .send(UploadTask {
+            channel_id: "chan_backend_chat".to_string(),
+            session_folder_id: session_folder.clone(),
+            remote_dir: session_folder,
+            chunk_path: chat_file_path.clone(),
+            chunk_name: "chat_0000.jsonl".to_string(),
+            streamer_name: "BackendChatStreamer".to_string(),
+        })
+        .await
+        .unwrap();
 
     cancel_token.cancel();
 
-    while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
-        if matches!(ev, AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_backend_chat")
-        {
-            break;
+    let mut saw_uploaded_chunk = false;
+    let mut saw_recording_ended = false;
+    let timeout = tokio::time::sleep(Duration::from_secs(10));
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            Some(ev) = event_rx.recv() => {
+                if matches!(ev, AppEvent::UploadCompleted { ref chunk_name, .. } if chunk_name == "chat_0000.jsonl") {
+                    saw_uploaded_chunk = true;
+                }
+                if matches!(ev, AppEvent::RecordingEnded { ref channel_id } if channel_id == "chan_backend_chat") {
+                    saw_recording_ended = true;
+                }
+                if saw_uploaded_chunk && saw_recording_ended {
+                    break;
+                }
+            }
+            _ = &mut timeout => break,
         }
     }
 
-    consumer_handle.abort();
+    assert!(
+        saw_uploaded_chunk,
+        "Must observe AppEvent::UploadCompleted for chat chunk"
+    );
+    assert!(
+        saw_recording_ended,
+        "Must observe AppEvent::RecordingEnded within timeout"
+    );
 
+    let uploads = mock_backend.uploads.lock().await;
+    assert!(
+        uploads
+            .iter()
+            .any(|(path, _)| path.file_name().and_then(|n| n.to_str()) == Some("chat_0000.jsonl")),
+        "chat_0000.jsonl must be uploaded via MockUploadBackend"
+    );
+
+    assert!(
+        !chat_file_path.exists(),
+        "chat_0000.jsonl must be deleted locally upon confirmed upload to maintain strictly bounded disk footprint"
+    );
+
+    consumer_handle.abort();
+    hls_handle.abort();
     let _ = fs::remove_dir_all(&temp_dir);
 }
 
@@ -531,21 +615,7 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         }
     });
 
-    let hls_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let hls_port = hls_listener.local_addr().unwrap().port();
-    let hls_handle = tokio::spawn(async move {
-        while let Ok((mut stream, _)) = hls_listener.accept().await {
-            tokio::spawn(async move {
-                use tokio::io::AsyncReadExt;
-                let mut buf = [0u8; 1024];
-                while let Ok(n) = stream.read(&mut buf).await {
-                    if n == 0 {
-                        break;
-                    }
-                }
-            });
-        }
-    });
+    let (hls_url, hls_handle) = spawn_dummy_hls_server().await;
 
     let mock_backend = Arc::new(MockUploadBackend::new());
     let mut settings = Settings::default();
@@ -582,7 +652,7 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         live_id: Some(99995),
         streamer_name: "IncStreamer".to_string(),
         title: "Inc Stream Title".to_string(),
-        hls_url: format!("http://127.0.0.1:{hls_port}/dummy.m3u8"),
+        hls_url,
         chat_channel_id: Some("chat_ch_inc".to_string()),
         metadata: Default::default(),
     };
