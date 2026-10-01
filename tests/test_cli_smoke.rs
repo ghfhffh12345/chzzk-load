@@ -269,3 +269,56 @@ fn test_cli_invalid_argument() {
         "Stderr should indicate unrecognized argument: {stderr}"
     );
 }
+
+#[test]
+fn test_cli_headless_startup_smoke() {
+    let temp_dir = std::env::temp_dir().join(format!("test_smoke_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let config_path = temp_dir.join("settings.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[general]
+chunk_duration_seconds = 60
+poll_interval_seconds = 20
+stream_cooldown_seconds = 0
+recordings_dir = "recordings"
+min_free_disk_gb = 0.0
+record_chat = false
+
+[rclone]
+remote_path = ""
+upload_concurrency = 1
+skip_connection_check = true
+
+[chzzk]
+nid_aut = ""
+nid_ses = ""
+
+[[channels]]
+id = "dummy_chan_123"
+"#,
+    )
+    .unwrap();
+
+    let bin_path = env!("CARGO_BIN_EXE_chzzk-load");
+    let mut child = Command::new(bin_path)
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--headless")
+        .arg("--skip-rclone-check")
+        .spawn()
+        .expect("Failed to spawn chzzk-load");
+
+    // Sleep briefly (200ms) to ensure process boots event loop without panic
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Check that child has not panicked and is running
+    if let Some(status) = child.try_wait().expect("try_wait failed") {
+        panic!("Process exited prematurely with status: {status:?}");
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

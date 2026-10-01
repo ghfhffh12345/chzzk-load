@@ -261,7 +261,12 @@ async fn run_headless(
                 return Ok(TuiOutcome::Graceful);
             }
 
-            _ = tokio::time::sleep_until(shutdown_deadline.unwrap()), if shutdown_deadline.is_some() => {
+            _ = async {
+                match shutdown_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 eprintln!("[SHUTDOWN] Shutdown grace period expired (15s). Force exiting.");
                 return Ok(TuiOutcome::TimeoutExpired);
             }
@@ -362,7 +367,12 @@ async fn run_tui(
             }
 
             // Bounded grace window expiration: escalate to timeout outcome
-            _ = tokio::time::sleep_until(shutdown_deadline.unwrap()), if shutdown_deadline.is_some() => {
+            _ = async {
+                match shutdown_deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 app.mark_timeout();
                 break;
             }
