@@ -15,6 +15,7 @@ use chzzk_load::engine::EngineOrchestrator;
 use chzzk_load::tui::event::AppEvent;
 use chzzk_load::uploader::{MockUploadBackend, UploadTask};
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
+use common::observability::{TestLogRecorder, assert_with_logs, expect_with_logs};
 
 async fn spawn_mock_chat_ws_server() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -134,6 +135,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         cancel_clone.cancel();
     });
 
+    let mut recorder = TestLogRecorder::new();
     let mut saw_recording_started = false;
     let mut saw_recording_ended = false;
     let timeout = tokio::time::sleep(Duration::from_secs(10));
@@ -142,6 +144,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     loop {
         tokio::select! {
             Some(ev) = event_rx.recv() => {
+                recorder.record(&ev);
                 match ev {
                     AppEvent::RecordingStarted { channel_id, .. } if channel_id == "chan_chat_test" => {
                         saw_recording_started = true;
@@ -157,14 +160,23 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         }
     }
 
-    assert!(saw_recording_started, "Expected AppEvent::RecordingStarted");
-    assert!(
-        saw_recording_ended,
-        "Expected AppEvent::RecordingEnded within timeout"
+    assert_with_logs(
+        saw_recording_started,
+        "Expected AppEvent::RecordingStarted",
+        &mut event_rx,
+        Some(&recorder),
     );
-    assert!(
+    assert_with_logs(
+        saw_recording_ended,
+        "Expected AppEvent::RecordingEnded within timeout",
+        &mut event_rx,
+        Some(&recorder),
+    );
+    assert_with_logs(
         token_requested.load(Ordering::SeqCst),
-        "Expected chat access token to be requested"
+        "Expected chat access token to be requested",
+        &mut event_rx,
+        Some(&recorder),
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -243,15 +255,19 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
         cancel_clone.cancel();
     });
 
+    let mut recorder = TestLogRecorder::new();
     while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
+        recorder.record(&ev);
         if let AppEvent::RecordingEnded { .. } = ev {
             break;
         }
     }
 
-    assert!(
+    assert_with_logs(
         !token_requested.load(Ordering::SeqCst),
-        "Chat token must NOT be requested when record_chat is false"
+        "Chat token must NOT be requested when record_chat is false",
+        &mut event_rx,
+        Some(&recorder),
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -345,24 +361,35 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let session_dir = session_dir_opt.expect("Session directory must be created");
+    let session_dir = expect_with_logs(
+        session_dir_opt,
+        "Session directory must be created",
+        &mut event_rx,
+        None,
+    );
 
     // Cancel session
     cancel_token.cancel();
 
+    let mut recorder = TestLogRecorder::new();
     while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(10), event_rx.recv()).await {
+        recorder.record(&ev);
         if let AppEvent::RecordingEnded { .. } = ev {
             break;
         }
     }
 
-    assert!(
+    assert_with_logs(
         session_dir.join("chat_0000.jsonl").exists(),
-        "chat_0000.jsonl must remain saved locally when upload backend is disabled"
+        "chat_0000.jsonl must remain saved locally when upload backend is disabled",
+        &mut event_rx,
+        Some(&recorder),
     );
-    assert!(
+    assert_with_logs(
         session_dir.exists(),
-        "Session directory containing chat_0000.jsonl must not be cleaned up as empty"
+        "Session directory containing chat_0000.jsonl must not be cleaned up as empty",
+        &mut event_rx,
+        Some(&recorder),
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -466,7 +493,12 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let session_dir = session_dir_opt.expect("Session directory must be created within timeout");
+    let session_dir = expect_with_logs(
+        session_dir_opt,
+        "Session directory must be created within timeout",
+        &mut event_rx,
+        None,
+    );
     let chat_file_path = session_dir.join("chat_0000.jsonl");
 
     let session_folder = session_dir
@@ -488,6 +520,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
 
     cancel_token.cancel();
 
+    let mut recorder = TestLogRecorder::new();
     let mut saw_uploaded_chunk = false;
     let mut saw_recording_ended = false;
     let timeout = tokio::time::sleep(Duration::from_secs(10));
@@ -496,6 +529,7 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     loop {
         tokio::select! {
             Some(ev) = event_rx.recv() => {
+                recorder.record(&ev);
                 if matches!(ev, AppEvent::UploadCompleted { ref chunk_name, .. } if chunk_name == "chat_0000.jsonl") {
                     saw_uploaded_chunk = true;
                 }
@@ -510,13 +544,17 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         }
     }
 
-    assert!(
+    assert_with_logs(
         saw_uploaded_chunk,
-        "Must observe AppEvent::UploadCompleted for chat chunk"
+        "Must observe AppEvent::UploadCompleted for chat chunk",
+        &mut event_rx,
+        Some(&recorder),
     );
-    assert!(
+    assert_with_logs(
         saw_recording_ended,
-        "Must observe AppEvent::RecordingEnded within timeout"
+        "Must observe AppEvent::RecordingEnded within timeout",
+        &mut event_rx,
+        Some(&recorder),
     );
 
     let uploads = mock_backend.uploads.lock().await;
@@ -652,6 +690,7 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
 
     orchestrator.spawn_recording_session("chan_chat_inc".to_string(), info, upload_tx);
 
+    let mut recorder = TestLogRecorder::new();
     let mut saw_chunk_uploaded = false;
     let mut saw_recording_ended = false;
     let timeout = tokio::time::sleep(Duration::from_secs(10));
@@ -660,6 +699,7 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     loop {
         tokio::select! {
             Some(ev) = event_rx.recv() => {
+                recorder.record(&ev);
                 if matches!(ev, AppEvent::UploadCompleted { ref chunk_name, .. } if chunk_name.starts_with("chat_") && chunk_name.ends_with(".jsonl")) {
                     saw_chunk_uploaded = true;
                     cancel_token.cancel();
@@ -679,17 +719,21 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     }
 
     let uploads = mock_backend.uploads.lock().await;
-    assert!(
+    assert_with_logs(
         uploads.iter().any(|(path, _)| {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             name.starts_with("chat_") && name.ends_with(".jsonl")
         }),
-        "Expected at least one chat_*.jsonl uploaded to MockUploadBackend"
+        "Expected at least one chat_*.jsonl uploaded to MockUploadBackend",
+        &mut event_rx,
+        Some(&recorder),
     );
 
-    assert!(
+    assert_with_logs(
         saw_chunk_uploaded,
-        "Must observe AppEvent::UploadCompleted for chat chunk"
+        "Must observe AppEvent::UploadCompleted for chat chunk",
+        &mut event_rx,
+        Some(&recorder),
     );
 
     consumer_handle.abort();

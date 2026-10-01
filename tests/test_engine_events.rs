@@ -1,3 +1,5 @@
+mod common;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs::{self, File};
 use std::io::Write;
@@ -6,6 +8,9 @@ use std::sync::Arc;
 use tiny_http::{Header, Response, Server, StatusCode};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+use common::mock_ffmpeg::get_mock_ffmpeg_bin;
+use common::observability::{TestLogRecorder, assert_with_logs, expect_with_logs};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -622,8 +627,10 @@ async fn test_engine_orchestrator_upload_consumer() {
     // Consume events until UploadCompleted
     let mut got_completed = false;
     let mut got_clean_log = false;
+    let mut recorder = TestLogRecorder::new();
 
     while let Some(ev) = event_rx.recv().await {
+        recorder.record(&ev);
         match ev {
             AppEvent::UploadProgress {
                 chunk_name,
@@ -652,8 +659,18 @@ async fn test_engine_orchestrator_upload_consumer() {
         }
     }
 
-    assert!(got_completed);
-    assert!(got_clean_log);
+    assert_with_logs(
+        got_completed,
+        "Must receive UploadCompleted event",
+        &mut event_rx,
+        Some(&recorder),
+    );
+    assert_with_logs(
+        got_clean_log,
+        "Must receive clean log",
+        &mut event_rx,
+        Some(&recorder),
+    );
     // File must have been deleted locally
     assert!(!chunk_path.exists());
 
@@ -702,7 +719,9 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
 
     // Expect an error log event
     let mut got_error_log = false;
+    let mut recorder = TestLogRecorder::new();
     while let Some(ev) = event_rx.recv().await {
+        recorder.record(&ev);
         if let AppEvent::Log(msg) = ev
             && msg.contains("Upload failed for chunk_fail.ts")
         {
@@ -711,7 +730,12 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
         }
     }
 
-    assert!(got_error_log);
+    assert_with_logs(
+        got_error_log,
+        "Expected error log for chunk_fail.ts",
+        &mut event_rx,
+        Some(&recorder),
+    );
     // File MUST be preserved upon failure
     assert!(chunk_path.exists());
 
@@ -2054,7 +2078,12 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let session_dir = session_folder.expect("Session directory must exist");
+    let session_dir = expect_with_logs(
+        session_folder,
+        "Session directory must exist",
+        &mut event_rx,
+        None,
+    );
     let chunk_path = session_dir.join("chunk_0000.ts");
     fs::write(&chunk_path, b"TEST_CHUNK_PAYLOAD_DATA_FOR_SHUTDOWN_TEST").unwrap();
     assert!(chunk_path.exists());
@@ -2064,17 +2093,20 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
 
     // Drain events in background and track UploadCompleted
     let drain_handle = tokio::spawn(async move {
+        let mut recorder = TestLogRecorder::new();
         let mut got_completed = false;
         while let Ok(Some(ev)) =
             tokio::time::timeout(std::time::Duration::from_secs(20), event_rx.recv()).await
         {
+            recorder.record(&ev);
             if let AppEvent::UploadCompleted { chunk_name, .. } = ev
                 && chunk_name == "chunk_0000.ts"
             {
                 got_completed = true;
             }
         }
-        got_completed
+        recorder.drain_buffered(&mut event_rx);
+        (got_completed, recorder)
     });
 
     let res = tokio::time::timeout(std::time::Duration::from_secs(10), run_handle).await;
@@ -2088,10 +2120,13 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
         "Chunk file must already be uploaded and deleted when EngineOrchestrator::run completes!"
     );
 
-    let got_completed = drain_handle.await.unwrap_or(false);
+    let (got_completed, recorder) = drain_handle
+        .await
+        .unwrap_or_else(|_| (false, TestLogRecorder::new()));
     assert!(
         got_completed,
-        "UploadCompleted event for chunk_0000.ts must be emitted during graceful shutdown!"
+        "UploadCompleted event for chunk_0000.ts must be emitted during graceful shutdown! {}",
+        recorder.summary()
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -2297,7 +2332,12 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let session_dir = session_folder.expect("Session directory must exist");
+    let session_dir = expect_with_logs(
+        session_folder,
+        "Session directory must exist",
+        &mut event_rx,
+        None,
+    );
     let chunk_path0 = session_dir.join("chunk_0000.ts");
     let chunk_path1 = session_dir.join("chunk_0001.ts");
 
@@ -2468,8 +2508,18 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    let dir1 = session_dir_1.expect("Session dir 1 must exist");
-    let dir2 = session_dir_2.expect("Session dir 2 must exist");
+    let dir1 = expect_with_logs(
+        session_dir_1,
+        "Session dir 1 must exist",
+        &mut event_rx,
+        None,
+    );
+    let dir2 = expect_with_logs(
+        session_dir_2,
+        "Session dir 2 must exist",
+        &mut event_rx,
+        None,
+    );
 
     // Write chunk_0000.ts and chunk_0001.ts to BOTH session folders
     let d1_c0 = dir1.join("chunk_0000.ts");
@@ -2483,10 +2533,12 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
     fs::write(&d2_c1, b"CHUNK_2_1_DATA").unwrap();
 
     // Check if chunk_0000.ts from BOTH channels completes upload
+    let mut recorder = TestLogRecorder::new();
     let mut uploaded_channels = HashSet::new();
     while let Ok(Some(ev)) =
         tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv()).await
     {
+        recorder.record(&ev);
         if let AppEvent::UploadCompleted {
             channel_id,
             chunk_name,
@@ -2501,13 +2553,17 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
         }
     }
 
-    assert!(
+    assert_with_logs(
         uploaded_channels.contains("chan_multi_1"),
-        "chan_multi_1 chunk 0 should be uploaded"
+        "chan_multi_1 chunk 0 should be uploaded",
+        &mut event_rx,
+        Some(&recorder),
     );
-    assert!(
+    assert_with_logs(
         uploaded_channels.contains("chan_multi_2"),
-        "chan_multi_2 chunk 0 should be uploaded"
+        "chan_multi_2 chunk 0 should be uploaded",
+        &mut event_rx,
+        Some(&recorder),
     );
 
     let uploads = mock_backend.uploads.lock().await;
@@ -2631,7 +2687,7 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    let dir = session_dir.expect("Session dir must exist");
+    let dir = expect_with_logs(session_dir, "Session dir must exist", &mut event_rx, None);
 
     // Write chunk_0000.ts and chunk_0001.ts
     let c0 = dir.join("chunk_0000.ts");
@@ -2641,18 +2697,28 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
 
     // Check if chunk_0000.ts completes upload
     let mut chunk_0_uploaded = false;
+    let mut recorder = TestLogRecorder::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(6);
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Some(AppEvent::UploadCompleted { chunk_name, .. })) =
+        if let Ok(Some(ev)) =
             tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await
-            && chunk_name == "chunk_0000.ts"
         {
-            chunk_0_uploaded = true;
-            break;
+            recorder.record(&ev);
+            if let AppEvent::UploadCompleted { chunk_name, .. } = ev
+                && chunk_name == "chunk_0000.ts"
+            {
+                chunk_0_uploaded = true;
+                break;
+            }
         }
     }
 
-    assert!(chunk_0_uploaded, "chunk_0000.ts must be uploaded");
+    assert_with_logs(
+        chunk_0_uploaded,
+        "chunk_0000.ts must be uploaded",
+        &mut event_rx,
+        Some(&recorder),
+    );
 
     let uploads = mock_backend.uploads.lock().await;
     assert!(
@@ -2988,7 +3054,7 @@ fn main() {
     };
 
     let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
-    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx)
         .with_ffmpeg_bin(mock_bin.to_string_lossy());
@@ -3016,10 +3082,11 @@ fn main() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }
-    assert_eq!(
-        entries_after_poll1.len(),
-        1,
-        "Must create exactly 1 session folder for Poll 1: {entries_after_poll1:?}"
+    assert_with_logs(
+        entries_after_poll1.len() == 1,
+        &format!("Must create exactly 1 session folder for Poll 1: {entries_after_poll1:?}"),
+        &mut event_rx,
+        None,
     );
     let folder_poll1 = entries_after_poll1[0].clone();
     fs::write(
@@ -3057,9 +3124,11 @@ fn main() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert!(
+    assert_with_logs(
         session1_exited,
-        "Session 1 FFmpeg process must be gracefully terminated upon entering restricted state!"
+        "Session 1 FFmpeg process must be gracefully terminated upon entering restricted state!",
+        &mut event_rx,
+        None,
     );
 
     // Simulate restriction latch and cooldown that occurs upon session conclusion
@@ -3097,9 +3166,13 @@ fn main() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }
-    assert!(
+    assert_with_logs(
         entries_after_poll3.len() >= 2,
-        "Must create a new distinct session folder for Poll 3, got: {entries_after_poll3:?}"
+        &format!(
+            "Must create a new distinct session folder for Poll 3, got: {entries_after_poll3:?}"
+        ),
+        &mut event_rx,
+        None,
     );
     assert!(
         entries_after_poll3.iter().any(|f| f != &folder_poll1),
@@ -3507,32 +3580,7 @@ async fn test_engine_orchestrator_handles_ffmpeg_key_403_forbidden_stream() {
         std::env::temp_dir().join(format!("test_ffmpeg_key_403_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let mock_bin = temp_dir.join(if cfg!(windows) {
-        "mock_ffmpeg.exe"
-    } else {
-        "mock_ffmpeg"
-    });
-    let src_path = temp_dir.join("mock_ffmpeg.rs");
-    std::fs::write(&src_path, r#"
-use std::io::Write;
-fn main() {
-    let stderr = std::io::stderr();
-    let mut handle = stderr.lock();
-    let _ = writeln!(handle, "[https @ 0xaaaaebe99930] HTTP error 403 Forbidden");
-    let _ = writeln!(handle, "[in#0 @ 0xaaaaebdbabe0] Unable to open key file https://api.chzzk.naver.com/service/v1/encryption/lives/21326414/aes_key, Server returned 403 Forbidden (access denied)");
-    let _ = writeln!(handle, "[in#0 @ 0xaaaaebdbabe0] Failed to open segment 4896 of playlist 0");
-    let _ = writeln!(handle, "[in#0 @ 0xaaaaebdbabe0] Segment 4896 of playlist 0 failed too many times, skipping");
-    let _ = handle.flush();
-    std::thread::sleep(std::time::Duration::from_secs(60));
-}
-"#).unwrap();
-    let compile_status = std::process::Command::new("rustc")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&mock_bin)
-        .status()
-        .expect("Failed to compile mock_ffmpeg");
-    assert!(compile_status.success(), "mock_ffmpeg compilation failed");
+    let mock_bin = get_mock_ffmpeg_bin();
 
     let server = Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
@@ -3552,7 +3600,7 @@ fn main() {
                         "status": "OPEN",
                         "liveTitle": "Sports Broadcast (Encrypted)",
                         "channel": { "channelId": "chan_sports", "channelName": "SportsStreamer" },
-                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
+                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls_key_error.m3u8\"}]}",
                         "adult": false
                     }
                 }"#
@@ -3607,7 +3655,7 @@ fn main() {
         live_id: Some(21326414),
         streamer_name: "SportsStreamer".to_string(),
         title: "Sports Broadcast (Encrypted)".to_string(),
-        hls_url: "https://test.com/hls.m3u8".to_string(),
+        hls_url: "https://test.com/hls_key_error.m3u8".to_string(),
         chat_channel_id: None,
         metadata: Default::default(),
     };
@@ -3653,15 +3701,31 @@ fn main() {
         }
     }
 
-    assert!(
+    assert_with_logs(
         got_error_log,
-        "Must emit single error log for restricted stream credentials"
+        "Must emit single error log for restricted stream credentials",
+        &mut event_rx,
+        None,
     );
-    assert!(got_ended, "Must emit RecordingEnded event");
-    assert!(got_live_channel_update, "Must set channel status to LIVE");
-    assert!(
+    assert_with_logs(
+        got_ended,
+        "Must emit RecordingEnded event",
+        &mut event_rx,
+        None,
+    );
+    assert_with_logs(
+        got_live_channel_update,
+        "Must set channel status to LIVE",
+        &mut event_rx,
+        None,
+    );
+    assert_with_logs(
         ffmpeg_logs.is_empty(),
-        "FFmpeg 403 and segment skipping errors must NOT be forwarded to logs (zero log spam), got: {ffmpeg_logs:?}"
+        &format!(
+            "FFmpeg 403 and segment skipping errors must NOT be forwarded to logs (zero log spam), got: {ffmpeg_logs:?}"
+        ),
+        &mut event_rx,
+        None,
     );
 
     // Verify channel is removed from recording, and marked restricted
@@ -3812,11 +3876,13 @@ async fn test_upload_consumer_logs_broadcast_identifier_on_success_and_failure()
     drop(upload_tx);
     drop(event_tx);
 
+    let mut recorder = TestLogRecorder::new();
     let mut got_video_clean_log = false;
     let mut got_chat_clean_log = false;
     let mut got_fallback_clean_log = false;
 
     while let Some(event) = event_rx.recv().await {
+        recorder.record(&event);
         if let AppEvent::Log(msg) = event {
             if msg.contains("[StreamerOne] Uploaded & deleted chunk_0001.ts") {
                 got_video_clean_log = true;
@@ -3830,17 +3896,23 @@ async fn test_upload_consumer_logs_broadcast_identifier_on_success_and_failure()
         }
     }
 
-    assert!(
+    assert_with_logs(
         got_video_clean_log,
-        "Must log [StreamerOne] on video chunk upload & delete"
+        "Must log [StreamerOne] on video chunk upload & delete",
+        &mut event_rx,
+        Some(&recorder),
     );
-    assert!(
+    assert_with_logs(
         got_chat_clean_log,
-        "Must log [StreamerOne] on chat chunk upload & delete"
+        "Must log [StreamerOne] on chat chunk upload & delete",
+        &mut event_rx,
+        Some(&recorder),
     );
-    assert!(
+    assert_with_logs(
         got_fallback_clean_log,
-        "Must log [chan_fallback_id] fallback when streamer name is whitespace"
+        "Must log [chan_fallback_id] fallback when streamer name is whitespace",
+        &mut event_rx,
+        Some(&recorder),
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
