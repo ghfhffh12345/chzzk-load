@@ -11,6 +11,7 @@ use crate::chzzk::client::ChzzkClient;
 use crate::chzzk::models::LiveStreamInfo;
 use crate::config::Settings;
 use crate::engine::dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
+use crate::engine::registry::{ChannelLifecycleRegistry, RestrictionReason};
 use crate::engine::session::{ActiveSessionState, FinishedSession};
 use crate::engine::state::EngineState;
 use crate::recorder::ffmpeg::{
@@ -33,6 +34,7 @@ impl RecordingSession {
         backend_opt: Option<Arc<dyn UploadBackend>>,
         chzzk: ChzzkClient,
         event_tx: Sender<AppEvent>,
+        registry: ChannelLifecycleRegistry,
         state: EngineState,
         cancel_token: CancellationToken,
         ffmpeg_bin: Option<String>,
@@ -51,21 +53,64 @@ impl RecordingSession {
                 .find(|c| c.id == channel_id)
                 .and_then(|c| c.alias.clone());
 
-            let (session_folder_name, start_timestamp, initial_metadata_jsonl) = {
-                let mut sessions = state.active_sessions.lock().await;
-                let session = sessions.entry(channel_id.clone()).or_insert_with(|| {
-                    let start_timestamp = Local::now().format("%Y-%m-%d_%H%M%S").to_string();
-                    ActiveSessionState::new(
-                        start_timestamp,
-                        info.streamer_name.clone(),
-                        alias.clone(),
-                        info.metadata.clone(),
-                    )
-                });
+            let (session_folder_name, start_timestamp, initial_metadata_jsonl, session_cancel) = {
+                let existing_session = registry.active_session(&channel_id);
+                let (session, token) = match existing_session {
+                    Some(s) => {
+                        let token = registry
+                            .get_cancel_token(&channel_id)
+                            .unwrap_or_else(|| cancel_token.child_token());
+                        (s, token)
+                    }
+                    None => {
+                        let start_timestamp = Local::now().format("%Y-%m-%d_%H%M%S").to_string();
+                        let s = ActiveSessionState::new(
+                            start_timestamp,
+                            info.streamer_name.clone(),
+                            alias.clone(),
+                            info.metadata.clone(),
+                        );
+                        let token = cancel_token.child_token();
+                        registry.start_recording(&channel_id, s.clone(), token.clone());
+                        (s, token)
+                    }
+                };
+
+                // Sync legacy state for backward compatibility
+                {
+                    let mut active = state.active_recordings.lock().await;
+                    active.insert(channel_id.clone());
+                }
+                {
+                    let mut sessions = state.active_sessions.lock().await;
+                    sessions.insert(channel_id.clone(), session.clone());
+                }
+                {
+                    let mut tokens = state.session_cancel_tokens.lock().await;
+                    tokens.insert(channel_id.clone(), token.clone());
+                }
+                {
+                    let mut restricted = state.restricted_channels.lock().await;
+                    restricted.remove(&channel_id);
+                }
+                {
+                    let mut r_ids = state.restricted_live_ids.lock().await;
+                    r_ids.remove(&channel_id);
+                }
+                {
+                    let mut api_restricted = state.api_restricted_channels.lock().await;
+                    api_restricted.remove(&channel_id);
+                }
+                {
+                    let mut finished = state.finished_sessions.lock().await;
+                    finished.remove(&channel_id);
+                }
+
                 (
                     session.folder_name(),
                     session.start_timestamp.clone(),
                     session.format_metadata_jsonl(),
+                    token,
                 )
             };
 
@@ -80,10 +125,13 @@ impl RecordingSession {
                         e
                     ))))
                     .await;
+                registry.reset_to_idle(&channel_id);
                 let mut active = state.active_recordings.lock().await;
                 active.remove(&channel_id);
                 let mut sessions = state.active_sessions.lock().await;
                 sessions.remove(&channel_id);
+                let mut tokens = state.session_cancel_tokens.lock().await;
+                tokens.remove(&channel_id);
                 let _ = event_tx
                     .send(AppEvent::RecordingEnded {
                         channel_id: channel_id.clone(),
@@ -125,11 +173,6 @@ impl RecordingSession {
                             .await;
                     }
                 });
-            }
-            let session_cancel = cancel_token.child_token();
-            {
-                let mut tokens = state.session_cancel_tokens.lock().await;
-                tokens.insert(channel_id.clone(), session_cancel.clone());
             }
 
             let (chat_sealed_tx, mut chat_sealed_rx) = tokio::sync::mpsc::channel::<PathBuf>(32);
@@ -320,6 +363,7 @@ impl RecordingSession {
                             "Failed to spawn FFmpeg: {e}"
                         ))))
                         .await;
+                    registry.reset_to_idle(&channel_id);
                     session_cancel.cancel();
                     {
                         let mut tokens = state.session_cancel_tokens.lock().await;
@@ -512,6 +556,12 @@ impl RecordingSession {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
 
+                registry.mark_restricted(
+                    &channel_id,
+                    info.live_id,
+                    RestrictionReason::KeyForbidden,
+                );
+
                 session_cancel.cancel();
                 if let Some(mut chat_handle) = chat_task
                     && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
@@ -588,13 +638,17 @@ impl RecordingSession {
             }
             let _ = tokio::time::timeout(Duration::from_secs(2), chat_forward_handle).await;
 
-            let metadata_jsonl = {
-                let sessions = state.active_sessions.lock().await;
-                sessions
-                    .get(&channel_id)
-                    .map(|s| s.format_metadata_jsonl())
-                    .unwrap_or_default()
-            };
+            let metadata_jsonl = registry
+                .active_session(&channel_id)
+                .map(|s| s.format_metadata_jsonl())
+                .unwrap_or_else(|| {
+                    let sessions = state.active_sessions.try_lock().ok();
+                    sessions
+                        .as_ref()
+                        .and_then(|m| m.get(&channel_id))
+                        .map(|s| s.format_metadata_jsonl())
+                        .unwrap_or_default()
+                });
             if !metadata_jsonl.is_empty()
                 && let Some(ref backend) = backend_opt
             {
@@ -619,6 +673,13 @@ impl RecordingSession {
                 }
             }
 
+            let is_restricted = registry.is_restricted(&channel_id)
+                || state.restricted_channels.lock().await.contains(&channel_id);
+
+            if !is_restricted {
+                registry.finish_recording(&channel_id, info.live_id);
+            }
+
             {
                 let mut tokens = state.session_cancel_tokens.lock().await;
                 tokens.remove(&channel_id);
@@ -636,7 +697,7 @@ impl RecordingSession {
                     sessions.remove(&channel_id);
                 }
             }
-            {
+            if !is_restricted {
                 let mut finished = state.finished_sessions.lock().await;
                 finished.insert(
                     channel_id.clone(),

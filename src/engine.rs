@@ -38,6 +38,7 @@ pub struct EngineOrchestrator {
     chzzk: ChzzkClient,
     backend: Option<Arc<dyn UploadBackend>>,
     event_tx: Sender<AppEvent>,
+    registry: ChannelLifecycleRegistry,
     state: EngineState,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
@@ -67,12 +68,37 @@ impl EngineOrchestrator {
             chzzk,
             backend,
             event_tx,
+            registry: ChannelLifecycleRegistry::new(),
             state: EngineState::new(),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             ffmpeg_bin: None,
         }
+    }
+
+    pub fn registry(&self) -> &ChannelLifecycleRegistry {
+        &self.registry
+    }
+
+    pub fn is_recording(&self, channel_id: &str) -> bool {
+        self.registry.is_recording(channel_id)
+    }
+
+    pub fn is_restricted(&self, channel_id: &str) -> bool {
+        self.registry.is_restricted(channel_id)
+    }
+
+    pub fn active_session(&self, channel_id: &str) -> Option<ActiveSessionState> {
+        self.registry.active_session(channel_id)
+    }
+
+    pub fn active_recording_ids(&self) -> Vec<String> {
+        self.registry.active_recording_ids()
+    }
+
+    pub fn channel_state(&self, channel_id: &str) -> ChannelLifecycleState {
+        self.registry.channel_state(channel_id)
     }
 
     pub fn channel_names(&self) -> Arc<tokio::sync::RwLock<HashMap<String, String>>> {
@@ -99,6 +125,7 @@ impl EngineOrchestrator {
 
     pub fn cancel(&self) {
         self.cancel_token.cancel();
+        self.registry.cancel_all();
     }
 
     pub fn cancel_token(&self) -> CancellationToken {
@@ -140,6 +167,7 @@ impl EngineOrchestrator {
     }
 
     pub async fn register_finished_session(&self, channel_id: &str, live_id: Option<u64>) {
+        self.registry.finish_recording(channel_id, live_id);
         self.state
             .register_finished_session(channel_id, live_id)
             .await;
@@ -232,6 +260,25 @@ impl EngineOrchestrator {
             return;
         }
 
+        if !self.registry.is_recording(&channel_id) {
+            let alias = self
+                .settings
+                .channels
+                .iter()
+                .find(|c| c.id == channel_id)
+                .and_then(|c| c.alias.clone());
+            let start_timestamp = Local::now().format("%Y-%m-%d_%H%M%S").to_string();
+            let session_state = ActiveSessionState::new(
+                start_timestamp,
+                info.streamer_name.clone(),
+                alias,
+                info.metadata.clone(),
+            );
+            let session_cancel = self.cancel_token.child_token();
+            self.registry
+                .start_recording(&channel_id, session_state, session_cancel);
+        }
+
         let handle = RecordingSession::spawn(
             channel_id,
             info,
@@ -240,6 +287,7 @@ impl EngineOrchestrator {
             self.backend.clone(),
             self.chzzk.clone(),
             self.event_tx.clone(),
+            self.registry.clone(),
             self.state.clone(),
             self.cancel_token.clone(),
             self.ffmpeg_bin.clone(),
@@ -252,145 +300,198 @@ impl EngineOrchestrator {
     }
 
     pub async fn poll_channels_once(&self, upload_tx: &Sender<UploadTask>) {
+        let cooldown_window = Duration::from_secs(self.settings.general.stream_cooldown_seconds);
         for channel in &self.settings.channels {
             let detail_res = tokio::select! {
                 _ = self.cancel_token.cancelled() => break,
                 res = self.chzzk.get_live_detail(&channel.id) => res,
             };
             match detail_res {
-                Ok(LiveDetail::Open(info)) => {
-                    {
+                Ok(detail) => {
+                    // Sync cached streamer name with legacy state
+                    let incoming_streamer_name = match &detail {
+                        LiveDetail::Open(info) => Some(&info.streamer_name),
+                        LiveDetail::Restricted { streamer_name, .. } => Some(streamer_name),
+                        LiveDetail::Close { streamer_name } => streamer_name.as_ref(),
+                    };
+                    if let Some(streamer_name) = incoming_streamer_name {
                         let mut names = self.state.channel_names.write().await;
-                        names.insert(channel.id.clone(), info.streamer_name.clone());
-                    }
-                    let display_name = {
-                        let names = self.state.channel_names.read().await;
-                        Self::resolve_display_name(channel, &names)
-                    };
-
-                    let was_api_restricted = {
-                        let mut api_restricted = self.state.api_restricted_channels.lock().await;
-                        api_restricted.remove(&channel.id)
-                    };
-
-                    if was_api_restricted {
-                        {
-                            let mut r_ids = self.state.restricted_live_ids.lock().await;
-                            r_ids.remove(&channel.id);
-                        }
-                        {
-                            let mut finished = self.state.finished_sessions.lock().await;
-                            finished.remove(&channel.id);
-                        }
-                        {
-                            let mut restricted = self.state.restricted_channels.lock().await;
-                            restricted.remove(&channel.id);
-                        }
-
-                        let log_msg = format!(
-                            "Restricted stream for channel {} ({}) returned to public broadcast (liveId: {:?}). Starting new recording session in new broadcast folder...",
-                            channel.id, display_name, info.live_id
-                        );
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::Log(LogEntry::rec(log_msg)))
-                            .await;
+                        names.insert(channel.id.clone(), streamer_name.clone());
                     }
 
-                    let is_live_id_restricted = if let Some(lid) = info.live_id {
-                        let r_ids = self.state.restricted_live_ids.lock().await;
-                        r_ids.get(&channel.id).copied() == Some(lid)
-                    } else {
-                        false
-                    };
-
-                    if is_live_id_restricted {
-                        let is_newly_restricted = {
-                            let mut restricted = self.state.restricted_channels.lock().await;
-                            restricted.insert(channel.id.clone())
+                    // Bridge legacy state mutations (from existing integration tests) into registry
+                    if !self.registry.is_recording(&channel.id) {
+                        let legacy_session = {
+                            let sessions = self.state.active_sessions.lock().await;
+                            sessions.get(&channel.id).cloned()
                         };
+                        if let Some(session) = legacy_session {
+                            let token = self.cancel_token.child_token();
+                            self.registry.start_recording(&channel.id, session, token);
+                        }
+                    }
+                    if !self.registry.is_restricted(&channel.id) {
+                        let is_restricted = self
+                            .state
+                            .restricted_channels
+                            .lock()
+                            .await
+                            .contains(&channel.id);
+                        if is_restricted {
+                            let live_id = self
+                                .state
+                                .restricted_live_ids
+                                .lock()
+                                .await
+                                .get(&channel.id)
+                                .copied();
+                            let reason = if self
+                                .state
+                                .api_restricted_channels
+                                .lock()
+                                .await
+                                .contains(&channel.id)
+                            {
+                                RestrictionReason::RequiresCredentials
+                            } else {
+                                RestrictionReason::KeyForbidden
+                            };
+                            self.registry.mark_restricted(&channel.id, live_id, reason);
+                        }
+                    }
 
-                        if is_newly_restricted {
-                            let log_msg = format!(
-                                "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
-                                channel.id, display_name
-                            );
+                    let action = self.registry.evaluate_poll(
+                        &channel.id,
+                        channel.alias.as_deref(),
+                        &detail,
+                        cooldown_window,
+                    );
+
+                    match action {
+                        PollAction::ReadyToRecord {
+                            info,
+                            display_name,
+                            was_api_restricted,
+                        } => {
+                            let min_disk = self.settings.general.min_free_disk_gb;
+                            let recordings_base =
+                                resolve_path(Path::new(&self.settings.general.recordings_dir));
+                            if !crate::disk::has_sufficient_disk_space(&recordings_base, min_disk) {
+                                if let Ok(space) = crate::disk::get_disk_space(&recordings_base) {
+                                    let _ = self
+                                        .event_tx
+                                        .send(AppEvent::Log(LogEntry::warn(format!(
+                                            "[DISK] Disk space critically low ({:.2} GB < {:.2} GB). Recording paused to prevent disk exhaustion.",
+                                            space.available_gb(), min_disk
+                                        ))))
+                                        .await;
+                                }
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::ChannelUpdate {
+                                        channel_id: channel.id.clone(),
+                                        channel_name: display_name.clone(),
+                                        is_live: true,
+                                        title: info.title.clone(),
+                                    })
+                                    .await;
+                                continue;
+                            }
+
+                            if was_api_restricted {
+                                let log_msg = format!(
+                                    "Restricted stream for channel {} ({}) returned to public broadcast (liveId: {:?}). Starting new recording session in new broadcast folder...",
+                                    channel.id, display_name, info.live_id
+                                );
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::Log(LogEntry::rec(log_msg)))
+                                    .await;
+                            }
+
                             let _ = self
                                 .event_tx
-                                .send(AppEvent::Log(LogEntry::error(log_msg)))
+                                .send(AppEvent::ChannelUpdate {
+                                    channel_id: channel.id.clone(),
+                                    channel_name: display_name.clone(),
+                                    is_live: true,
+                                    title: info.title.clone(),
+                                })
                                 .await;
-                        }
 
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::ChannelUpdate {
-                                channel_id: channel.id.clone(),
-                                channel_name: display_name.clone(),
-                                is_live: true,
-                                title: info.title.clone(),
-                            })
-                            .await;
-                        continue;
-                    }
-
-                    {
-                        let mut restricted = self.state.restricted_channels.lock().await;
-                        restricted.remove(&channel.id);
-                    }
-
-                    let is_recording = {
-                        let active = self.state.active_recordings.lock().await;
-                        active.contains(&channel.id)
-                    };
-
-                    let is_duplicate_or_cooldown = {
-                        let mut finished = self.state.finished_sessions.lock().await;
-                        if let Some(prev) = finished.get(&channel.id) {
-                            match (&info.live_id, &prev.live_id) {
-                                (Some(curr_id), Some(prev_id)) if curr_id != prev_id => {
-                                    // liveId changed -> Genuinely new stream started!
-                                    finished.remove(&channel.id);
-                                    false
-                                }
-                                _ => {
-                                    // Same liveId or one/both live_ids are None:
-                                    // Guard against Chzzk CDN cache TTL delays during cooldown window.
-                                    // If cooldown has elapsed and stream is still OPEN, recording was interrupted and should resume.
-                                    let cooldown = Duration::from_secs(
-                                        self.settings.general.stream_cooldown_seconds,
-                                    );
-                                    if prev.finished_at.elapsed() < cooldown {
-                                        true
-                                    } else {
-                                        finished.remove(&channel.id);
-                                        false
-                                    }
-                                }
-                            }
-                        } else {
-                            false
-                        }
-                    };
-
-                    if is_recording {
-                        let metadata_change = {
-                            let mut sessions = self.state.active_sessions.lock().await;
-                            if let Some(session) = sessions.get_mut(&channel.id) {
-                                if let Some((delta, event)) =
-                                    session.record_metadata_change(info.metadata.clone())
-                                {
-                                    let remote_dir = session.folder_name();
-                                    let full_jsonl = session.format_metadata_jsonl();
-                                    Some((delta, event, remote_dir, full_jsonl))
-                                } else {
-                                    None
-                                }
+                            let start_timestamp = if was_api_restricted {
+                                Local::now().format("%Y-%m-%d_%H%M%S").to_string()
                             } else {
-                                None
-                            }
-                        };
+                                Local::now().format("%Y-%m-%d_%H%M").to_string()
+                            };
 
-                        if let Some((delta, event, remote_dir, full_jsonl)) = metadata_change {
+                            let session_cancel = self.cancel_token.child_token();
+                            let session_state = ActiveSessionState::new(
+                                start_timestamp,
+                                info.streamer_name.clone(),
+                                channel.alias.clone(),
+                                info.metadata.clone(),
+                            );
+
+                            self.registry.start_recording(
+                                &channel.id,
+                                session_state.clone(),
+                                session_cancel.clone(),
+                            );
+
+                            // Sync legacy state for backward compatibility during phased migration
+                            {
+                                let mut active = self.state.active_recordings.lock().await;
+                                active.insert(channel.id.clone());
+                            }
+                            {
+                                let mut sessions = self.state.active_sessions.lock().await;
+                                sessions.insert(channel.id.clone(), session_state);
+                            }
+                            {
+                                let mut tokens = self.state.session_cancel_tokens.lock().await;
+                                tokens.insert(channel.id.clone(), session_cancel);
+                            }
+                            {
+                                let mut restricted = self.state.restricted_channels.lock().await;
+                                restricted.remove(&channel.id);
+                            }
+                            {
+                                let mut r_ids = self.state.restricted_live_ids.lock().await;
+                                r_ids.remove(&channel.id);
+                            }
+                            {
+                                let mut api_restricted =
+                                    self.state.api_restricted_channels.lock().await;
+                                api_restricted.remove(&channel.id);
+                            }
+                            {
+                                let mut finished = self.state.finished_sessions.lock().await;
+                                finished.remove(&channel.id);
+                            }
+
+                            self.spawn_recording_session(
+                                channel.id.clone(),
+                                info,
+                                upload_tx.clone(),
+                            );
+                        }
+                        PollAction::RecordingMetadataChanged {
+                            delta,
+                            event,
+                            remote_dir,
+                            full_jsonl,
+                            display_name,
+                            title,
+                        } => {
+                            // Sync legacy state
+                            {
+                                let mut sessions = self.state.active_sessions.lock().await;
+                                if let Some(session) = sessions.get_mut(&channel.id) {
+                                    session.record_metadata_change(event.state.clone());
+                                }
+                            }
+
                             // 1. Append locally to <session_dir>/metadata.jsonl
                             let recordings_base =
                                 resolve_path(Path::new(&self.settings.general.recordings_dir));
@@ -451,257 +552,211 @@ impl EngineOrchestrator {
                                         channel_id: channel.id.clone(),
                                         channel_name: display_name.clone(),
                                         is_live: true,
-                                        title: info.title.clone(),
+                                        title: title.clone(),
                                     })
                                     .await;
                             }
-                        }
 
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::ChannelUpdate {
-                                channel_id: channel.id.clone(),
-                                channel_name: display_name.clone(),
-                                is_live: true,
-                                title: info.title.clone(),
-                            })
-                            .await;
-                    } else if is_duplicate_or_cooldown {
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::Log(LogEntry::poll(format!(
-                                "Channel {} ({}) stream recently concluded (liveId: {:?}). Waiting for API cache to close...",
-                                channel.id,
-                                display_name,
-                                info.live_id
-                            ))))
-                            .await;
-
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::ChannelUpdate {
-                                channel_id: channel.id.clone(),
-                                channel_name: display_name.clone(),
-                                is_live: false,
-                                title: "Stream Concluded (Cooldown)".to_string(),
-                            })
-                            .await;
-                    } else {
-                        let min_disk = self.settings.general.min_free_disk_gb;
-                        let recordings_base =
-                            resolve_path(Path::new(&self.settings.general.recordings_dir));
-                        if !crate::disk::has_sufficient_disk_space(&recordings_base, min_disk) {
-                            if let Ok(space) = crate::disk::get_disk_space(&recordings_base) {
-                                let _ = self
-                                    .event_tx
-                                    .send(AppEvent::Log(LogEntry::warn(format!(
-                                        "[DISK] Disk space critically low ({:.2} GB < {:.2} GB). Recording paused to prevent disk exhaustion.",
-                                        space.available_gb(), min_disk
-                                    ))))
-                                    .await;
-                            }
                             let _ = self
                                 .event_tx
                                 .send(AppEvent::ChannelUpdate {
                                     channel_id: channel.id.clone(),
-                                    channel_name: display_name.clone(),
+                                    channel_name: display_name,
                                     is_live: true,
-                                    title: info.title.clone(),
+                                    title,
                                 })
                                 .await;
-                            continue;
                         }
-
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::ChannelUpdate {
-                                channel_id: channel.id.clone(),
-                                channel_name: display_name.clone(),
-                                is_live: true,
-                                title: info.title.clone(),
-                            })
-                            .await;
-
-                        let start_timestamp = if was_api_restricted {
-                            Local::now().format("%Y-%m-%d_%H%M%S").to_string()
-                        } else {
-                            Local::now().format("%Y-%m-%d_%H%M").to_string()
-                        };
-
-                        {
-                            let mut active = self.state.active_recordings.lock().await;
-                            active.insert(channel.id.clone());
-                        }
-                        let alias = channel.alias.clone();
-                        {
-                            let mut sessions = self.state.active_sessions.lock().await;
-                            sessions.insert(
-                                channel.id.clone(),
-                                ActiveSessionState::new(
-                                    start_timestamp,
-                                    info.streamer_name.clone(),
-                                    alias,
-                                    info.metadata.clone(),
-                                ),
-                            );
-                        }
-                        self.spawn_recording_session(channel.id.clone(), info, upload_tx.clone());
-                    }
-                }
-                Ok(LiveDetail::Restricted {
-                    channel_id: _,
-                    live_id: _,
-                    streamer_name,
-                    title,
-                    chat_channel_id: _,
-                    adult,
-                }) => {
-                    if let Some(token) = self
-                        .state
-                        .session_cancel_tokens
-                        .lock()
-                        .await
-                        .remove(&channel.id)
-                    {
-                        token.cancel();
-                    }
-
-                    let was_active = {
-                        let mut active = self.state.active_recordings.lock().await;
-                        active.remove(&channel.id)
-                    };
-                    if was_active {
-                        let mut sessions = self.state.active_sessions.lock().await;
-                        sessions.remove(&channel.id);
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::RecordingEnded {
-                                channel_id: channel.id.clone(),
-                            })
-                            .await;
-                    }
-
-                    {
-                        let mut api_restricted = self.state.api_restricted_channels.lock().await;
-                        api_restricted.insert(channel.id.clone());
-                    }
-
-                    let is_newly_restricted = {
-                        let mut restricted = self.state.restricted_channels.lock().await;
-                        restricted.insert(channel.id.clone())
-                    };
-
-                    {
-                        let mut names = self.state.channel_names.write().await;
-                        names.insert(channel.id.clone(), streamer_name.clone());
-                    }
-                    let display_name = {
-                        let names = self.state.channel_names.read().await;
-                        Self::resolve_display_name(channel, &names)
-                    };
-
-                    if is_newly_restricted {
-                        let log_msg = if adult {
-                            format!(
-                                "Recording unavailable for channel {} ({}): 19+ age-restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
-                                channel.id, display_name
-                            )
-                        } else {
-                            format!(
-                                "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
-                                channel.id, display_name
-                            )
-                        };
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::Log(LogEntry::error(log_msg)))
-                            .await;
-                    }
-
-                    let _ = self
-                        .event_tx
-                        .send(AppEvent::ChannelUpdate {
-                            channel_id: channel.id.clone(),
-                            channel_name: display_name,
-                            is_live: true,
+                        PollAction::AlreadyRecording {
+                            display_name,
                             title,
-                        })
-                        .await;
-                }
-                Ok(LiveDetail::Close { streamer_name }) => {
-                    if let Some(streamer) = streamer_name {
-                        let mut names = self.state.channel_names.write().await;
-                        names.insert(channel.id.clone(), streamer);
-                    }
-                    let display_name = {
-                        let names = self.state.channel_names.read().await;
-                        Self::resolve_display_name(channel, &names)
-                    };
+                        } => {
+                            let _ = self
+                                .event_tx
+                                .send(AppEvent::ChannelUpdate {
+                                    channel_id: channel.id.clone(),
+                                    channel_name: display_name,
+                                    is_live: true,
+                                    title,
+                                })
+                                .await;
+                        }
+                        PollAction::InCooldown {
+                            display_name,
+                            live_id,
+                            ..
+                        } => {
+                            let _ = self
+                                .event_tx
+                                .send(AppEvent::Log(LogEntry::poll(format!(
+                                    "Channel {} ({}) stream recently concluded (liveId: {:?}). Waiting for API cache to close...",
+                                    channel.id, display_name, live_id
+                                ))))
+                                .await;
 
-                    // Channel reported CLOSE (offline)
-                    if let Some(token) = self
-                        .state
-                        .session_cancel_tokens
-                        .lock()
-                        .await
-                        .remove(&channel.id)
-                    {
-                        token.cancel();
-                    }
-                    {
-                        let mut api_restricted = self.state.api_restricted_channels.lock().await;
-                        api_restricted.remove(&channel.id);
-                    }
-                    {
-                        let mut restricted = self.state.restricted_channels.lock().await;
-                        restricted.remove(&channel.id);
-                    }
-                    {
-                        let mut r_ids = self.state.restricted_live_ids.lock().await;
-                        r_ids.remove(&channel.id);
-                    }
-                    {
-                        let mut finished = self.state.finished_sessions.lock().await;
-                        finished.remove(&channel.id);
-                    }
-                    {
-                        let mut sessions = self.state.active_sessions.lock().await;
-                        sessions.remove(&channel.id);
-                    }
+                            let _ = self
+                                .event_tx
+                                .send(AppEvent::ChannelUpdate {
+                                    channel_id: channel.id.clone(),
+                                    channel_name: display_name,
+                                    is_live: false,
+                                    title: "Stream Concluded (Cooldown)".to_string(),
+                                })
+                                .await;
+                        }
+                        PollAction::Restricted {
+                            display_name,
+                            title,
+                            reason,
+                            is_newly_restricted,
+                        } => {
+                            // Sync legacy state
+                            if let Some(token) = self
+                                .state
+                                .session_cancel_tokens
+                                .lock()
+                                .await
+                                .remove(&channel.id)
+                            {
+                                token.cancel();
+                            }
+                            let was_active = {
+                                let mut active = self.state.active_recordings.lock().await;
+                                active.remove(&channel.id)
+                            };
+                            if was_active {
+                                let mut sessions = self.state.active_sessions.lock().await;
+                                sessions.remove(&channel.id);
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::RecordingEnded {
+                                        channel_id: channel.id.clone(),
+                                    })
+                                    .await;
+                            }
+                            {
+                                let mut restricted = self.state.restricted_channels.lock().await;
+                                restricted.insert(channel.id.clone());
+                            }
+                            if matches!(
+                                reason,
+                                RestrictionReason::AgeRestricted
+                                    | RestrictionReason::RequiresCredentials
+                            ) {
+                                let mut api_restricted =
+                                    self.state.api_restricted_channels.lock().await;
+                                api_restricted.insert(channel.id.clone());
+                            }
+                            if let LiveDetail::Restricted {
+                                live_id: Some(lid), ..
+                            }
+                            | LiveDetail::Open(LiveStreamInfo {
+                                live_id: Some(lid), ..
+                            }) = &detail
+                            {
+                                let mut r_ids = self.state.restricted_live_ids.lock().await;
+                                r_ids.insert(channel.id.clone(), *lid);
+                            }
 
-                    let recordings_base =
-                        resolve_path(Path::new(&self.settings.general.recordings_dir));
-                    let active_dirs = {
-                        let sessions = self.state.active_sessions.lock().await;
-                        let active_rec = self.state.active_recordings.lock().await;
-                        let mut set: HashSet<String> =
-                            sessions.values().map(|s| s.folder_name()).collect();
-                        set.extend(active_rec.iter().cloned());
-                        set
-                    };
-                    if let Ok(count) =
-                        Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active_dirs)
+                            if is_newly_restricted {
+                                let log_msg = reason.display_message(&channel.id, &display_name);
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::Log(LogEntry::error(log_msg)))
+                                    .await;
+                            }
+
+                            let _ = self
+                                .event_tx
+                                .send(AppEvent::ChannelUpdate {
+                                    channel_id: channel.id.clone(),
+                                    channel_name: display_name,
+                                    is_live: true,
+                                    title,
+                                })
+                                .await;
+                        }
+                        PollAction::StreamClosed {
+                            display_name,
+                            was_recording,
+                        } => {
+                            if let Some(token) = self
+                                .state
+                                .session_cancel_tokens
+                                .lock()
+                                .await
+                                .remove(&channel.id)
+                            {
+                                token.cancel();
+                            }
+                            {
+                                let mut api_restricted =
+                                    self.state.api_restricted_channels.lock().await;
+                                api_restricted.remove(&channel.id);
+                            }
+                            {
+                                let mut restricted = self.state.restricted_channels.lock().await;
+                                restricted.remove(&channel.id);
+                            }
+                            {
+                                let mut r_ids = self.state.restricted_live_ids.lock().await;
+                                r_ids.remove(&channel.id);
+                            }
+                            {
+                                let mut finished = self.state.finished_sessions.lock().await;
+                                finished.remove(&channel.id);
+                            }
+                            {
+                                let mut sessions = self.state.active_sessions.lock().await;
+                                sessions.remove(&channel.id);
+                            }
+                            {
+                                let mut active = self.state.active_recordings.lock().await;
+                                active.remove(&channel.id);
+                            }
+
+                            if was_recording {
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::RecordingEnded {
+                                        channel_id: channel.id.clone(),
+                                    })
+                                    .await;
+                            }
+
+                            let recordings_base =
+                                resolve_path(Path::new(&self.settings.general.recordings_dir));
+                            let active_dirs = {
+                                let sessions = self.registry.active_sessions();
+                                sessions.values().map(|s| s.folder_name()).collect()
+                            };
+                            if let Ok(count) = Self::cleanup_empty_session_dirs_excluding(
+                                &recordings_base,
+                                &active_dirs,
+                            )
                             .await
-                        && count > 0
-                    {
-                        let _ = self
-                            .event_tx
-                            .send(AppEvent::Log(LogEntry::clean(format!(
-                                "Cleaned up {count} empty session folder(s) in '{}'",
-                                recordings_base.display()
-                            ))))
-                            .await;
-                    }
+                                && count > 0
+                            {
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::Log(LogEntry::clean(format!(
+                                        "Cleaned up {count} empty session folder(s) in '{}'",
+                                        recordings_base.display()
+                                    ))))
+                                    .await;
+                            }
 
-                    let _ = self
-                        .event_tx
-                        .send(AppEvent::ChannelUpdate {
-                            channel_id: channel.id.clone(),
-                            channel_name: display_name,
-                            is_live: false,
-                            title: "Offline".to_string(),
-                        })
-                        .await;
+                            let _ = self
+                                .event_tx
+                                .send(AppEvent::ChannelUpdate {
+                                    channel_id: channel.id.clone(),
+                                    channel_name: display_name,
+                                    is_live: false,
+                                    title: "Offline".to_string(),
+                                })
+                                .await;
+                        }
+                    }
                 }
                 Err(e) => {
                     let _ = self
@@ -753,19 +808,19 @@ impl EngineOrchestrator {
 
         loop {
             if self.cancel_token.is_cancelled() {
+                self.registry.cancel_all();
                 break;
             }
 
             self.poll_channels_once(&upload_tx).await;
 
             let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
-            let active_dirs = {
-                let sessions = self.state.active_sessions.lock().await;
-                let active_rec = self.state.active_recordings.lock().await;
-                let mut set: HashSet<String> = sessions.values().map(|s| s.folder_name()).collect();
-                set.extend(active_rec.iter().cloned());
-                set
-            };
+            let active_dirs: HashSet<String> = self
+                .registry
+                .active_sessions()
+                .values()
+                .map(|s| s.folder_name())
+                .collect();
 
             if let Ok(count) =
                 Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active_dirs).await
@@ -781,6 +836,7 @@ impl EngineOrchestrator {
 
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
+                    self.registry.cancel_all();
                     break;
                 }
                 _ = self.refresh_notify.notified() => {
