@@ -42,8 +42,8 @@ jobs:
       - name: Install FFmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout="15"
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 ffmpeg
 
       - name: Set up FFmpeg (Windows)
         if: runner.os == 'Windows'
