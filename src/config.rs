@@ -257,4 +257,60 @@ impl Settings {
             }
         }
     }
+
+    pub const SAMPLE_CHANNEL_ID: &'static str = "4c3b44869c9b1399723ec28ec236f736";
+
+    /// Validates configuration values against minimum operational constraints.
+    /// Returns Ok(warnings) if configuration is valid (with optional advisory warnings),
+    /// or Err(errors) if fatal configuration errors are detected.
+    pub fn validate(&self) -> Result<Vec<String>, Vec<String>> {
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+
+        if self.general.chunk_duration_seconds < 10 {
+            errors.push(format!(
+                "general.chunk_duration_seconds must be at least 10 seconds (got {})",
+                self.general.chunk_duration_seconds
+            ));
+        }
+
+        if self.general.poll_interval_seconds < 1 {
+            errors.push(format!(
+                "general.poll_interval_seconds must be at least 1 second (got {})",
+                self.general.poll_interval_seconds
+            ));
+        }
+
+        if self.general.min_free_disk_gb < 0.1 && self.general.min_free_disk_gb > 0.0 {
+            errors.push(format!(
+                "general.min_free_disk_gb must be at least 0.1 GB or 0.0 to disable (got {})",
+                self.general.min_free_disk_gb
+            ));
+        }
+
+        if self.rclone.upload_concurrency < 1 {
+            errors.push(format!(
+                "rclone.upload_concurrency must be at least 1 (got {})",
+                self.rclone.upload_concurrency
+            ));
+        }
+
+        for ch in &self.channels {
+            if ch.id == Self::SAMPLE_CHANNEL_ID {
+                warnings.push(format!(
+                    "Monitored channels contain default unconfigured sample channel ID '{}'. Please update settings.toml with your target streamer channel IDs.",
+                    Self::SAMPLE_CHANNEL_ID
+                ));
+            }
+            if ch.id.trim().is_empty() {
+                errors.push("Channel ID cannot be empty".to_string());
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(warnings)
+        } else {
+            Err(errors)
+        }
+    }
 }

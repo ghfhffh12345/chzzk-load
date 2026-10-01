@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 pub mod cleanup;
 pub mod dispatcher;
+pub mod reconciliation;
 pub mod recording;
 pub mod session;
 pub mod state;
@@ -22,6 +23,7 @@ pub use cleanup::{
     cleanup_empty_session_dirs, cleanup_empty_session_dirs_excluding, cleanup_session_dir_if_empty,
 };
 pub use dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
+pub use reconciliation::{ReconciliationReport, reconcile_orphaned_sessions};
 pub use recording::RecordingSession;
 pub use session::{ActiveSessionState, FinishedSession};
 pub use state::EngineState;
@@ -480,6 +482,31 @@ impl EngineOrchestrator {
                             })
                             .await;
                     } else {
+                        let min_disk = self.settings.general.min_free_disk_gb;
+                        let recordings_base =
+                            resolve_path(Path::new(&self.settings.general.recordings_dir));
+                        if !crate::disk::has_sufficient_disk_space(&recordings_base, min_disk) {
+                            if let Ok(space) = crate::disk::get_disk_space(&recordings_base) {
+                                let _ = self
+                                    .event_tx
+                                    .send(AppEvent::Log(LogEntry::warn(format!(
+                                        "[DISK] Disk space critically low ({:.2} GB < {:.2} GB). Recording paused to prevent disk exhaustion.",
+                                        space.available_gb(), min_disk
+                                    ))))
+                                    .await;
+                            }
+                            let _ = self
+                                .event_tx
+                                .send(AppEvent::ChannelUpdate {
+                                    channel_id: channel.id.clone(),
+                                    channel_name: display_name.clone(),
+                                    is_live: true,
+                                    title: info.title.clone(),
+                                })
+                                .await;
+                            continue;
+                        }
+
                         let _ = self
                             .event_tx
                             .send(AppEvent::ChannelUpdate {
@@ -695,6 +722,30 @@ impl EngineOrchestrator {
         );
 
         let poll_interval = Duration::from_secs(self.settings.general.poll_interval_seconds);
+
+        // Startup Crash Reconciliation: If cloud backend is active, reconcile orphaned chunks from prior runs
+        if self.backend.is_some() {
+            let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
+            let report = reconcile_orphaned_sessions(
+                &recordings_base,
+                &upload_tx,
+                &self.event_tx,
+                &self.settings,
+            )
+            .await;
+            if report.chunks_enqueued > 0 || report.chunks_quarantined > 0 {
+                let _ = self
+                    .event_tx
+                    .send(AppEvent::Log(LogEntry::rec(format!(
+                        "[RECONCILIATION] Reconciled {} orphaned session(s): {} chunk(s) enqueued for upload, {} partial tail chunk(s) quarantined.",
+                        report.orphaned_sessions_scanned,
+                        report.chunks_enqueued,
+                        report.chunks_quarantined
+                    ))))
+                    .await;
+            }
+        }
+
         loop {
             if self.cancel_token.is_cancelled() {
                 break;

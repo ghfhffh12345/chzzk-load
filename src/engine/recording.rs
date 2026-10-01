@@ -409,6 +409,61 @@ impl RecordingSession {
                         break;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        let min_disk = settings.general.min_free_disk_gb;
+                        if min_disk > 0.0 {
+                            if let Ok(space) = crate::disk::get_disk_space(&session_dir) {
+                                let avail = space.available_gb();
+                                if avail < min_disk {
+                                    let _ = event_tx
+                                        .send(AppEvent::Log(LogEntry::warn(format!(
+                                            "[DISK] Disk space critically low ({:.2} GB < {:.2} GB). Recording paused to prevent disk exhaustion.",
+                                            avail, min_disk
+                                        ))))
+                                        .await;
+
+                                    if let Some(mut stdin) = child.stdin.take() {
+                                        use tokio::io::AsyncWriteExt;
+                                        let _ = stdin.write_all(b"q\n").await;
+                                        let _ = stdin.flush().await;
+                                        drop(stdin);
+                                    }
+
+                                    match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+                                        Ok(Ok(status)) => {
+                                            let _ = event_tx
+                                                .send(AppEvent::Log(LogEntry::rec(format!(
+                                                    "FFmpeg process exited cleanly: {status}"
+                                                ))))
+                                                .await;
+                                        }
+                                        _ => {
+                                            let _ = child.kill().await;
+                                            let _ = child.wait().await;
+                                            let _ = event_tx
+                                                .send(AppEvent::Log(LogEntry::rec(
+                                                    "FFmpeg did not exit within timeout, terminating process...",
+                                                )))
+                                                .await;
+                                        }
+                                    }
+
+                                    seal_and_enqueue_chunks(
+                                        &mut watcher,
+                                        &session_folder_name,
+                                        &channel_id,
+                                        &info.streamer_name,
+                                        &upload_tx,
+                                        &event_tx,
+                                        backend_opt.is_some(),
+                                        true,
+                                    )
+                                    .await;
+
+                                    break;
+                                }
+                            }
+                        }
+
                         if key_forbidden.load(std::sync::atomic::Ordering::SeqCst) {
                             restricted_abort = true;
                             break;

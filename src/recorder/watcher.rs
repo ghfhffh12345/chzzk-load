@@ -2,18 +2,29 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Attempts to parse a numeric chunk index from a chunk filename (e.g. "chunk_0001.ts" -> 1).
+pub fn parse_chunk_index(file_name: &str) -> Option<u64> {
+    let lower = file_name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".ts")?;
+    let index_str = stem.strip_prefix("chunk_")?;
+    index_str.parse::<u64>().ok()
+}
+
 /// Scans `session_dir` for `.ts` chunk files and identifies chunks that are
-/// safely sealed and ready for upload according to the N+1 chunk completion rule.
+/// safely sealed and ready for upload according to explicit numeric N+1 boundary safety:
 ///
-/// Under the N+1 rule:
-/// - If `chunk_{N+1}.ts` exists and has size > 0, `chunk_{N}.ts` is guaranteed sealed.
-/// - When `is_stream_finished` is true, the final active chunk is also marked sealed.
+/// Chunk $i$ is sealed if and only if:
+/// - There exists some chunk $j > i$ on disk with size > 0, OR
+/// - `is_stream_finished` is true (in which case the active final chunk is also sealed).
+///
+/// Any file already recorded in `already_enqueued` is skipped.
 pub fn detect_sealed_chunks(
     session_dir: &Path,
     already_enqueued: &mut HashSet<String>,
     is_stream_finished: bool,
 ) -> Vec<PathBuf> {
-    let mut chunks = Vec::new();
+    let mut numeric_chunks: Vec<(u64, String, PathBuf)> = Vec::new();
+    let mut other_chunks: Vec<(String, PathBuf)> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(session_dir) {
         for entry in entries.flatten() {
@@ -39,34 +50,43 @@ pub fn detect_sealed_chunks(
             if let Ok(meta) = meta
                 && meta.len() > 0
             {
-                chunks.push((name_str.to_string(), path, meta.len()));
+                if let Some(index) = parse_chunk_index(name_str) {
+                    numeric_chunks.push((index, name_str.to_string(), path));
+                } else {
+                    other_chunks.push((name_str.to_string(), path));
+                }
             }
         }
     }
 
-    chunks.sort_by(|a, b| a.0.cmp(&b.0));
+    numeric_chunks.sort_by_key(|c| c.0);
     let mut sealed = Vec::new();
 
-    if chunks.is_empty() {
-        return sealed;
-    }
-
-    // N+1 rule: If chunk N+1 exists, chunk N is sealed
-    let completed_len = chunks.len().saturating_sub(1);
-    for (name, path, _) in &chunks[..completed_len] {
-        if !already_enqueued.contains(name) {
-            already_enqueued.insert(name.clone());
-            sealed.push(path.clone());
+    if let Some(&max_index) = numeric_chunks.iter().map(|c| &c.0).max() {
+        for (index, name, path) in &numeric_chunks {
+            // N+1 invariant: chunk i is sealed if there exists j > i with size > 0
+            let is_sealed = *index < max_index || is_stream_finished;
+            if is_sealed && !already_enqueued.contains(name) {
+                already_enqueued.insert(name.clone());
+                sealed.push(path.clone());
+            }
         }
     }
 
-    // If stream ended, the final chunk is also sealed
-    if is_stream_finished
-        && let Some((name, path, _)) = chunks.last()
-        && !already_enqueued.contains(name)
-    {
-        already_enqueued.insert(name.clone());
-        sealed.push(path.clone());
+    // Fallback for non-numeric .ts files if any exist
+    if !other_chunks.is_empty() {
+        other_chunks.sort_by(|a, b| a.0.cmp(&b.0));
+        let completed_len = if is_stream_finished {
+            other_chunks.len()
+        } else {
+            other_chunks.len().saturating_sub(1)
+        };
+        for (name, path) in &other_chunks[..completed_len] {
+            if !already_enqueued.contains(name) {
+                already_enqueued.insert(name.clone());
+                sealed.push(path.clone());
+            }
+        }
     }
 
     sealed
