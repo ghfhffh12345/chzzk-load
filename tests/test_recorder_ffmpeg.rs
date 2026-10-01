@@ -1,6 +1,8 @@
 mod common;
 
-use chzzk_load::recorder::ffmpeg::{FfmpegEvent, FfmpegExit, FfmpegSession};
+use chzzk_load::recorder::ffmpeg::{
+    FfmpegEvent, FfmpegExit, FfmpegSession, build_ffmpeg_command_with_bin,
+};
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 use std::time::Duration;
 
@@ -244,6 +246,204 @@ async fn test_ffmpeg_session_repeated_stop_graceful_preserves_killed_outcome() {
         .await
         .expect("second stop_graceful failed");
     assert_eq!(first_exit, second_exit);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[cfg(windows)]
+mod win32 {
+    pub const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    pub const PROCESS_TERMINATE: u32 = 0x0001;
+    pub const STILL_ACTIVE: u32 = 259;
+
+    unsafe extern "system" {
+        pub fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
+        pub fn GetExitCodeProcess(hProcess: isize, lpExitCode: *mut u32) -> i32;
+        pub fn TerminateProcess(hProcess: isize, uExitCode: u32) -> i32;
+        pub fn CloseHandle(hObject: isize) -> i32;
+    }
+}
+
+#[cfg(windows)]
+fn is_process_running(pid: u32) -> bool {
+    use win32::*;
+    unsafe {
+        let proc_handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if proc_handle == 0 {
+            return false;
+        }
+        let mut exit_code: u32 = 0;
+        let success = GetExitCodeProcess(proc_handle, &mut exit_code);
+        CloseHandle(proc_handle);
+        success != 0 && exit_code == STILL_ACTIVE
+    }
+}
+
+#[cfg(unix)]
+fn is_process_running(pid: u32) -> bool {
+    let mut status = 0;
+    let res = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+    if res > 0 {
+        return false;
+    }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+fn kill_process_by_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        use win32::*;
+        unsafe {
+            let proc_handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if proc_handle != 0 {
+                TerminateProcess(proc_handle, 1);
+                CloseHandle(proc_handle);
+            }
+        }
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+async fn assert_process_terminates(pid: u32, timeout: Duration, message: &str) {
+    let start = std::time::Instant::now();
+    let mut exited = false;
+    while start.elapsed() < timeout {
+        if !is_process_running(pid) {
+            exited = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    if !exited {
+        exited = !is_process_running(pid);
+    }
+    if !exited {
+        kill_process_by_pid(pid);
+    }
+    assert!(exited, "{message}");
+}
+
+#[tokio::test]
+async fn test_build_ffmpeg_command_kills_child_on_drop() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_ffmpeg_cmd_drop_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let out_pattern = temp_dir.join("chunk_%04d.ts");
+
+    let mut cmd = build_ffmpeg_command_with_bin(
+        mock_bin.to_str().unwrap(),
+        "http://example.com/hang.m3u8",
+        &out_pattern,
+        10,
+        None,
+    );
+
+    let child = cmd.spawn().expect("failed to spawn child command");
+    let pid = child.id().expect("child has no pid");
+    assert!(
+        is_process_running(pid),
+        "Process should be initially running"
+    );
+
+    // Drop the child process directly
+    drop(child);
+
+    assert_process_terminates(
+        pid,
+        Duration::from_millis(500),
+        &format!("Subprocess with PID {pid} was still running after dropping child from build_ffmpeg_command"),
+    )
+    .await;
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_ffmpeg_session_kills_child_process_on_drop() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_ffmpeg_session_drop_{}",
+        rand::random::<u32>()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    // Create a raw Command without setting kill_on_drop(true) to verify from_command enforces it
+    let mut cmd = tokio::process::Command::new(mock_bin);
+    cmd.arg("hang");
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let session = FfmpegSession::from_command(cmd).expect("failed to spawn session");
+    let pid = session.child_id().expect("session has no child id");
+    assert!(
+        is_process_running(pid),
+        "Process should be initially running"
+    );
+
+    // Dropping FfmpegSession must kill the underlying child process
+    drop(session);
+
+    assert_process_terminates(
+        pid,
+        Duration::from_millis(500),
+        &format!("Child process with PID {pid} was still running after dropping FfmpegSession"),
+    )
+    .await;
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_ffmpeg_session_kills_child_process_on_task_abort() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_ffmpeg_session_abort_{}",
+        rand::random::<u32>()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let out_pattern = temp_dir.join("chunk_%04d.ts");
+
+    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+    let mock_bin_str = mock_bin.to_str().unwrap().to_string();
+
+    let task = tokio::spawn(async move {
+        let mut session = FfmpegSession::spawn(
+            "http://example.com/hang.m3u8",
+            &out_pattern,
+            10,
+            None,
+            Some(&mock_bin_str),
+        )
+        .expect("failed to spawn session");
+
+        let pid = session.child_id().expect("session has no child id");
+        let _ = pid_tx.send(pid);
+
+        // Keep the session alive indefinitely until aborted
+        let _ = session.recv_event().await;
+    });
+
+    let pid = pid_rx.await.expect("failed to receive child pid");
+    assert!(
+        is_process_running(pid),
+        "Process should be initially running"
+    );
+
+    // Abort the task containing the session
+    task.abort();
+    let _ = task.await;
+
+    assert_process_terminates(
+        pid,
+        Duration::from_millis(500),
+        &format!("Child process with PID {pid} was still running after aborting task containing FfmpegSession"),
+    )
+    .await;
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

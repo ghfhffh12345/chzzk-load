@@ -27,6 +27,7 @@ pub fn build_ffmpeg_command_with_bin(
     cookie_header: Option<&str>,
 ) -> Command {
     let mut cmd = Command::new(ffmpeg_bin);
+    cmd.kill_on_drop(true);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::piped());
@@ -130,6 +131,7 @@ pub struct FfmpegSession {
 impl Drop for FfmpegSession {
     fn drop(&mut self) {
         self.reader_handle.abort();
+        let _ = self.child.start_kill();
     }
 }
 
@@ -160,6 +162,7 @@ impl FfmpegSession {
     }
 
     pub fn from_command(mut cmd: Command) -> std::io::Result<Self> {
+        cmd.kill_on_drop(true);
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take();
         let stderr = child.stderr.take();
