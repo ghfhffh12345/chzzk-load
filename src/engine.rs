@@ -101,6 +101,16 @@ impl EngineOrchestrator {
         self.registry.channel_state(channel_id)
     }
 
+    pub fn active_sessions_snapshot(&self) -> HashMap<String, ActiveSessionState> {
+        self.registry.active_sessions()
+    }
+
+    pub fn register_active_session(&self, channel_id: &str, session: ActiveSessionState) {
+        let cancel_token = self.cancel_token.child_token();
+        self.registry
+            .start_recording(channel_id, session, cancel_token);
+    }
+
     pub fn channel_names(&self) -> Arc<tokio::sync::RwLock<HashMap<String, String>>> {
         self.state.channel_names.clone()
     }
@@ -136,22 +146,27 @@ impl EngineOrchestrator {
         self.refresh_notify.notify_one();
     }
 
+    #[deprecated(note = "use is_recording or active_recording_ids instead")]
     pub fn active_recordings(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
         self.state.active_recordings.clone()
     }
 
+    #[deprecated(note = "use active_session or active_sessions_snapshot instead")]
     pub fn active_sessions(&self) -> Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>> {
         self.state.active_sessions.clone()
     }
 
+    #[deprecated(note = "use register_finished_session instead")]
     pub fn finished_sessions(&self) -> Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>> {
         self.state.finished_sessions.clone()
     }
 
+    #[deprecated(note = "use is_restricted or channel_state instead")]
     pub fn restricted_channels(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
         self.state.restricted_channels.clone()
     }
 
+    #[deprecated(note = "use channel_state instead")]
     pub fn restricted_live_ids(&self) -> Arc<tokio::sync::Mutex<HashMap<String, u64>>> {
         self.state.restricted_live_ids.clone()
     }
@@ -168,6 +183,8 @@ impl EngineOrchestrator {
 
     pub async fn register_finished_session(&self, channel_id: &str, live_id: Option<u64>) {
         self.registry.finish_recording(channel_id, live_id);
+        self.state.active_recordings.lock().await.remove(channel_id);
+        self.state.active_sessions.lock().await.remove(channel_id);
         self.state
             .register_finished_session(channel_id, live_id)
             .await;

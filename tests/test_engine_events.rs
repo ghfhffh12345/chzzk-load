@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::config::{ChannelConfig, ChzzkConfig, Settings};
-use chzzk_load::engine::{ActiveSessionState, EngineOrchestrator};
+use chzzk_load::engine::{
+    ActiveSessionState, ChannelLifecycleState, EngineOrchestrator, RestrictionReason,
+};
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::uploader::{
     BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend, UploadTask, broadcast_identifier,
@@ -182,9 +184,8 @@ async fn test_engine_orchestrator_instantiation() {
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
-    let active = orchestrator.active_recordings();
-    let active_guard = active.lock().await;
-    assert!(active_guard.is_empty());
+    assert!(orchestrator.active_recording_ids().is_empty());
+    assert!(!orchestrator.is_recording("any_channel"));
 }
 
 #[tokio::test]
@@ -381,11 +382,12 @@ async fn test_engine_orchestrator_poll_channel_live() {
     }
 
     // Channel is marked active
-    {
-        let active = orchestrator.active_recordings();
-        let guard = active.lock().await;
-        assert!(guard.contains("chan_live"));
-    }
+    assert!(orchestrator.is_recording("chan_live"));
+    assert!(
+        orchestrator
+            .active_recording_ids()
+            .contains(&"chan_live".to_string())
+    );
 
     // Poll 2: already recording, should emit ChannelUpdate but NOT spawn duplicate
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -524,16 +526,11 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
     }
     assert_eq!(recording_started_count, 1, "Session 1 should have started");
 
-    // Simulate session 1 ending: active_recordings removes channel, finished_sessions records it
+    // Simulate session 1 ending: finished_sessions records it
     // In actual app, this happens when FFmpeg exits
-    {
-        let active = orchestrator.active_recordings();
-        active.lock().await.remove("chan_race");
-        // Also register finished session directly if helper or method exists
-        orchestrator
-            .register_finished_session("chan_race", Some(21212268))
-            .await;
-    }
+    orchestrator
+        .register_finished_session("chan_race", Some(21212268))
+        .await;
 
     // --- Poll 2: API still returns OPEN with liveId 21212268 (stale CDN cache) ---
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -548,13 +545,10 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
             );
         }
     }
-    {
-        let active = orchestrator.active_recordings();
-        assert!(
-            !active.lock().await.contains("chan_race"),
-            "Channel must not be in active_recordings"
-        );
-    }
+    assert!(
+        !orchestrator.is_recording("chan_race"),
+        "Channel must not be in active_recordings"
+    );
 
     // --- Poll 3: API transitions to CLOSE (channel offline) ---
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -1300,21 +1294,15 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
     };
 
     // Initialize active recording state
-    {
-        let active = orchestrator.active_recordings();
-        active.lock().await.insert("chan_rename".to_string());
-
-        let sessions = orchestrator.active_sessions();
-        sessions.lock().await.insert(
-            "chan_rename".to_string(),
-            chzzk_load::engine::ActiveSessionState::new(
-                "2026-09-22_1000".to_string(),
-                "RenameStreamer".to_string(),
-                Some("RenameStreamer".to_string()),
-                initial_meta,
-            ),
-        );
-    }
+    orchestrator.register_active_session(
+        "chan_rename",
+        chzzk_load::engine::ActiveSessionState::new(
+            "2026-09-22_1000".to_string(),
+            "RenameStreamer".to_string(),
+            Some("RenameStreamer".to_string()),
+            initial_meta,
+        ),
+    );
 
     // Poll 1: Channel is polled with same initial title (no metadata upload expected)
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -1449,21 +1437,15 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
     );
     fs::write(session_dir.join("metadata.jsonl"), &initial_jsonl).unwrap();
 
-    {
-        let active = orchestrator.active_recordings();
-        active.lock().await.insert("chan_rename".to_string());
-
-        let sessions = orchestrator.active_sessions();
-        sessions.lock().await.insert(
-            "chan_rename".to_string(),
-            chzzk_load::engine::ActiveSessionState::new(
-                "2026-09-22_1000".to_string(),
-                "RenameStreamer".to_string(),
-                Some("RenameStreamer".to_string()),
-                initial_meta,
-            ),
-        );
-    }
+    orchestrator.register_active_session(
+        "chan_rename",
+        chzzk_load::engine::ActiveSessionState::new(
+            "2026-09-22_1000".to_string(),
+            "RenameStreamer".to_string(),
+            Some("RenameStreamer".to_string()),
+            initial_meta,
+        ),
+    );
 
     // Poll 1: Channel is polled with same initial title (no history upload)
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -1489,12 +1471,10 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
     assert!(local_lines[1].contains("\"METADATA_CHANGED\""));
     assert!(local_lines[1].contains("Updated Stream Title? Playing Now?"));
 
-    {
-        let sessions = orchestrator.active_sessions();
-        let guard = sessions.lock().await;
-        let session = guard.get("chan_rename").unwrap();
-        assert_eq!(session.metadata_history.len(), 2);
-    }
+    let session = orchestrator
+        .active_session("chan_rename")
+        .expect("Session must exist");
+    assert_eq!(session.metadata_history.len(), 2);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -1569,48 +1549,38 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
 
-    {
-        let active = orchestrator.active_recordings();
-        active.lock().await.insert("chan_pre".to_string());
+    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+        channel_name: "PreStreamer".to_string(),
+        live_title: "Early Title 1".to_string(),
+        ..Default::default()
+    };
 
-        let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
-            channel_name: "PreStreamer".to_string(),
-            live_title: "Early Title 1".to_string(),
-            ..Default::default()
-        };
-
-        let sessions = orchestrator.active_sessions();
-        sessions.lock().await.insert(
-            "chan_pre".to_string(),
-            chzzk_load::engine::ActiveSessionState::new(
-                "2026-09-22_1000".to_string(),
-                "PreStreamer".to_string(),
-                Some("PreStreamer".to_string()),
-                initial_meta,
-            ),
-        );
-    }
+    orchestrator.register_active_session(
+        "chan_pre",
+        chzzk_load::engine::ActiveSessionState::new(
+            "2026-09-22_1000".to_string(),
+            "PreStreamer".to_string(),
+            Some("PreStreamer".to_string()),
+            initial_meta,
+        ),
+    );
 
     // Poll 1: Session starts with Early Title 1 (already active, no title change)
     orchestrator.poll_channels_once(&upload_tx).await;
 
-    {
-        let sessions = orchestrator.active_sessions();
-        let guard = sessions.lock().await;
-        let session = guard.get("chan_pre").expect("Session should exist");
-        assert_eq!(session.current_title, "Early Title 1");
-    }
+    let session = orchestrator
+        .active_session("chan_pre")
+        .expect("Session should exist");
+    assert_eq!(session.current_title, "Early Title 1");
 
     // Poll 2: Title changes to Early Title 2
     orchestrator.poll_channels_once(&upload_tx).await;
 
-    {
-        let sessions = orchestrator.active_sessions();
-        let guard = sessions.lock().await;
-        let session = guard.get("chan_pre").expect("Session should exist");
-        assert_eq!(session.current_title, "Early Title 2? Pending?");
-        assert_eq!(session.metadata_history.len(), 2);
-    }
+    let session = orchestrator
+        .active_session("chan_pre")
+        .expect("Session should exist");
+    assert_eq!(session.current_title, "Early Title 2? Pending?");
+    assert_eq!(session.metadata_history.len(), 2);
 
     let mut got_title_change_log = false;
     while let Ok(ev) = event_rx.try_recv() {
@@ -1717,21 +1687,15 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
         ..Default::default()
     };
 
-    {
-        let active = orchestrator.active_recordings();
-        active.lock().await.insert("chan_trans".to_string());
-
-        let sessions = orchestrator.active_sessions();
-        sessions.lock().await.insert(
-            "chan_trans".to_string(),
-            chzzk_load::engine::ActiveSessionState::new(
-                "2026-09-30_1400".to_string(),
-                "TransStreamer".to_string(),
-                Some("TransStreamer".to_string()),
-                initial_meta,
-            ),
-        );
-    }
+    orchestrator.register_active_session(
+        "chan_trans",
+        chzzk_load::engine::ActiveSessionState::new(
+            "2026-09-30_1400".to_string(),
+            "TransStreamer".to_string(),
+            Some("TransStreamer".to_string()),
+            initial_meta,
+        ),
+    );
 
     // Poll 1: Channel polled with same initial metadata
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -1964,18 +1928,11 @@ async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupt
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
 
-    // Simulate session interrupted in the past (liveId: 888999, finished_at: 2 seconds ago > 1s cooldown)
-    {
-        let sessions = orchestrator.finished_sessions();
-        let mut finished = sessions.lock().await;
-        finished.insert(
-            "chan_interrupt".to_string(),
-            chzzk_load::engine::FinishedSession {
-                live_id: Some(888999),
-                finished_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
-            },
-        );
-    }
+    // Simulate session interrupted in the past (liveId: 888999, cooldown: 1s)
+    orchestrator
+        .register_finished_session("chan_interrupt", Some(888999))
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
 
     // Poll channels: Since cooldown (1s) has passed and stream is still OPEN, it should resume recording!
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -2808,14 +2765,8 @@ async fn test_engine_orchestrator_poll_channel_restricted_stream_sets_live_and_l
         );
         assert_eq!(title, "[19+] Midnight Broadcast");
     }
-    assert!(
-        orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_restricted")
-    );
-    assert!(orchestrator.active_recordings().lock().await.is_empty());
+    assert!(orchestrator.is_restricted("chan_restricted"));
+    assert!(orchestrator.active_recording_ids().is_empty());
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2886,31 +2837,13 @@ async fn test_engine_orchestrator_restricted_stream_recovers_to_recordable() {
 
     // Poll 1: Restricted
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(
-        orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_recover")
-    );
-    assert!(orchestrator.active_recordings().lock().await.is_empty());
+    assert!(orchestrator.is_restricted("chan_recover"));
+    assert!(orchestrator.active_recording_ids().is_empty());
 
     // Poll 2: Now recordable
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(
-        !orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_recover")
-    );
-    assert!(
-        orchestrator
-            .active_recordings()
-            .lock()
-            .await
-            .contains("chan_recover")
-    );
+    assert!(!orchestrator.is_restricted("chan_recover"));
+    assert!(orchestrator.is_recording("chan_recover"));
 
     let mut saw_started = false;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -3063,11 +2996,7 @@ fn main() {
     // --- Poll 1: Normal stream starts recording ---
     orchestrator.poll_channels_once(&upload_tx).await;
     assert!(
-        orchestrator
-            .active_recordings()
-            .lock()
-            .await
-            .contains("chan_trans"),
+        orchestrator.is_recording("chan_trans"),
         "Poll 1: Must be in active_recordings"
     );
 
@@ -3105,19 +3034,11 @@ fn main() {
     // --- Poll 2: Stream transitions to Restricted ---
     orchestrator.poll_channels_once(&upload_tx).await;
     assert!(
-        !orchestrator
-            .active_recordings()
-            .lock()
-            .await
-            .contains("chan_trans"),
+        !orchestrator.is_recording("chan_trans"),
         "Poll 2: Must be removed from active_recordings on restriction"
     );
     assert!(
-        orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_trans"),
+        orchestrator.is_restricted("chan_trans"),
         "Poll 2: Must be added to restricted_channels"
     );
 
@@ -3142,22 +3063,9 @@ fn main() {
     );
 
     // Simulate restriction latch and cooldown that occurs upon session conclusion
-    {
-        let r_ids_arc = orchestrator.restricted_live_ids();
-        let mut r_ids = r_ids_arc.lock().await;
-        r_ids.insert("chan_trans".to_string(), 888777);
-    }
-    {
-        let finished_arc = orchestrator.finished_sessions();
-        let mut finished = finished_arc.lock().await;
-        finished.insert(
-            "chan_trans".to_string(),
-            chzzk_load::engine::FinishedSession {
-                live_id: Some(888777),
-                finished_at: std::time::Instant::now(),
-            },
-        );
-    }
+    orchestrator
+        .register_finished_session("chan_trans", Some(888777))
+        .await;
 
     // Sleep a moment to ensure timestamp clock advances
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -3165,19 +3073,11 @@ fn main() {
     // --- Poll 3: Stream transitions back to Normal (same liveId) ---
     orchestrator.poll_channels_once(&upload_tx).await;
     assert!(
-        orchestrator
-            .active_recordings()
-            .lock()
-            .await
-            .contains("chan_trans"),
+        orchestrator.is_recording("chan_trans"),
         "Poll 3: Must be recording again after returning to normal"
     );
     assert!(
-        !orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_trans"),
+        !orchestrator.is_restricted("chan_trans"),
         "Poll 3: Must no longer be in restricted_channels"
     );
 
@@ -3294,33 +3194,15 @@ async fn test_engine_orchestrator_restricted_stream_resets_on_offline() {
 
     // Poll 1: Restricted A
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(
-        orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_rst_off")
-    );
+    assert!(orchestrator.is_restricted("chan_rst_off"));
 
     // Poll 2: Offline
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(
-        !orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_rst_off")
-    );
+    assert!(!orchestrator.is_restricted("chan_rst_off"));
 
     // Poll 3: Restricted B
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(
-        orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_rst_off")
-    );
+    assert!(orchestrator.is_restricted("chan_rst_off"));
 
     let mut error_log_count = 0;
     while let Ok(event) = event_rx.try_recv() {
@@ -3731,13 +3613,6 @@ fn main() {
     };
 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
-    {
-        orchestrator
-            .active_recordings()
-            .lock()
-            .await
-            .insert("chan_sports".to_string());
-    }
     orchestrator.spawn_recording_session("chan_sports".to_string(), info, upload_tx.clone());
 
     // Collect events emitted during FFmpeg 403 handling
@@ -3789,70 +3664,49 @@ fn main() {
         "FFmpeg 403 and segment skipping errors must NOT be forwarded to logs (zero log spam), got: {ffmpeg_logs:?}"
     );
 
-    // Verify channel is removed from active_recordings, and marked in restricted_channels and restricted_live_ids
+    // Verify channel is removed from recording, and marked restricted
     assert!(
-        !orchestrator
-            .active_recordings()
-            .lock()
-            .await
-            .contains("chan_sports"),
+        !orchestrator.is_recording("chan_sports"),
         "Channel must not be in active_recordings after 403 detection"
     );
     assert!(
-        orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_sports"),
+        orchestrator.is_restricted("chan_sports"),
         "Channel must be in restricted_channels after 403 detection"
     );
-    assert_eq!(
-        orchestrator
-            .restricted_live_ids()
-            .lock()
-            .await
-            .get("chan_sports")
-            .copied(),
-        Some(21326414),
-        "restricted_live_ids must track liveId 21326414"
+    assert!(
+        matches!(
+            orchestrator.channel_state("chan_sports"),
+            ChannelLifecycleState::Restricted {
+                live_id: Some(21326414),
+                reason: RestrictionReason::KeyForbidden
+            }
+        ),
+        "channel_state must track liveId 21326414 and RestrictionReason::KeyForbidden"
     );
 
     // Poll 2: Next polling cycle for the same broadcast
     orchestrator.poll_channels_once(&upload_tx).await;
     // Should NOT spawn another recording session
     assert!(
-        !orchestrator
-            .active_recordings()
-            .lock()
-            .await
-            .contains("chan_sports"),
+        !orchestrator.is_recording("chan_sports"),
         "Channel must not spawn another session for the same restricted liveId"
     );
     assert!(
-        orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_sports"),
+        orchestrator.is_restricted("chan_sports"),
         "Channel must remain in restricted_channels"
     );
 
     // Poll 3: Channel goes offline (CLOSE)
     orchestrator.poll_channels_once(&upload_tx).await;
     assert!(
-        !orchestrator
-            .restricted_channels()
-            .lock()
-            .await
-            .contains("chan_sports"),
+        !orchestrator.is_restricted("chan_sports"),
         "Channel must be cleared from restricted_channels on CLOSE"
     );
     assert!(
-        !orchestrator
-            .restricted_live_ids()
-            .lock()
-            .await
-            .contains_key("chan_sports"),
+        matches!(
+            orchestrator.channel_state("chan_sports"),
+            ChannelLifecycleState::Idle
+        ),
         "Channel must be cleared from restricted_live_ids on CLOSE"
     );
 
@@ -4124,9 +3978,9 @@ async fn test_engine_orchestrator_channel_update_uses_alias() {
     }
     assert!(received_update, "Expected ChannelUpdate event");
 
-    let sessions = orchestrator.active_sessions();
-    let guard = sessions.lock().await;
-    let session = guard.get("chan_alias").expect("Session must exist");
+    let session = orchestrator
+        .active_session("chan_alias")
+        .expect("Session must exist");
     assert_eq!(
         session.folder_name(),
         format!(
