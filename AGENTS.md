@@ -1,25 +1,22 @@
 # Developer & AI Agent Guide (`AGENTS.md`)
 
-Welcome to `chzzk-load`. This document serves as the primary technical specification, operational guide, and architectural reference for AI agents and human developers maintaining or extending this codebase.
+`chzzk-load` is a standalone Rust application with a Ratatui TUI that monitors Naver Chzzk streams, losslessly segments video via stream-copied FFmpeg (`-c copy`), concurrently archives live chat into structured JSON Lines (`chat_%04d.jsonl`), uploads completed chunks via rclone (or retains them in local-only mode), and immediately purges local files to maintain a strictly bounded disk footprint.
 
 ---
 
-## 1. Project Overview
+## 1. Key System Characteristics
 
-`chzzk-load` is a high-performance, standalone Rust application equipped with a modern Ratatui Terminal User Interface (TUI). It monitors Naver Chzzk live broadcasts, losslessly segments live video into MPEG-TS chunks via stream-copied FFmpeg (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat_%04d.jsonl`), concurrently uploads completed chunks and logs to cloud storage via rclone (or retains them locally in local-only mode), and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint.
-
-### Key System Characteristics
-- **Standalone Binary**: Compiles directly into an independent executable (`chzzk-load.exe`) runnable without Cargo or external runtime environments (FFmpeg must be installed and available on `PATH`, or configured via `CHZZK_LOAD_FFMPEG_BIN`).
-- **Zero CPU Transcoding & Clean Termination**: Uses FFmpeg stream-copy (`-c copy`) to segment raw HLS video streams into `.ts` files with near-zero CPU and RAM overhead. HTTP reconnect flags (`-reconnect_at_eof`, etc.) are intentionally omitted to guarantee instant, clean termination upon natural stream completion.
-- **Direct CDN Stream Extraction (P2P/Grid Bypass)**: Automatically decodes base64-encoded `cdn_url` query parameters embedded in Chzzk `p2pPath` and `p2pPathUrlEncoding` payloads, extracting direct single-variant CDN HLS streams (prioritizing 1080p, 720p, and top-quality video) without requiring proprietary P2P or grid software.
-- **Real-Time Live Chat Archiving**: Concurrently connects to Chzzk chat WebSockets, capturing structured JSON Lines logs segmented into time-aligned chunks (`chat_%04d.jsonl`) with message timestamps, user badges, donation details, and raw payload.
-- **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD and flash memory longevity on Single Board Computers (Raspberry Pi/ARM64) using an in-memory buffer (`ChatWriter`) with direct byte-buffer serialization, dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval), and lazy chunk creation that skips empty intervals.
-- **Strictly Bounded Disk Footprint**: Only 1–2 video segments and at most 1 chat segment reside on disk simultaneously per active stream. Chunks are deleted immediately upon receiving an HTTP 200/201 upload confirmation.
-- **N+1 Segment Boundary Safety**: Chunk $N$ is only sealed and queued for upload after chunk $N+1$ exists on disk with file size $> 0$ bytes (or upon final stream termination), guaranteeing no partial chunks are uploaded.
-- **Stream Metadata Event Tracking (`metadata.jsonl`)**: Tracks all broadcast state transitions (title, category, tags, access tier, watch parties, policies, chat rules) with millisecond-accurate video synchronization (`stream_offset_ms`), written to `metadata.jsonl` locally and synchronized with cloud storage via `backend.upload_text` in real time.
-- **Universal Cloud Sync via Rclone**: Interfaces with `rclone` (supporting 70+ storage providers including Google Drive, OneDrive, S3, WebDAV, SFTP, etc.) with real-time transfer progress parsing, subprocess management, and clean local-only fallback when unconfigured.
-- **Anti-Race Cache Deduplication**: Protects against Chzzk CDN cache TTL delays (10–30s) by tracking finished broadcast `live_id`s and enforcing a post-recording cooldown to prevent duplicate sessions.
-- **Event-Driven Zero-Alloc TUI**: Employs `crossterm::event::EventStream` and event-driven redraw scheduling with zero-allocation borrowed log rendering and zero CPU spinning.
+- **Standalone Binary**: Compiles to independent executable (`chzzk-load.exe`); FFmpeg resolved from `PATH` or `CHZZK_LOAD_FFMPEG_BIN`.
+- **Zero Transcoding & Clean EOF Exit**: FFmpeg stream-copy (`-c copy`) with piped stdin/stderr. HTTP reconnect flags are intentionally omitted so natural broadcast end causes instant manifest EOF exit.
+- **P2P/Grid Bypass**: Decodes base64 `cdn_url` in `p2pPath`/`p2pPathUrlEncoding` for direct CDN HLS (1080p, 720p).
+- **Chat Archiving**: Concurrently connects to Chzzk WebSockets, capturing structured JSON Lines (`chat_%04d.jsonl`) aligned with video chunk intervals.
+- **Flash-Friendly I/O (SBC Optimized)**: In-memory byte-buffer serialization in `ChatWriter` with dual-trigger flush (500 msgs / 64 KB or periodic timer); skips empty intervals to preserve flash longevity.
+- **Strictly Bounded Disk Footprint**: 1–2 video segments and at most 1 chat segment on disk per active stream; chunks deleted immediately upon confirmed upload.
+- **N+1 Segment Boundary Safety**: Chunk $N$ sealed only after chunk $N+1$ exists (>0 bytes) or child process exits; parsed via numeric index.
+- **Metadata Event Tracking**: State transitions (title, category, tags, rules) tracked in `metadata.jsonl` with millisecond `stream_offset_ms` and synced via `backend.upload_text` (`rclone rcat`).
+- **Universal Cloud & Local Sync**: Rclone integration (70+ providers, progress parsing, non-blocking check) or local-only mode (`remote_path = ""`).
+- **Anti-Race Cooldown**: Deduplicates CDN cache TTL (10–30s) using finished `live_id`s and post-recording cooldown.
+- **Event-Driven TUI**: Ratatui + `crossterm::event::EventStream`; zero-alloc log slicing, no CPU spinning, lockstep view scrolling.
 
 ---
 
@@ -27,257 +24,109 @@ Welcome to `chzzk-load`. This document serves as the primary technical specifica
 
 ```
 chzzk-load/
-├── .github/
-│   └── workflows/
-│       ├── ci.yml            # CI validation (fmt, clippy, multi-OS tests with setup-ffmpeg, npm tests)
-│       └── release.yml       # Release pipeline (multi-platform builds, GitHub Release, npm publish)
-├── Cargo.toml                # Dependencies and binary target definitions
-├── README.md                 # Primary documentation (English)
-├── README.ko.md              # Documentation (Korean)
-├── settings.toml             # Dedicated configuration file (portable)
-├── plans/                    # Architecture blueprints, readiness analyses, and milestone plans
-├── npm/
-│   └── chzzk-load/           # Root npm CLI wrapper package
-│       ├── bin/
-│       │   └── chzzk-load.js # Platform resolution & execution launcher script
-│       ├── package.json      # Wrapper package definition with optionalDependencies
-│       └── README.md
-├── scripts/
-│   ├── prepare-npm.js        # Platform package generator & binary bundler (--resolve-release)
-│   └── test-npm-packages.js  # Automated mock packaging & execution test suite
+├── .github/workflows/ # ci.yml (fmt/clippy/matrix tests/npm), release.yml (cross-build/gh release/npm)
+├── npm/chzzk-load/    # Root wrapper CLI package & launcher (bin/chzzk-load.js)
+├── scripts/           # prepare-npm.js (--resolve-release), test-npm-packages.js
 ├── src/
-│   ├── main.rs               # CLI entrypoint, signals, panic hooks, EventStream TUI render loop
-│   ├── lib.rs                # Module root and library exports
-│   ├── app_path.rs           # Portable executable-relative path resolution
-│   ├── config.rs             # Settings structs, defaults, and serde loaders (upload_concurrency, record_chat)
-│   ├── chzzk.rs              # Chzzk API module root & re-exports
-│   ├── chzzk/                # Chzzk API integration
-│   │   ├── client.rs         # ChzzkClient: live detail polling, P2P/CDN HLS URL extraction, chat token API
-│   │   ├── chat.rs           # ChzzkChatClient: WebSocket handshake (cmd: 100), ping-pong, auto-reconnect backoff
-│   │   ├── models.rs         # Data structures: LiveDetailContent, LiveStreamInfo, etc.
-│   │   └── models_chat.rs    # Chat models: ChatAccessTokenResponse, RecordedChatMessage, WebSocket envelopes
-│   ├── recorder.rs           # Recorder module root & re-exports
-│   ├── recorder/             # FFmpeg process management, watcher & chat writer
-│   │   ├── ffmpeg.rs         # Command builder (-extension_picky 0, clean EOF termination, CHZZK_LOAD_FFMPEG_BIN)
-│   │   ├── watcher.rs        # SegmentWatcher, N+1 chunk sealing logic, zero-alloc extension check
-│   │   └── chat_writer.rs    # ChatWriter: byte-buffer direct serializer with dual-trigger flush
-│   ├── uploader.rs           # Upload module root & re-exports (UploadTask, UploadWorker, UploadBackend, RcloneBackend, MockUploadBackend)
-│   ├── uploader/             # Upload engine & backend implementations
-│   │   ├── backend.rs        # UploadBackend trait, MockUploadBackend, UploadProgressCallback
-│   │   ├── rclone.rs         # RcloneBackend: rclone subprocess execution, rcat text upload, progress parsing, check_connection
-│   │   └── worker.rs         # UploadWorker: per-channel FIFO serialization, fair cross-channel concurrency
-│   ├── engine.rs             # EngineOrchestrator root & re-exports (ActiveSessionState, FinishedSession, EngineState)
-│   ├── engine/               # Orchestration engine submodules
-│   │   ├── cleanup.rs        # Session folder cleanup utilities (cleanup_empty_session_dirs)
-│   │   ├── dispatcher.rs     # Chunk sealing & upload dispatching (process_sealed_chunk, seal_and_enqueue_chunks)
-│   │   ├── recording.rs      # RecordingSession lifecycle runner, ffmpeg stderr monitor, watcher loop
-│   │   ├── session.rs        # ActiveSessionState & FinishedSession state management & metadata tracking
-│   │   └── state.rs          # EngineState synchronized shared state container
-│   ├── tui.rs                # Ratatui Dashboard module root & re-exports
-│   └── tui/                  # Ratatui Dashboard
-│       ├── app.rs            # App state, key event handling, channel list state, chat_count telemetry
-│       ├── console.rs        # Console codepage guard
-│       ├── event.rs          # Central AppEvent enum (ChatStats, LogEntry::chat)
-│       ├── theme.rs          # Color theme definitions
-│       └── ui.rs             # draw_ui: Layout constraints, strictly bounded zero-alloc logs view, chat badges
-└── tests/                    # Integration and smoke tests
-    ├── test_app_path.rs
-    ├── test_chat_client.rs
-    ├── test_chat_writer.rs
-    ├── test_chzzk_client.rs
-    ├── test_cli_smoke.rs
-    ├── test_config.rs
-    ├── test_engine_chat.rs
-    ├── test_engine_events.rs
-    ├── test_rclone_backend.rs
-    ├── test_recorder_watcher.rs
-    ├── test_tui_console.rs
-    └── test_tui_state.rs
+│   ├── main.rs, lib.rs, app_path.rs, config.rs
+│   ├── chzzk/         # client.rs (API/CDN extract), chat.rs (WebSocket), models.rs, models_chat.rs
+│   ├── recorder/      # ffmpeg.rs (process/flags), watcher.rs (numeric N+1 sealing), chat_writer.rs (batched I/O)
+│   ├── uploader/      # backend.rs (trait/mock), rclone.rs (CLI/rcat), worker.rs (non-blocking primary + DLQ)
+│   ├── engine/        # session.rs, dispatcher.rs, recording.rs, state.rs, cleanup.rs
+│   └── tui/           # app.rs, ui.rs (layout/zero-alloc logs), event.rs, theme.rs, console.rs
+└── tests/             # Integration tests (chat, recorder, rclone, engine events, config, TUI)
 ```
 
 ---
 
 ## 3. Core Architecture & Lifecycle
 
-### 3.1. Stream Polling & Session Orchestration (`src/engine.rs`)
-1. `EngineOrchestrator::run` executes a continuous loop polling monitored channels every `poll_interval_seconds`.
-2. When a channel returns `status == "OPEN"`:
-   - Evaluates `is_recording` against `active_recordings`.
-   - Checks `finished_sessions` against `info.live_id` and `stream_cooldown_seconds`.
-   - If the broadcast has the same `live_id` as the session that just finished, or is within the cooldown window without a distinct `live_id`, spawning is blocked to avoid spawning redundant sessions caused by CDN caching.
-   - If valid and unrecorded, registers the channel into `active_recordings` and spawns `spawn_recording_session`.
-3. When the channel returns `status == "CLOSE"`:
-   - Clears any `finished_sessions` tracking entry, resetting the channel for future broadcasts.
-4. **Non-Blocking Mutex Scoping & Upload Dispatch**:
-   - The orchestrator minimizes mutex hold times on `active_sessions` and `active_recordings`, releasing locks before issuing network requests or upload operations.
-   - When a cloud upload backend is configured, sealed chunks are dispatched to the upload queue and streamed asynchronously. When running in local-only mode (`remote_path: ""`), sealed chunks remain preserved in the local session directory.
+### 3.1. Stream Polling & Orchestration (`src/engine/`)
+- `EngineOrchestrator::run` continuously polls monitored channels every `poll_interval_seconds`.
+- On `status == "OPEN"`: Checks `active_recordings` and `finished_sessions` (`live_id` and `stream_cooldown_seconds`). If valid, registers channel and spawns `RecordingSession`.
+- On `status == "CLOSE"`: Resets finished session tracking entry for future broadcasts.
+- Releases mutex locks before issuing network requests, uploads, or child process management.
 
-### 3.2. FFmpeg Recording & N+1 Watcher (`src/recorder/`)
-- `build_ffmpeg_command` spawns an independent FFmpeg child process with:
-  - Binary resolution: checks `CHZZK_LOAD_FFMPEG_BIN` environment variable before defaulting to `"ffmpeg"`.
-  - `-extension_picky 0`: Required for modern FFmpeg builds to demux Naver CDN `.m4v` video segments containing query tokens.
-  - `-c copy`: Zero re-encoding overhead.
-  - `stdin(Stdio::piped())`: Enables graceful termination via `"q\n"`.
-  - `stdout(Stdio::null())` & `stderr(Stdio::piped())`: Prevents raw child process output from leaking into the terminal and corrupting the TUI raw mode buffer. Stderr lines are asynchronously drained into `AppEvent::Log("[FFMPEG] ...")`.
-  - **Clean Termination on Manifest EOF**: HTTP reconnect flags (`-reconnect`, `-reconnect_at_eof`, `-reconnect_streamed`, `-reconnect_delay_max`) are intentionally omitted. When a live broadcast ends naturally, the HLS playlist reaches EOF and FFmpeg exits immediately without entering infinite reconnect retry loops.
-- `SegmentWatcher` polls the session folder every second:
-  - Uses zero-allocation ASCII suffix matching (`s[s.len() - 3..].eq_ignore_ascii_case(".ts")`) to scan `.ts` files sorted lexicographically (`chunk_0000.ts`, `chunk_0001.ts`, ...).
-  - Emits chunk $N$ as sealed only when chunk $N+1$ exists with size $> 0$.
-  - When the child process exits (`is_stream_finished = true`), seals the final lingering chunk.
+### 3.2. FFmpeg Recording & Watcher (`src/recorder/`)
+- `build_ffmpeg_command` spawns FFmpeg with `-extension_picky 0`, `-c copy`, `stdin(Stdio::piped())`, `stdout(Stdio::null())`, and `stderr(Stdio::piped())` (drained to `AppEvent::Log`). No reconnect flags (instant EOF exit).
+- `SegmentWatcher` polls every 1s, using zero-allocation `.ts` checks and numeric index parsing (`chunk_%04d.ts`) to seal chunk $N$ when $N+1$ exists (>0 bytes). Seals final chunk when stream ends.
 
-### 3.3. Real-Time Chat Recording & Flash Longevity Buffer (`src/chzzk/chat.rs` & `src/recorder/chat_writer.rs`)
-- When `settings.general.record_chat` is enabled and `info.chat_channel_id` is present:
-  1. Requests chat access token from `https://comm-api.game.naver.com/nng_main/v1/chats/access-token`.
-  2. Spawns `ChzzkChatClient` connecting via WebSocket to `wss://kr-ss{n}.chat.naver.com/chat`.
-  3. Sends `cmd: 100` (`CONNECT`) handshake with 10-second read timeout. Automatically handles server ping (`cmd: 0` $\to$ pong `cmd: 10000`) using pre-allocated static payloads (`PING_PAYLOAD`, `PONG_PAYLOAD`) and 20-second client heartbeat pings.
-  4. Parses chat messages (`cmd: 93101`, `93102`) using zero-clone owned deserialization (`parse_chat_packet_owned`), extracting timestamp, user info, message text, donations (cheese), and raw payload.
-  5. Telemetry counts are relayed non-blockingly (`try_send`) to `AppEvent::ChatStats`.
-  6. **Flash Longevity Buffer & Progressive Chunking (`ChatWriter`)**: Messages are serialized directly into a pre-allocated byte buffer (`Vec<u8>`) using `serde_json::to_writer`, avoiding intermediate string allocations. Buffered data is written to `<session_dir>/chat_%04d.jsonl` using dual-trigger flushing (500 messages or 64 KB capacity, or periodic timer interval `chat_flush_interval_seconds`). Chunks are rotated on time boundaries aligned with `chunk_duration_seconds`. Silent intervals with zero messages are skipped without creating empty files, preserving monotonic numbering.
-  7. **Real-Time Chunk Forwarding & Pipeline Integration**: Sealed chat chunks are emitted across an `mpsc::channel<PathBuf>` to `EngineOrchestrator`, which wraps them into `UploadTask` and queues them for asynchronous upload and post-upload deletion via the upload worker, maintaining a bounded disk footprint.
-  8. On session cancellation or stream termination, any active chat chunk is sealed, flushed, and uploaded, guaranteeing zero lost messages.
+### 3.3. Live Chat Recording (`src/chzzk/chat.rs`, `src/recorder/chat_writer.rs`)
+- Fetches chat token from `https://comm-api.game.naver.com/nng_main/v1/chats/access-token`, connects to `wss://kr-ss{n}.chat.naver.com/chat`.
+- Sends handshake (`cmd: 100`), auto-responds to server ping (`cmd: 0` $\to$ pong `cmd: 10000`), and sends 20s heartbeat. Deserializes messages (`cmd: 93101`, `93102`).
+- `ChatWriter` serializes directly to `Vec<u8>` without intermediate strings; flushes on 500 msgs / 64 KB / timer interval. Rotates chunks aligned with `chunk_duration_seconds` and forwards sealed paths via `mpsc` to upload queue.
 
-### 3.4. Cloud Storage Upload Pipeline & Stream Metadata Sync (`src/uploader/`)
-- Sealed chunks are sent over an `mpsc::Sender<UploadTask>` channel to `spawn_upload_consumer_with_concurrency`.
-- **Per-Channel Serialization & Cross-Channel Concurrency**: To prevent uplink bandwidth contention, disk accumulation, and cloud storage segment ordering disruption, chunks belonging to the same channel are strictly serialized in FIFO order. Independent channels upload concurrently up to `upload_concurrency` (default: 3) using fair round-robin scheduling.
-- **Pluggable Upload Backend (`UploadBackend` Trait)**: Abstract interface defining `upload_file(&self, source_path, dest_remote, progress_tx)` and `upload_text(&self, content, dest_remote)`. Decouples engine orchestration from cloud storage mechanics, enabling unit testing via `MockUploadBackend`.
-- **Rclone Subprocess Integration (`RcloneBackend`)**: Runs `rclone copyto <local_file> <remote_path>/<session>/<filename> --progress` as an asynchronous child process (`tokio::process::Command`). Dynamically parses stdout progress strings (`Transferred: ... % / ... ETA ...`) and forwards updates to `AppEvent::UploadProgress`. Binary resolution respects `CHZZK_LOAD_RCLONE_BIN` before `settings.rclone.rclone_bin` (defaulting to `"rclone"`).
-- **Asynchronous Remote Verification & Bypass**: Verifies `remote_path` connectivity via `backend.check_connection()` asynchronously in a background task with a 10-second timeout, ensuring instant zero-latency TUI startup. Can be completely bypassed via `--skip-rclone-check` CLI flag or `skip_connection_check = true` in `[rclone]`.
-- **Text Streaming via `rcat`**: Broadcast metadata updates (`metadata.jsonl`) are uploaded directly using `rclone rcat <dest_remote>`, synchronizing full JSON Lines event logs in real time.
-- **Immediate Post-Upload Deletion**: On exit status 0 from rclone, `tokio::fs::remove_file(&chunk_path)` executes immediately to preserve the bounded disk footprint.
-- **Local-Only Recording Mode**: When `remote_path` is empty (`""`), the engine skips cloud uploading, retaining all `.ts` segments and `chat_%04d.jsonl` chunks in the local recordings folder.
+### 3.4. Upload Pipeline (`src/uploader/`)
+- `UploadWorker` processes chunks via a non-blocking primary queue with cross-channel concurrency (default: 3).
+- On upload failure, chunks immediately transfer to a Dead-Letter Queue (DLQ) with exponential backoff (2s, 4s, 8s, max 3 retries); subsequent chunks advance without head-of-line blocking.
+- DLQ tasks are capped (20/channel in RAM) and evict on exhaustion (preserved on disk for startup reconciliation).
+- `RcloneBackend` executes `rclone copyto ... --progress`, streams `metadata.jsonl` via `rcat`, and verifies connection (10s timeout, bypassable).
+- Deletes local chunk immediately on exit status 0. If `remote_path` is empty (`""`), uploads are skipped and files are retained locally.
 
 ### 3.5. Ratatui TUI Dashboard (`src/tui/`)
-- **Event-Driven Render Loop**: The main TUI event loop uses `crossterm::event::EventStream` and `tokio::select!` with biased selection. Rendering only executes when state actually changes (`needs_redraw = true`) or upon periodic 250ms animation ticks, eliminating idle CPU consumption.
-- Uses strict vertical layout constraints:
-  - Header & Divider: `Constraint::Length(1)` each
-  - Body: `Constraint::Length(10)` (or `Constraint::Fill(1)` when logs are hidden via 'l' key; horizontal split: Monitored Channels on left, Cloud Upload progress/status on right)
-  - Logs Title Divider: `Constraint::Length(1)` & Logs Content: `Constraint::Fill(1)` (omitted when logs are toggled off via 'l' key)
-  - Footer Divider & Keybind Footer: `Constraint::Length(1)` each
-- **Channel Row Telemetry**: Active recordings display segment count, elapsed duration, and live chat message count (`CHAT: {count}`).
-- **Zero-Alloc Log Slicing & Clipping**: Logs are sliced directly from borrowed string lines using `.flat_map(...)` without intermediate `Vec` allocations, bounded to exactly `inner_height = log_area.height`. Lines exceeding `inner_width` are horizontally truncated with `…` to guarantee zero word-wrap overflow. `[CHAT]` logs are rendered with a distinct cyan badge.
-- **Zero-Alloc Dividers**: Horizontal dividers are generated via zero-allocation slicing of a static `HORIZONTAL_RULE` string.
-- **Log Scrolling**: Tail auto-scroll is maintained by default (`log_scroll = 0`). Users can navigate history using `PageUp`, `PageDown`, `Home`, and `End`.
-- **View Scrolling**: Channels and Cloud Upload scroll in synchronized lockstep using `Up`, `Down`, `k`, and `j`.
+- Event-driven render loop via `crossterm::event::EventStream` and biased `tokio::select!` (renders on state change or 250ms animation tick).
+- Fixed vertical layout: Header (1), Divider (1), Body (10 or Fill(1) when logs hidden), Logs Divider (1), Logs (Fill(1)), Footer Divider (1), Keybinds (1).
+- Logs sliced directly from borrowed lines up to viewport height; lines exceeding width truncated with `…`. Dividers use zero-alloc static rule slicing.
+- Keybinds: View scroll (`Up`/`Down`/`j`/`k`), log scroll (`PageUp`/`PageDown`/`Home`/`End`), log toggle (`l`), quit (`q`/`Ctrl+C`).
 
 ---
 
-## 4. CI/CD & Multi-Platform Distribution Architecture
+## 4. Multi-Platform CI/CD & Distribution
 
-### 4.1. CI/CD Workflow Architecture (`.github/workflows/`)
-The repository uses GitHub Actions for continuous integration and automated multi-platform release publishing:
-
-1. **Continuous Integration (`.github/workflows/ci.yml`)**:
-   - Triggers automatically on pushes and pull requests targeting the `main` branch.
-   - **`lint` job**: Runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on `ubuntu-latest`.
-   - **`test` job**: Matrix build running `cargo test --all-targets` across `ubuntu-latest` and `windows-latest`. Installs FFmpeg via apt (`ubuntu-latest`) and `FedericoCarboni/setup-ffmpeg@v3` (`windows-latest`) to guarantee reliable FFmpeg availability across all runner OSes.
-   - **`npm-test` job**: Sets up Node.js 20 on `ubuntu-latest` and executes `node scripts/test-npm-packages.js` to verify npm package generation, platform resolution, and launcher mechanics.
-
-2. **Automated Multi-Platform Release Pipeline (`.github/workflows/release.yml`)**:
-   - Triggers on tag pushes matching `v*` (e.g., `v0.1.0` or `v0.2.0-beta.1`) or manual trigger via `workflow_dispatch`.
-   - **`get-version`**: Resolves semver version from git tag or falls back to `Cargo.toml`. Automatically detects pre-releases (via SemVer hyphen e.g. `0.2.0-beta.1` or workflow inputs) and determines the npm distribution tag (e.g. `beta`, `rc`, `alpha`, or fallback to `next`, defaulting to `latest` for stable releases).
-   - **`build-linux`**: Runs on `ubuntu-latest`. Uses Zig and `cargo-zigbuild` to compile static musl binaries for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`.
-   - **`build-macos`**: Runs on `macos-14` (Apple Silicon runner). Compiles native binaries for `x86_64-apple-darwin` and `aarch64-apple-darwin`.
-   - **`build-windows`**: Runs on `windows-latest`. Compiles native 64-bit binary for `x86_64-pc-windows-msvc`.
-   - **`github-release`**: Consolidates SHA256 checksums into `SHA256SUMS.txt`, collects archives (`.zip` for Windows, `.tar.gz` for Linux and macOS), and publishes a GitHub Release using `softprops/action-gh-release@v2`. Correctly marks pre-releases (`prerelease: true`, `make_latest: false`).
-   - **`publish-npm`**: Downloads raw binaries from all platform builds, executes `node scripts/prepare-npm.js` to generate platform packages and configure `optionalDependencies`, and publishes all platform packages and the root wrapper package to the npm registry with provenance under the resolved distribution tag (`--tag <dist-tag>`).
-
-### 4.2. Linux Cross-Compilation with `cargo-zigbuild`
-Instead of heavy Docker containers or slow QEMU system emulation for building ARM64 Linux binaries, the CI pipeline uses `cargo-zigbuild`:
-- **Lightweight Zig Toolchain**: `mlugg/setup-zig` installs Zig 0.13.0, which acts as a zero-dependency C/C++ cross-compiler and linker.
-- **Static Musl Binaries**: Binaries are compiled against `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, producing fully self-contained static executables with zero glibc runtime dependencies. This guarantees maximum portability across Linux distributions (Alpine, Ubuntu, Debian, CentOS, etc.) and ARM architectures (e.g., Raspberry Pi, AWS Graviton).
-- **Fast Build Times**: Eliminates Docker container startup latency and QEMU CPU emulation overhead.
-
-### 4.3. npm Multi-Package Distribution Structure
-`chzzk-load` is distributed on npm using the modern multi-package pattern (similar to `esbuild` and `@swc/core`):
-- **Root Wrapper Package (`npm/chzzk-load`)**:
-  - Exposes the CLI executable via `bin: { "chzzk-load": "bin/chzzk-load.js" }`.
-  - Declares 5 platform-specific binary packages as `optionalDependencies`:
-    - `chzzk-load-windows-x64` (`x86_64-pc-windows-msvc`)
-    - `chzzk-load-linux-x64` (`x86_64-unknown-linux-musl`)
-    - `chzzk-load-linux-arm64` (`aarch64-unknown-linux-musl`)
-    - `chzzk-load-darwin-x64` (`x86_64-apple-darwin`)
-    - `chzzk-load-darwin-arm64` (`aarch64-apple-darwin`)
-  - When a user runs `npx chzzk-load` or `npm install -g chzzk-load`, the npm package manager automatically downloads only the platform package matching their OS and CPU architecture.
-- **Binary Launcher (`npm/chzzk-load/bin/chzzk-load.js`)**:
-  - Inspects `process.platform` and `process.arch` to determine the target package name.
-  - Resolves the binary path from `node_modules`, checking environment variable override `CHZZK_LOAD_BIN`, root `bin/` fallback, and system `PATH`.
-  - Ensures execute permissions (`chmod 0o755`) on POSIX environments.
-  - Spawns the native binary with inherited `stdio`, passing through CLI arguments, forwarding exit codes, and relaying termination signals (`SIGINT`, `SIGTERM`, `SIGHUP`).
-- **Preparation Script (`scripts/prepare-npm.js`)**:
-  - Dynamically constructs platform packages under `npm/platforms/` with appropriate `os`, `cpu`, and `libc` fields in their `package.json`.
-  - Synchronizes versions across root and platform packages from CLI argument or `Cargo.toml`.
-  - Provides `--resolve-release` CLI option to determine tags, version, prerelease flags, and npm dist-tags for GitHub Actions workflows.
-  - Copies native binary files into their respective platform packages.
-- **npm OIDC Trusted Publisher Authentication**:
-  - Uses GitHub Actions OpenID Connect (OIDC) Trusted Publisher authentication. Long-lived `NPM_TOKEN` secrets are completely eliminated.
-  - To configure: In package settings on [npmjs.com](https://www.npmjs.com) under **Trusted Publishers**, register GitHub Actions with Repository: `ghfhffh12345/chzzk-load` and Workflow: `release.yml`.
-  - The workflow automatically requests short-lived cryptographic tokens from the npm registry and publishes packages with verifiable supply-chain `--provenance`.
+- **CI (`.github/workflows/ci.yml`)**: Runs fmt, clippy, multi-OS tests (`ubuntu-latest`, `windows-latest` with setup-ffmpeg), and npm test suite.
+- **Release (`.github/workflows/release.yml`)**: Triggers on `v*` tags/dispatch; resolves version, detects pre-releases, and compiles across platforms:
+  - Linux: `cargo-zigbuild` on Ubuntu creates static musl binaries (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`).
+  - macOS: `x86_64-apple-darwin` and `aarch64-apple-darwin` on `macos-14`.
+  - Windows: `x86_64-pc-windows-msvc` on `windows-latest`.
+  - Publishes GitHub release with SHA256 checksums and publishes npm packages with provenance under resolved dist-tag.
+- **npm Multi-Package Architecture**: Root `chzzk-load` has optionalDependencies on 5 platform packages (`windows-x64`, `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`). Launcher `bin/chzzk-load.js` detects platform/arch or `CHZZK_LOAD_BIN`, ensures chmod permissions, and relays signals/stdio.
+- **OIDC Publishing**: Uses GitHub Actions OIDC Trusted Publisher authentication on npmjs.com (no long-lived `NPM_TOKEN`).
 
 ---
 
 ## 5. Development & Testing Workflow
 
 > [!IMPORTANT]
-> **Implementation Gate**: AI agents must NEVER begin modifying or creating code/test files without explicit user authorization to proceed. Always complete design alignment and obtain direct approval before touching files.
+> **Implementation Gate**: AI agents must NEVER modify or create code/test files without explicit user approval. Always complete design alignment and obtain direct confirmation first.
 
-Always adhere to **Test-Driven Development (TDD)** when modifying functionality or fixing bugs:
-1. Write a focused reproduction test in the `tests/` directory.
-2. Verify the test fails (`cargo test --test <name> <filter>`).
-3. Implement the minimal fix or feature code.
-4. Verify the test passes, and ensure the full test suite passes.
+Adhere to **Test-Driven Development (TDD)**:
+1. Write focused reproduction test in `tests/`.
+2. Verify test failure (`cargo test --test <name> <filter>`).
+3. Implement minimal fix or feature code.
+4. Verify tests pass and full test suite succeeds.
 
-### Build and Test Commands
 ```bash
-# Check code without building
-cargo check --all-targets
+# Check, lint, and format
+cargo check --all-targets && cargo clippy --all-targets -- -D warnings && cargo fmt --check
 
-# Run the full test suite
+# Test suites
 cargo test
-
-# Run specific test suites
-cargo test --test test_engine_chat
-cargo test --test test_chat_client
-cargo test --test test_chat_writer
-cargo test --test test_rclone_backend
-cargo test --test test_engine_events
-cargo test --test test_engine_events test_engine_orchestrator_prevents_duplicate_session_race_condition
-
-# Run linter (must pass with 0 warnings)
-cargo clippy --all-targets -- -D warnings
-
-# Format code
-cargo fmt --check
-
-# Run npm package packaging and launcher test suite
+cargo test --test test_engine_events <filter>
 node scripts/test-npm-packages.js
 
-# Compile optimized standalone binary
+# Build release binary
 cargo build --release
-
-# Smoke test release binary
-target/release/chzzk-load.exe --help
 ```
 
 ---
 
 ## 6. Architectural Invariants for Agents
 
-When implementing changes, AI agents must strictly preserve the following rules:
-
-1. **No Direct Terminal Pollution**: Never use `println!`, `eprintln!`, or unredirected subprocess outputs while the TUI is active. All diagnostic output must be routed through `AppEvent::Log(...)`.
-2. **Terminal Panic Recovery**: Maintain the panic hook in `src/main.rs` that calls `disable_raw_mode()` and `execute!(stdout, LeaveAlternateScreen, Show)` before invoking the default panic handler.
-3. **MPEG-TS Stream Copy**: Never introduce re-encoding flags (`-c:v libx264`, etc.) into `build_ffmpeg_command`. Recording must remain strictly lossless stream-copy (`-c copy`).
-4. **Resilient HTTP & WebSocket Mocking**: In unit tests, avoid binding fixed ports or connecting to external network endpoints. Use `tiny_http::Server::http("127.0.0.1:0")` or ephemeral `tokio::net::TcpListener::bind("127.0.0.1:0")` to allocate dynamic local test ports.
-5. **Safe File Operations**: All tests performing filesystem mutations must operate strictly within `std::env::temp_dir()`.
-6. **Path Portability & Resolution**: Always resolve relative file and directory paths using `app_path::resolve_path(...)`. Resolution prioritizes the current working directory (`CWD`), falls back to the executable directory when present in portable non-npm deployments, and avoids writing/resolving configuration inside `node_modules` when installed globally via npm.
-7. **Flash Memory & Disk Wear Longevity**: Chat messages MUST NOT be synchronously flushed or fsynced to disk per message. All streaming chat writes must pass through `ChatWriter` with batching thresholds (500 msgs or 64 KB capacity, or periodic timer interval). Chat is progressively rotated into `chat_%04d.jsonl` files and immediately uploaded and deleted upon segment sealing, ensuring strictly bounded local storage.
-8. **Non-Blocking Telemetry Backpressure**: Never block internal WebSocket reading or recording loops on TUI event channels (`try_send` should always be used for telemetry and stats reporting).
-9. **FFmpeg Binary Resolution**: `build_ffmpeg_command` must respect the `CHZZK_LOAD_FFMPEG_BIN` environment variable override before defaulting to `"ffmpeg"`.
-10. **Clean HLS Stream Termination (No Reconnect Flags)**: Never add `-reconnect` or `-reconnect_at_eof` flags to `build_ffmpeg_command`. Live HLS streams must terminate cleanly and promptly upon manifest EOF when the broadcast ends.
-11. **Non-Blocking Mutex Scoping in Engine**: Never hold the `active_sessions` or `active_recordings` mutex across asynchronous network I/O, backend uploads, or rclone operations.
-12. **Rclone Binary Resolution**: `RcloneBackend` must respect the `CHZZK_LOAD_RCLONE_BIN` environment variable override before falling back to `settings.rclone.rclone_bin` and `"rclone"` on `PATH`.
-13. **TOML Configuration & Channel Aliasing**: Configuration must strictly adhere to `settings.toml` parsed with `toml = "1.1"`. Legacy `settings.json` is completely deprecated and unsupported. Channel configuration supports both shorthand string arrays and `[[channels]]` tables with `id` and optional `alias`. Both local session directories and cloud storage folders strictly follow `[{timestamp}] [{alias}] {streamer_name} - {title}` (or `[{timestamp}] {streamer_name} - {title}` if no alias is configured). All folder and filename components are conservatively sanitized against `\`, `/`, `:`, `*`, `?`, `"`, `<`, `>`, `|`, control characters, and trailing spaces/dots consistently across local and cloud environments. The TUI displays `alias` (or streamer name fallback) consistently without online/offline state flipping.
-14. **Stream Metadata Tracking & Monotonic Synchronization**: Stream metadata changes must be tracked in `metadata.jsonl` using JSON Lines format with monotonic `stream_offset_ms` calculated from `session_start_instant.elapsed().as_millis()`. High-frequency telemetry (e.g. `concurrent_user_count`, `accumulate_count`) is excluded from triggering `METADATA_CHANGED` events to avoid write churn. `metadata.jsonl` is dual-written locally and synchronized with remote storage in real-time.
-15. **Explicit User Authorization Before Implementation**: AI agents must NEVER jump straight into code modifications, file creation, or implementation tasks following design interviews, planning sessions, or artifact generation without explicit user authorization (e.g., the user explicitly saying "proceed" or directing implementation to begin). Always present the plan, findings, or proposals and pause for explicit confirmation before touching any code or files in the repository.
-16. **Plans and Architecture Specifications Location**: All design specifications, readiness analyses, and implementation plans must be saved directly into the `plans/` directory at the repository root using the date-prefixed naming convention (`plans/YYYY-MM-DD-<topic>.md`). Do not scatter plan documents in temporary directories or ad-hoc paths.
-
+1. **No Direct Terminal Pollution**: Never use `println!`, `eprintln!`, or unredirected subprocess outputs while TUI is active. Route all logs to `AppEvent::Log(...)`.
+2. **Terminal Panic Recovery**: Maintain panic hook restoring raw mode and leaving alternate screen before default panic handler.
+3. **MPEG-TS Stream Copy**: Strictly `-c copy`; never introduce re-encoding flags (`-c:v libx264`). Recording must remain strictly lossless stream-copy (`-c copy`).
+4. **Resilient Test Ports**: Dynamic ephemeral binding (`127.0.0.1:0`), never hardcoded ports.
+5. **Safe File Operations in Tests**: All test filesystem mutations must operate strictly within `std::env::temp_dir()`.
+6. **Path Resolution**: Resolve relative paths via `app_path::resolve_path(...)` (prioritizes CWD, falls back to portable exe dir, avoids `node_modules`).
+7. **Flash Longevity**: Never sync/flush chat per message. Must use `ChatWriter` with batching thresholds (500 msgs / 64 KB / timer). Chunks rotate to `chat_%04d.jsonl`, upload, and delete immediately.
+8. **Non-Blocking Telemetry**: Always use `try_send` for TUI telemetry and stats; never block WebSockets or recording loops.
+9. **FFmpeg Binary Resolution**: Respect `CHZZK_LOAD_FFMPEG_BIN` override before defaulting to `"ffmpeg"`.
+10. **Clean HLS Stream Termination**: Never add `-reconnect*` flags to FFmpeg; live manifests must exit cleanly on natural stream EOF.
+11. **Non-Blocking Mutex Scoping**: Never hold `active_sessions` or `active_recordings` mutex across async network I/O or upload tasks.
+12. **Rclone Binary Resolution**: Respect `CHZZK_LOAD_RCLONE_BIN` override before `settings.rclone.rclone_bin` and `"rclone"` on `PATH`.
+13. **TOML Configuration & Sanitization**: Adhere to `settings.toml` (`toml = "1.1"`). Directory format: `[{timestamp}] [{alias}] {streamer} - {title}` (omit `[{alias}]` if none). Sanitize `\/:*?"<>|` and control chars. Alias fallback in TUI without flicker.
+14. **Stream Metadata Tracking**: Dual-write events to `metadata.jsonl` with monotonic `stream_offset_ms` and sync via `rcat`. Exclude high-frequency telemetry (`concurrent_user_count`).
+15. **Disk Space Circuit Breaker**: Periodically inspect free disk space against `min_free_disk_gb`. If breached, gracefully terminate FFmpeg (`"q\n"`), seal/upload final chunks, and block new sessions until disk recovers.
+16. **Numeric N+1 Boundary Safety**: Segment sealing must strictly enforce N+1 boundary via numeric chunk index parsing (`chunk_%04d.ts`) rather than array length, preventing false boundary seals during DLQ retries.
+17. **Explicit User Authorization Before Implementation**: AI agents must present proposals/plans and wait for explicit user confirmation before touching repository files.
+18. **Plans Directory**: Save all design specs, readiness analyses, and implementation plans in `plans/YYYY-MM-DD-<topic>.md`.
