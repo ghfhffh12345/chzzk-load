@@ -107,16 +107,30 @@ pub enum FfmpegExit {
     Killed(std::process::ExitStatus),
 }
 
+impl FfmpegExit {
+    pub fn status(&self) -> std::process::ExitStatus {
+        match *self {
+            FfmpegExit::Clean(s) | FfmpegExit::Killed(s) => s,
+        }
+    }
+}
+
 /// Encapsulates child process execution, piped I/O, stderr log parsing,
 /// AES key error detection, and graceful termination escalation.
 pub struct FfmpegSession {
     child: Child,
     stdin: Option<ChildStdin>,
     event_rx: Receiver<FfmpegEvent>,
-    _reader_handle: JoinHandle<()>,
+    reader_handle: JoinHandle<()>,
     key_forbidden: Arc<AtomicBool>,
-    exit_status: Option<std::process::ExitStatus>,
+    exit_outcome: Option<FfmpegExit>,
     has_yielded_exited: bool,
+}
+
+impl Drop for FfmpegSession {
+    fn drop(&mut self) {
+        self.reader_handle.abort();
+    }
 }
 
 impl FfmpegSession {
@@ -184,9 +198,9 @@ impl FfmpegSession {
             child,
             stdin,
             event_rx,
-            _reader_handle: reader_handle,
+            reader_handle,
             key_forbidden,
-            exit_status: None,
+            exit_outcome: None,
             has_yielded_exited: false,
         })
     }
@@ -200,8 +214,8 @@ impl FfmpegSession {
     }
 
     pub async fn stop_graceful(&mut self, timeout: Duration) -> std::io::Result<FfmpegExit> {
-        if let Some(status) = self.exit_status {
-            return Ok(FfmpegExit::Clean(status));
+        if let Some(ref outcome) = self.exit_outcome {
+            return Ok(outcome.clone());
         }
         if let Some(mut stdin) = self.stdin.take() {
             use tokio::io::AsyncWriteExt;
@@ -209,28 +223,26 @@ impl FfmpegSession {
             let _ = stdin.flush().await;
             drop(stdin);
         }
-        match tokio::time::timeout(timeout, self.child.wait()).await {
-            Ok(Ok(status)) => {
-                self.exit_status = Some(status);
-                Ok(FfmpegExit::Clean(status))
-            }
+        let outcome = match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(Ok(status)) => FfmpegExit::Clean(status),
             _ => {
                 let _ = self.child.kill().await;
                 let status = self.child.wait().await?;
-                self.exit_status = Some(status);
-                Ok(FfmpegExit::Killed(status))
+                FfmpegExit::Killed(status)
             }
-        }
+        };
+        self.exit_outcome = Some(outcome.clone());
+        Ok(outcome)
     }
 
     pub async fn kill(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        if let Some(status) = self.exit_status {
-            return Ok(status);
+        if let Some(ref outcome) = self.exit_outcome {
+            return Ok(outcome.status());
         }
         let _ = self.stdin.take();
         let _ = self.child.kill().await;
         let status = self.child.wait().await?;
-        self.exit_status = Some(status);
+        self.exit_outcome = Some(FfmpegExit::Killed(status));
         Ok(status)
     }
 
@@ -241,12 +253,12 @@ impl FfmpegSession {
         if let Ok(event) = self.event_rx.try_recv() {
             return Some(event);
         }
-        if let Some(status) = self.exit_status {
+        if let Some(ref outcome) = self.exit_outcome {
             if let Some(event) = self.event_rx.recv().await {
                 return Some(event);
             }
             self.has_yielded_exited = true;
-            return Some(FfmpegEvent::Exited(status));
+            return Some(FfmpegEvent::Exited(outcome.status()));
         }
 
         tokio::select! {
@@ -256,7 +268,7 @@ impl FfmpegSession {
                     Some(ev) => Some(ev),
                     None => {
                         let status = self.child.wait().await.ok()?;
-                        self.exit_status = Some(status);
+                        self.exit_outcome = Some(FfmpegExit::Clean(status));
                         self.has_yielded_exited = true;
                         Some(FfmpegEvent::Exited(status))
                     }
@@ -264,7 +276,7 @@ impl FfmpegSession {
             }
             status_res = self.child.wait() => {
                 let status = status_res.ok()?;
-                self.exit_status = Some(status);
+                self.exit_outcome = Some(FfmpegExit::Clean(status));
                 tokio::select! {
                     biased;
                     event = self.event_rx.recv() => {

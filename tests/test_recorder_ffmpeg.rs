@@ -4,12 +4,27 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 static MOCK_BIN: OnceLock<PathBuf> = OnceLock::new();
+static MOCK_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+unsafe extern "C" {
+    fn atexit(cb: extern "C" fn()) -> std::ffi::c_int;
+}
+
+extern "C" fn cleanup_mock_bin() {
+    if let Some(dir) = MOCK_DIR.get() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
 
 fn get_mock_ffmpeg_bin() -> &'static Path {
     MOCK_BIN.get_or_init(|| {
         let temp_dir =
             std::env::temp_dir().join(format!("test_mock_ffmpeg_{}", rand::random::<u32>()));
         std::fs::create_dir_all(&temp_dir).unwrap();
+        let _ = MOCK_DIR.set(temp_dir.clone());
+        unsafe {
+            atexit(cleanup_mock_bin);
+        }
         let bin_path = temp_dir.join(if cfg!(windows) {
             "mock_ffmpeg.exe"
         } else {
@@ -273,6 +288,40 @@ async fn test_ffmpeg_session_natural_exit_streams_logs_and_exited() {
 
     // Subsequent calls to recv_event() must yield None
     assert!(session.recv_event().await.is_none());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_ffmpeg_session_repeated_stop_graceful_preserves_killed_outcome() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_ffmpeg_repeat_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let out_pattern = temp_dir.join("chunk_%04d.ts");
+
+    let mut session = FfmpegSession::spawn(
+        "http://example.com/hang.m3u8",
+        &out_pattern,
+        10,
+        None,
+        Some(mock_bin.to_str().unwrap()),
+    )
+    .expect("Failed to spawn FfmpegSession");
+
+    // First stop_graceful times out and escalates to Killed
+    let first_exit = session
+        .stop_graceful(Duration::from_millis(150))
+        .await
+        .expect("stop_graceful failed");
+    assert!(matches!(first_exit, FfmpegExit::Killed(_)));
+
+    // Second stop_graceful must return the exact same Killed outcome, never Clean
+    let second_exit = session
+        .stop_graceful(Duration::from_millis(150))
+        .await
+        .expect("second stop_graceful failed");
+    assert_eq!(first_exit, second_exit);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
