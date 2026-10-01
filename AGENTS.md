@@ -11,6 +11,7 @@
 cargo check --all-targets; cargo clippy --all-targets -- -D warnings; cargo fmt --check
 
 # Test suite (Tiered Fast Feedback)
+cargo test --test test_cli_smoke                    # CLI & binary startup smoke tests (<1s)
 cargo test --test test_channel_lifecycle_registry   # Fast registry unit tests (<1s)
 cargo test --test test_engine_orchestrator_registry # Typed engine seam unit tests (<1s)
 cargo test --test test_recorder_ffmpeg              # FfmpegSession unit tests (<1s)
@@ -64,7 +65,7 @@ cargo build --release
 - **Resilient Test Ports & Paths**: Use dynamic ephemeral port binding (`127.0.0.1:0`), never hardcoded ports. All test filesystem mutations must operate strictly within `std::env::temp_dir()`.
 
 ### 2.7. Testing & Fast-Feedback Discipline
-- **Tiered Test Execution**: Always run targeted unit tests first (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, etc., running in <1s) during tight TDD loops. Reserve heavy async integration suites (`test_engine_events`, taking 20–25s) and full `cargo test` for the final verification gate before commit.
+- **Tiered Test Execution**: Always run targeted unit and smoke tests first (`test_cli_smoke`, `test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, running in <1s) during tight TDD loops. Reserve heavy async integration suites (`test_engine_events`, taking 20–25s) and full `cargo test` for the final verification gate before commit.
 - **State Machine Invariant Coverage**: Every channel state transition guard, restriction condition, and cancellation behavior in `ChannelLifecycleRegistry` must have a dedicated zero-overhead unit test in `tests/test_channel_lifecycle_registry.rs`. Never rely exclusively on integration suites to catch lifecycle state regressions.
 - **Ephemeral Port & Directory Isolation**: Tests must never bind hardcoded network ports (use `127.0.0.1:0`) and must isolate all filesystem activity inside `std::env::temp_dir()`. Clean up directories upon test completion.
 - **Cross-Platform Shell Compatibility**: Write command snippets using semicolon statement separators `;` or separate lines rather than Bash-only `&&` operators to ensure compatibility with Windows PowerShell and POSIX shells.

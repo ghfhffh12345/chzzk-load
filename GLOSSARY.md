@@ -27,3 +27,11 @@ _Avoid_: Private stream, blocked channel, locked stream
 **Video Segmenter**:
 The subprocess capture module responsible for lossless stream copy (`-c copy`), live chunk generation (`chunk_%04d.ts`), stderr diagnostic parsing, and graceful process termination.
 _Avoid_: FFmpeg wrapper, video capture service, ffmpeg runner
+
+**Grace Period**:
+The bounded time window (15s) following a shutdown signal allowing active recording sessions to seal final chunks and upload queues to drain cleanly.
+_Avoid_: Timeout, shutdown delay, wait interval
+
+**Force Exit**:
+An immediate process termination path triggered by a double `'q'` keystroke or Grace Period timeout expiration, aborting active tasks, executing bounded directory cleanup (<500ms), and exiting with code 1.
+_Avoid_: Hard crash, emergency kill, dirty exit

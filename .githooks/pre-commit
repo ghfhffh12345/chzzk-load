@@ -1,6 +1,7 @@
 #!/bin/sh
 set -e
 
-# Pre-commit hook: verify formatting and linting gates locally before commit
+# Pre-commit hook: verify formatting, linting, and fast unit/smoke tests locally before commit
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state

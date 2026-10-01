@@ -6,9 +6,12 @@ This document is the authoritative standard for code review under the `/code-rev
 
 ## 1. Test Architecture & Seam Discipline
 
-- **Sub-Second Unit Test Seams**: Unit suites (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`) must complete execution in under 1 second.
+- **Sub-Second Unit Test Seams**: Unit suites (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, `test_cli_smoke`) must complete execution in under 1 second.
   - *Hard Violation*: Adding blocking sleep ticks, network roundtrips, or heavy multi-step loops to unit test files.
   - *Resolution*: Heavy multi-step integration scenarios belong strictly in `tests/test_engine_events.rs` (20–25s budget).
+- **Virtual Time Testing**: Test async timeouts, grace periods, and debounces using Tokio's virtual time (`tokio::time::pause()`) rather than wall-clock thread sleeps (`std::thread::sleep` or unpaused `tokio::time::sleep`).
+  - *Hard Violation*: Adding wall-clock sleeps to simulate timeout expiration or debounce delays in unit tests.
+  - *Resolution*: Initialize unit tests with `#[tokio::test(start_paused = true)]` or invoke `tokio::time::pause()` to advance time deterministically via `tokio::time::advance()`.
 - **Shared Subprocess Mocking**: Never invoke `rustc` or recompile dummy executables inline inside individual test bodies.
   - *Hard Violation*: Inline dummy process compilation or duplicate C-ABI `atexit` temporary directory handlers.
   - *Resolution*: Import and reuse the shared mock fixture via `mod common; use common::mock_ffmpeg::get_mock_ffmpeg_bin;`.
@@ -24,6 +27,9 @@ This document is the authoritative standard for code review under the `/code-rev
   - *Code Smell (Duplicated Code)*: Triplicating `stop_graceful`, log emission, and chunk sealing across individual `tokio::select!` break branches.
 - **Reactive Event Consumption**: React to stream events (`FfmpegEvent::KeyForbidden`, `FfmpegEvent::Exited`) directly as they arrive from `recv_event()`.
   - *Code Smell*: Polling `session.is_key_forbidden()` or `child.try_wait()` inside periodic timer loops when event streams already provide notifications.
+- **Safe Multiplexing in `tokio::select!`**: Branch future expressions evaluate eagerly on every loop tick before guards (`if <cond> =>`) are evaluated.
+  - *Hard Violation*: Calling `.unwrap()` or executing fallible logic in a `tokio::select!` branch future expression (e.g. `_ = sleep_until(deadline.unwrap()), if deadline.is_some() =>`).
+  - *Resolution*: Defer evaluation inside an `async` block that yields `std::future::pending().await` when inactive (e.g., `async { match deadline { Some(d) => sleep_until(d).await, None => std::future::pending().await } }`).
 
 ---
 
