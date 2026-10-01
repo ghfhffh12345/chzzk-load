@@ -7,11 +7,12 @@
 ## 1. Quick Commands
 
 ```bash
-# Check, lint, and format
-cargo check --all-targets && cargo clippy --all-targets -- -D warnings && cargo fmt --check
+# Check, lint, and format (PowerShell / Bash compatible)
+cargo check --all-targets; cargo clippy --all-targets -- -D warnings; cargo fmt --check
 
 # Test suite
-cargo test
+cargo test --test test_channel_lifecycle_registry   # Fast unit tests (<1s)
+cargo test                                          # Full test suite
 cargo test --test test_engine_events <filter>
 node scripts/test-npm-packages.js
 
@@ -44,7 +45,7 @@ cargo build --release
 
 ### 2.4. Stream Polling & Orchestration (`src/engine/`)
 - **Anti-Race Cooldown**: Deduplicate CDN cache TTL (10–30s) using finished `live_id`s and post-recording cooldown.
-- **Non-Blocking Mutex Scoping**: Never hold `active_sessions` or `active_recordings` mutex across async network I/O or upload tasks.
+- **Atomic Lifecycle Transitions**: State transitions across channel states (Idle, Recording, Cooldown, Restricted) are mediated exclusively by `ChannelLifecycleRegistry` under a short-lived sync mutex; never perform async I/O while holding registry locks.
 - **Stream Metadata Tracking**: Dual-write state changes (title, category, tags, rules) to `metadata.jsonl` with monotonic `stream_offset_ms` and sync via `rcat`. Exclude high-frequency telemetry (`concurrent_user_count`).
 
 ### 2.5. TUI & Terminal Safety (`src/tui/`)

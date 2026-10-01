@@ -592,3 +592,28 @@ fn test_evaluate_poll_cooldown_retains_live_id_when_info_live_id_is_none() {
         other => panic!("Expected InCooldown, got {other:?}"),
     }
 }
+
+#[test]
+fn test_finish_recording_preserves_restricted_state() {
+    let registry = ChannelLifecycleRegistry::new();
+    let session = make_test_session("StreamerA", "Live Stream");
+    let token = CancellationToken::new();
+
+    registry.start_recording("ch1", session, token);
+    registry.mark_restricted("ch1", Some(12345), RestrictionReason::KeyForbidden);
+
+    assert_eq!(
+        registry.channel_state("ch1").kind(),
+        ChannelLifecycleKind::Restricted
+    );
+
+    // FFmpeg child process exits and calls finish_recording
+    registry.finish_recording("ch1", Some(12345));
+
+    // Must remain Restricted and NOT transition to Cooldown
+    assert_eq!(
+        registry.channel_state("ch1").kind(),
+        ChannelLifecycleKind::Restricted,
+        "finish_recording must not overwrite an existing Restricted state with Cooldown"
+    );
+}
