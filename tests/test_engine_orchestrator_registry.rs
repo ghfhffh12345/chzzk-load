@@ -552,3 +552,30 @@ async fn test_orchestrator_graceful_shutdown_drains_registry_sessions() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_orchestrator_cleanup_empty_session_dirs_bounded() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_cleanup_bounded_{}", rand::random::<u32>()));
+    let empty_session = temp_dir.join("empty_session_1");
+    tokio::fs::create_dir_all(&empty_session).await.unwrap();
+
+    let non_empty = temp_dir.join("active_session_2");
+    tokio::fs::create_dir_all(&non_empty).await.unwrap();
+    tokio::fs::write(non_empty.join("chunk_0000.ts"), b"data")
+        .await
+        .unwrap();
+
+    let cleaned = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
+        &temp_dir,
+        std::time::Duration::from_millis(500),
+    )
+    .await
+    .expect("cleanup bounded succeeded");
+
+    assert_eq!(cleaned, 1);
+    assert!(!empty_session.exists());
+    assert!(non_empty.exists());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

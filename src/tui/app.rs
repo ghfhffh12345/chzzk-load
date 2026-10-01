@@ -4,6 +4,22 @@ use std::time::{Duration, Instant};
 
 use crate::tui::event::{AppEvent, LogEntry};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TuiOutcome {
+    Graceful,
+    ForceExit,
+}
+
+impl TuiOutcome {
+    pub fn is_graceful(&self) -> bool {
+        matches!(self, Self::Graceful)
+    }
+
+    pub fn is_force_exit(&self) -> bool {
+        matches!(self, Self::ForceExit)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChannelItem {
     pub id: String,
@@ -124,6 +140,14 @@ impl App {
 
     pub fn update(&mut self, event: AppEvent) {
         self.handle_event(event);
+    }
+
+    pub fn outcome(&self) -> TuiOutcome {
+        if self.should_quit {
+            TuiOutcome::ForceExit
+        } else {
+            TuiOutcome::Graceful
+        }
     }
 
     pub fn scroll_channels_down(&mut self) {

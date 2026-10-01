@@ -3,6 +3,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use chzzk_load::config::Settings;
+use chzzk_load::tui::TuiOutcome;
 use chzzk_load::tui::app::App;
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::tui::theme;
@@ -194,6 +195,29 @@ fn test_app_quit_two_stage_shutdown() {
     app.handle_event(AppEvent::Key(q_key));
     assert!(app.is_shutting_down);
     assert!(app.should_quit);
+}
+
+#[test]
+fn test_app_outcome_on_double_q_returns_force_exit() {
+    let mut app = App::new();
+    assert_eq!(app.outcome(), TuiOutcome::Graceful);
+
+    // First 'q' enters shutdown mode
+    let q_key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+    app.handle_event(AppEvent::Key(q_key));
+    assert!(app.is_shutting_down);
+    assert_eq!(app.outcome(), TuiOutcome::Graceful);
+
+    // Second 'q' escalates to immediate ForceExit outcome
+    app.handle_event(AppEvent::Key(q_key));
+    assert!(app.should_quit);
+    assert_eq!(app.outcome(), TuiOutcome::ForceExit);
+    assert!(TuiOutcome::ForceExit.is_force_exit());
+    assert!(!TuiOutcome::ForceExit.is_graceful());
+
+    // Graceful outcome variants
+    assert!(TuiOutcome::Graceful.is_graceful());
+    assert!(!TuiOutcome::Graceful.is_force_exit());
 }
 
 #[test]

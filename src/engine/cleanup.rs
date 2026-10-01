@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::Duration;
 
 /// Checks if a session directory is empty or contains only `metadata.jsonl`.
 /// If so, removes `metadata.jsonl` (if present) and removes the directory.
@@ -80,6 +81,20 @@ pub async fn cleanup_empty_session_dirs_excluding(
 /// Cleans up all empty or metadata-only session directories inside the recordings directory.
 pub async fn cleanup_empty_session_dirs(recordings_dir: &Path) -> std::io::Result<usize> {
     cleanup_empty_session_dirs_excluding(recordings_dir, &HashSet::new()).await
+}
+
+/// Cleans up empty session directories bounded by a maximum duration.
+pub async fn cleanup_empty_session_dirs_bounded(
+    recordings_dir: &Path,
+    timeout: Duration,
+) -> std::io::Result<usize> {
+    match tokio::time::timeout(timeout, cleanup_empty_session_dirs(recordings_dir)).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "cleanup empty session directories timed out",
+        )),
+    }
 }
 
 #[cfg(test)]

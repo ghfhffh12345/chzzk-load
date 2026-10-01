@@ -20,7 +20,8 @@ pub mod registry;
 pub mod session;
 
 pub use cleanup::{
-    cleanup_empty_session_dirs, cleanup_empty_session_dirs_excluding, cleanup_session_dir_if_empty,
+    cleanup_empty_session_dirs, cleanup_empty_session_dirs_bounded,
+    cleanup_empty_session_dirs_excluding, cleanup_session_dir_if_empty,
 };
 pub use dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
 pub use reconciliation::{ReconciliationReport, reconcile_orphaned_sessions};
@@ -168,6 +169,13 @@ impl EngineOrchestrator {
 
     pub async fn cleanup_empty_session_dirs(recordings_dir: &Path) -> std::io::Result<usize> {
         cleanup_empty_session_dirs(recordings_dir).await
+    }
+
+    pub async fn cleanup_empty_session_dirs_bounded(
+        recordings_dir: &Path,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        cleanup_empty_session_dirs_bounded(recordings_dir, timeout).await
     }
 
     pub async fn cleanup_session_dir_if_empty(session_dir: &Path) -> std::io::Result<bool> {

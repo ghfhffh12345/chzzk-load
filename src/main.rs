@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use crossterm::cursor::Show;
-use crossterm::event::{Event, KeyCode};
+use crossterm::event::Event;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -20,7 +20,7 @@ use chzzk_load::config::Settings;
 use chzzk_load::engine::EngineOrchestrator;
 use chzzk_load::tui::app::App;
 use chzzk_load::tui::ui::draw_ui;
-use chzzk_load::tui::{AppEvent, LogEntry};
+use chzzk_load::tui::{AppEvent, LogEntry, TuiOutcome};
 use chzzk_load::uploader::{RcloneBackend, UploadBackend};
 
 #[tokio::main]
@@ -184,8 +184,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut orch_handle = tokio::spawn(orchestrator.clone().run());
 
-    if is_headless {
+    let outcome = if is_headless {
         run_headless(&mut event_rx, cancel_token.clone(), &mut orch_handle).await?;
+        TuiOutcome::Graceful
     } else {
         run_tui(
             &settings,
@@ -195,22 +196,47 @@ async fn main() -> anyhow::Result<()> {
             cancel_token.clone(),
             &mut orch_handle,
         )
-        .await?;
-    }
+        .await?
+    };
 
-    // Drain event_rx in background so event_tx never blocks during shutdown
-    tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
-
-    // Await orchestrator termination with grace period
-    if !orch_handle.is_finished() {
-        let _ = tokio::time::timeout(Duration::from_secs(15), orch_handle).await;
-    }
-
-    // Clean up empty stream session folders inside local recordings directory on shutdown
     let recordings_base = resolve_path(std::path::Path::new(&settings.general.recordings_dir));
-    let _ = EngineOrchestrator::cleanup_empty_session_dirs(&recordings_base).await;
 
-    Ok(())
+    match outcome {
+        TuiOutcome::ForceExit => {
+            // Immediate Force Exit requested by double 'q' in TUI:
+            // 1. Abort active orchestrator tasks immediately
+            orch_handle.abort();
+
+            // 2. Execute a rapid empty directory cleanup (<500ms)
+            let _ = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
+                &recordings_base,
+                Duration::from_millis(500),
+            )
+            .await;
+
+            // 3. Restore console code page and terminal raw mode
+            let _ = disable_raw_mode();
+            let _ = crossterm::execute!(std::io::stdout(), LeaveAlternateScreen, Show);
+            chzzk_load::tui::ConsoleCodePageGuard::restore_original();
+
+            // 4. Terminate process immediately with code 1
+            std::process::exit(1);
+        }
+        TuiOutcome::Graceful => {
+            // Drain event_rx in background so event_tx never blocks during shutdown
+            tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+
+            // Await orchestrator termination with grace period
+            if !orch_handle.is_finished() {
+                let _ = tokio::time::timeout(Duration::from_secs(15), orch_handle).await;
+            }
+
+            // Clean up empty stream session folders inside local recordings directory on shutdown
+            let _ = EngineOrchestrator::cleanup_empty_session_dirs(&recordings_base).await;
+
+            Ok(())
+        }
+    }
 }
 
 async fn run_headless(
@@ -279,7 +305,7 @@ async fn run_tui(
     orchestrator: Arc<EngineOrchestrator>,
     cancel_token: CancellationToken,
     orch_handle: &mut tokio::task::JoinHandle<()>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<TuiOutcome> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -344,16 +370,12 @@ async fn run_tui(
                 match item {
                     Ok(Event::Key(key)) => {
                         if key.kind != crossterm::event::KeyEventKind::Release {
-                            if key.code == KeyCode::Char('q') && key.kind == crossterm::event::KeyEventKind::Press {
-                                if app.is_shutting_down {
-                                    app.should_quit = true;
-                                    cancel_token.cancel();
-                                    break;
-                                }
-                                app.is_shutting_down = true;
+                            app.handle_event(AppEvent::Key(key));
+                            if app.is_shutting_down {
                                 cancel_token.cancel();
-                            } else {
-                                app.handle_event(AppEvent::Key(key));
+                            }
+                            if app.should_quit {
+                                break;
                             }
                             if app.refresh_requested {
                                 app.refresh_requested = false;
@@ -386,7 +408,7 @@ async fn run_tui(
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen, Show);
 
-    Ok(())
+    Ok(app.outcome())
 }
 
 #[cfg(unix)]
