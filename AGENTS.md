@@ -49,6 +49,13 @@ cargo build --release
 - **Crash Recovery & Reconciliation**: Detect orphaned chunks on startup, validate contiguity, and quarantine partial tail chunks.
 
 ### 2.4. Stream Polling & Orchestration (`src/engine/`)
+- **Module Topology**:
+  - `src/engine.rs`: Top-level `EngineOrchestrator` runtime coordinator and poll loop.
+  - `src/engine/recording.rs`: Per-stream `RecordingSession` subprocess and chunk lifecycle.
+  - `src/engine/registry.rs`: Atomic lifecycle state machine (`ChannelLifecycleRegistry`).
+  - `src/engine/cleanup.rs`: Session directory retention and empty-folder purge.
+  - `src/engine/reconciliation.rs`: Startup crash recovery and orphaned chunk reconciliation.
+  - `src/engine/dispatcher.rs`: Stream state evaluation and poll action dispatcher.
 - **Anti-Race Cooldown**: Deduplicate CDN cache TTL (10–30s) using finished `live_id`s and post-recording cooldown.
 - **Atomic Lifecycle Transitions**: State transitions across channel states (Idle, Recording, Cooldown, Restricted) are mediated exclusively by `ChannelLifecycleRegistry` under a short-lived sync mutex; never perform async I/O while holding registry locks.
 - **Stream Metadata Tracking**: Dual-write state changes (title, category, tags, rules) to `metadata.jsonl` with monotonic `stream_offset_ms` and sync via `rcat`. Exclude high-frequency telemetry (`concurrent_user_count`).
@@ -66,6 +73,7 @@ cargo build --release
 
 ### 2.7. Testing & Fast-Feedback Discipline
 - **Tiered Test Execution**: Always run targeted unit and smoke tests first (`test_cli_smoke`, `test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, running in <1s) during tight TDD loops. Reserve heavy async integration suites (`test_engine_events`, taking 20–25s) and full `cargo test` for the final verification gate before commit.
+- **Subprocess Hermeticity**: Orchestrator, lifecycle, and chat integration tests (`test_engine_*`) must never spawn real FFmpeg against dummy network ports; always inject `get_mock_ffmpeg_bin()` from `tests/common/mock_ffmpeg.rs` via `.with_ffmpeg_bin(mock_bin.to_string_lossy())` to prevent process exit races and empty-directory cleanup bugs. Real FFmpeg subprocesses are reserved exclusively for `test_recorder_ffmpeg.rs` and `test_recorder_watcher.rs`.
 - **State Machine Invariant Coverage**: Every channel state transition guard, restriction condition, and cancellation behavior in `ChannelLifecycleRegistry` must have a dedicated zero-overhead unit test in `tests/test_channel_lifecycle_registry.rs`. Never rely exclusively on integration suites to catch lifecycle state regressions.
 - **Ephemeral Port & Directory Isolation**: Tests must never bind hardcoded network ports (use `127.0.0.1:0`) and must isolate all filesystem activity inside `std::env::temp_dir()`. Clean up directories upon test completion.
 - **Cross-Platform Shell Compatibility**: Write command snippets using semicolon statement separators `;` or separate lines rather than Bash-only `&&` operators to ensure compatibility with Windows PowerShell and POSIX shells.
