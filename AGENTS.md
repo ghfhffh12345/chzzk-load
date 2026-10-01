@@ -216,6 +216,9 @@ Instead of heavy Docker containers or slow QEMU system emulation for building AR
 
 ## 5. Development & Testing Workflow
 
+> [!IMPORTANT]
+> **Implementation Gate**: AI agents must NEVER begin modifying or creating code/test files without explicit user authorization to proceed. Always complete design alignment and obtain direct approval before touching files.
+
 Always adhere to **Test-Driven Development (TDD)** when modifying functionality or fixing bugs:
 1. Write a focused reproduction test in the `tests/` directory.
 2. Verify the test fails (`cargo test --test <name> <filter>`).
@@ -274,4 +277,5 @@ When implementing changes, AI agents must strictly preserve the following rules:
 12. **Rclone Binary Resolution**: `RcloneBackend` must respect the `CHZZK_LOAD_RCLONE_BIN` environment variable override before falling back to `settings.rclone.rclone_bin` and `"rclone"` on `PATH`.
 13. **TOML Configuration & Channel Aliasing**: Configuration must strictly adhere to `settings.toml` parsed with `toml = "1.1"`. Legacy `settings.json` is completely deprecated and unsupported. Channel configuration supports both shorthand string arrays and `[[channels]]` tables with `id` and optional `alias`. Both local session directories and cloud storage folders strictly follow `[{timestamp}] [{alias}] {streamer_name} - {title}` (or `[{timestamp}] {streamer_name} - {title}` if no alias is configured). All folder and filename components are conservatively sanitized against `\`, `/`, `:`, `*`, `?`, `"`, `<`, `>`, `|`, control characters, and trailing spaces/dots consistently across local and cloud environments. The TUI displays `alias` (or streamer name fallback) consistently without online/offline state flipping.
 14. **Stream Metadata Tracking & Monotonic Synchronization**: Stream metadata changes must be tracked in `metadata.jsonl` using JSON Lines format with monotonic `stream_offset_ms` calculated from `session_start_instant.elapsed().as_millis()`. High-frequency telemetry (e.g. `concurrent_user_count`, `accumulate_count`) is excluded from triggering `METADATA_CHANGED` events to avoid write churn. `metadata.jsonl` is dual-written locally and synchronized with remote storage in real-time.
+15. **Explicit User Authorization Before Implementation**: AI agents must NEVER jump straight into code modifications, file creation, or implementation tasks following design interviews, planning sessions, or artifact generation without explicit user authorization (e.g., the user explicitly saying "proceed" or directing implementation to begin). Always present the plan, findings, or proposals and pause for explicit confirmation before touching any code or files in the repository.
 
