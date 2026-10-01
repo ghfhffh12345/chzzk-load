@@ -1,6 +1,6 @@
 use crate::app_path::resolve_path;
 use crate::chzzk::client::ChzzkClient;
-use crate::chzzk::models::{LiveDetail, LiveStreamInfo};
+use crate::chzzk::models::LiveStreamInfo;
 use crate::config::Settings;
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{UploadBackend, UploadTask, UploadWorker};
@@ -18,7 +18,6 @@ pub mod reconciliation;
 pub mod recording;
 pub mod registry;
 pub mod session;
-pub mod state;
 
 pub use cleanup::{
     cleanup_empty_session_dirs, cleanup_empty_session_dirs_excluding, cleanup_session_dir_if_empty,
@@ -31,7 +30,6 @@ pub use registry::{
     RestrictionReason,
 };
 pub use session::{ActiveSessionState, FinishedSession};
-pub use state::EngineState;
 
 pub struct EngineOrchestrator {
     settings: Settings,
@@ -39,7 +37,6 @@ pub struct EngineOrchestrator {
     backend: Option<Arc<dyn UploadBackend>>,
     event_tx: Sender<AppEvent>,
     registry: ChannelLifecycleRegistry,
-    state: EngineState,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
     session_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
@@ -69,7 +66,6 @@ impl EngineOrchestrator {
             backend,
             event_tx,
             registry: ChannelLifecycleRegistry::new(),
-            state: EngineState::new(),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -111,10 +107,6 @@ impl EngineOrchestrator {
             .start_recording(channel_id, session, cancel_token);
     }
 
-    pub fn channel_names(&self) -> Arc<tokio::sync::RwLock<HashMap<String, String>>> {
-        self.state.channel_names.clone()
-    }
-
     pub fn resolve_display_name(
         channel: &crate::config::ChannelConfig,
         cached_names: &HashMap<String, String>,
@@ -146,48 +138,8 @@ impl EngineOrchestrator {
         self.refresh_notify.notify_one();
     }
 
-    #[deprecated(note = "use is_recording or active_recording_ids instead")]
-    pub fn active_recordings(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
-        self.state.active_recordings.clone()
-    }
-
-    #[deprecated(note = "use active_session or active_sessions_snapshot instead")]
-    pub fn active_sessions(&self) -> Arc<tokio::sync::Mutex<HashMap<String, ActiveSessionState>>> {
-        self.state.active_sessions.clone()
-    }
-
-    #[deprecated(note = "use register_finished_session instead")]
-    pub fn finished_sessions(&self) -> Arc<tokio::sync::Mutex<HashMap<String, FinishedSession>>> {
-        self.state.finished_sessions.clone()
-    }
-
-    #[deprecated(note = "use is_restricted or channel_state instead")]
-    pub fn restricted_channels(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
-        self.state.restricted_channels.clone()
-    }
-
-    #[deprecated(note = "use channel_state instead")]
-    pub fn restricted_live_ids(&self) -> Arc<tokio::sync::Mutex<HashMap<String, u64>>> {
-        self.state.restricted_live_ids.clone()
-    }
-
-    pub fn api_restricted_channels(&self) -> Arc<tokio::sync::Mutex<HashSet<String>>> {
-        self.state.api_restricted_channels.clone()
-    }
-
-    pub fn session_cancel_tokens(
-        &self,
-    ) -> Arc<tokio::sync::Mutex<HashMap<String, CancellationToken>>> {
-        self.state.session_cancel_tokens.clone()
-    }
-
     pub async fn register_finished_session(&self, channel_id: &str, live_id: Option<u64>) {
         self.registry.finish_recording(channel_id, live_id);
-        self.state.active_recordings.lock().await.remove(channel_id);
-        self.state.active_sessions.lock().await.remove(channel_id);
-        self.state
-            .register_finished_session(channel_id, live_id)
-            .await;
     }
 
     pub fn spawn_upload_consumer(
@@ -305,7 +257,6 @@ impl EngineOrchestrator {
             self.chzzk.clone(),
             self.event_tx.clone(),
             self.registry.clone(),
-            self.state.clone(),
             self.cancel_token.clone(),
             self.ffmpeg_bin.clone(),
         );
@@ -325,58 +276,6 @@ impl EngineOrchestrator {
             };
             match detail_res {
                 Ok(detail) => {
-                    // Sync cached streamer name with legacy state
-                    let incoming_streamer_name = match &detail {
-                        LiveDetail::Open(info) => Some(&info.streamer_name),
-                        LiveDetail::Restricted { streamer_name, .. } => Some(streamer_name),
-                        LiveDetail::Close { streamer_name } => streamer_name.as_ref(),
-                    };
-                    if let Some(streamer_name) = incoming_streamer_name {
-                        let mut names = self.state.channel_names.write().await;
-                        names.insert(channel.id.clone(), streamer_name.clone());
-                    }
-
-                    // Bridge legacy state mutations (from existing integration tests) into registry
-                    if !self.registry.is_recording(&channel.id) {
-                        let legacy_session = {
-                            let sessions = self.state.active_sessions.lock().await;
-                            sessions.get(&channel.id).cloned()
-                        };
-                        if let Some(session) = legacy_session {
-                            let token = self.cancel_token.child_token();
-                            self.registry.start_recording(&channel.id, session, token);
-                        }
-                    }
-                    if !self.registry.is_restricted(&channel.id) {
-                        let is_restricted = self
-                            .state
-                            .restricted_channels
-                            .lock()
-                            .await
-                            .contains(&channel.id);
-                        if is_restricted {
-                            let live_id = self
-                                .state
-                                .restricted_live_ids
-                                .lock()
-                                .await
-                                .get(&channel.id)
-                                .copied();
-                            let reason = if self
-                                .state
-                                .api_restricted_channels
-                                .lock()
-                                .await
-                                .contains(&channel.id)
-                            {
-                                RestrictionReason::RequiresCredentials
-                            } else {
-                                RestrictionReason::KeyForbidden
-                            };
-                            self.registry.mark_restricted(&channel.id, live_id, reason);
-                        }
-                    }
-
                     let action = self.registry.evaluate_poll(
                         &channel.id,
                         channel.alias.as_deref(),
@@ -452,40 +351,9 @@ impl EngineOrchestrator {
 
                             self.registry.start_recording(
                                 &channel.id,
-                                session_state.clone(),
-                                session_cancel.clone(),
+                                session_state,
+                                session_cancel,
                             );
-
-                            // Sync legacy state for backward compatibility during phased migration
-                            {
-                                let mut active = self.state.active_recordings.lock().await;
-                                active.insert(channel.id.clone());
-                            }
-                            {
-                                let mut sessions = self.state.active_sessions.lock().await;
-                                sessions.insert(channel.id.clone(), session_state);
-                            }
-                            {
-                                let mut tokens = self.state.session_cancel_tokens.lock().await;
-                                tokens.insert(channel.id.clone(), session_cancel);
-                            }
-                            {
-                                let mut restricted = self.state.restricted_channels.lock().await;
-                                restricted.remove(&channel.id);
-                            }
-                            {
-                                let mut r_ids = self.state.restricted_live_ids.lock().await;
-                                r_ids.remove(&channel.id);
-                            }
-                            {
-                                let mut api_restricted =
-                                    self.state.api_restricted_channels.lock().await;
-                                api_restricted.remove(&channel.id);
-                            }
-                            {
-                                let mut finished = self.state.finished_sessions.lock().await;
-                                finished.remove(&channel.id);
-                            }
 
                             self.spawn_recording_session(
                                 channel.id.clone(),
@@ -501,14 +369,6 @@ impl EngineOrchestrator {
                             display_name,
                             title,
                         } => {
-                            // Sync legacy state
-                            {
-                                let mut sessions = self.state.active_sessions.lock().await;
-                                if let Some(session) = sessions.get_mut(&channel.id) {
-                                    session.record_metadata_change(event.state.clone());
-                                }
-                            }
-
                             // 1. Append locally to <session_dir>/metadata.jsonl
                             let recordings_base =
                                 resolve_path(Path::new(&self.settings.general.recordings_dir));
@@ -627,54 +487,6 @@ impl EngineOrchestrator {
                             reason,
                             is_newly_restricted,
                         } => {
-                            // Sync legacy state
-                            if let Some(token) = self
-                                .state
-                                .session_cancel_tokens
-                                .lock()
-                                .await
-                                .remove(&channel.id)
-                            {
-                                token.cancel();
-                            }
-                            let was_active = {
-                                let mut active = self.state.active_recordings.lock().await;
-                                active.remove(&channel.id)
-                            };
-                            if was_active {
-                                let mut sessions = self.state.active_sessions.lock().await;
-                                sessions.remove(&channel.id);
-                                let _ = self
-                                    .event_tx
-                                    .send(AppEvent::RecordingEnded {
-                                        channel_id: channel.id.clone(),
-                                    })
-                                    .await;
-                            }
-                            {
-                                let mut restricted = self.state.restricted_channels.lock().await;
-                                restricted.insert(channel.id.clone());
-                            }
-                            if matches!(
-                                reason,
-                                RestrictionReason::AgeRestricted
-                                    | RestrictionReason::RequiresCredentials
-                            ) {
-                                let mut api_restricted =
-                                    self.state.api_restricted_channels.lock().await;
-                                api_restricted.insert(channel.id.clone());
-                            }
-                            if let LiveDetail::Restricted {
-                                live_id: Some(lid), ..
-                            }
-                            | LiveDetail::Open(LiveStreamInfo {
-                                live_id: Some(lid), ..
-                            }) = &detail
-                            {
-                                let mut r_ids = self.state.restricted_live_ids.lock().await;
-                                r_ids.insert(channel.id.clone(), *lid);
-                            }
-
                             if is_newly_restricted {
                                 let log_msg = reason.display_message(&channel.id, &display_name);
                                 let _ = self
@@ -697,41 +509,6 @@ impl EngineOrchestrator {
                             display_name,
                             was_recording,
                         } => {
-                            if let Some(token) = self
-                                .state
-                                .session_cancel_tokens
-                                .lock()
-                                .await
-                                .remove(&channel.id)
-                            {
-                                token.cancel();
-                            }
-                            {
-                                let mut api_restricted =
-                                    self.state.api_restricted_channels.lock().await;
-                                api_restricted.remove(&channel.id);
-                            }
-                            {
-                                let mut restricted = self.state.restricted_channels.lock().await;
-                                restricted.remove(&channel.id);
-                            }
-                            {
-                                let mut r_ids = self.state.restricted_live_ids.lock().await;
-                                r_ids.remove(&channel.id);
-                            }
-                            {
-                                let mut finished = self.state.finished_sessions.lock().await;
-                                finished.remove(&channel.id);
-                            }
-                            {
-                                let mut sessions = self.state.active_sessions.lock().await;
-                                sessions.remove(&channel.id);
-                            }
-                            {
-                                let mut active = self.state.active_recordings.lock().await;
-                                active.remove(&channel.id);
-                            }
-
                             if was_recording {
                                 let _ = self
                                     .event_tx

@@ -247,7 +247,17 @@ impl ChannelLifecycleRegistry {
     }
 
     pub fn finish_recording(&self, channel_id: &str, live_id: Option<u64>) {
-        self.mark_cooldown(channel_id, live_id, Instant::now());
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(ChannelLifecycleState::Restricted { .. }) = guard.channels.get(channel_id) {
+            return;
+        }
+        guard.transition_state(
+            channel_id,
+            ChannelLifecycleState::Cooldown {
+                live_id,
+                finished_at: Instant::now(),
+            },
+        );
     }
 
     pub fn mark_cooldown(&self, channel_id: &str, live_id: Option<u64>, finished_at: Instant) {

@@ -33,6 +33,29 @@ async fn test_orchestrator_typed_query_seam_idle() {
         orchestrator.registry().channel_state("chan1"),
         ChannelLifecycleState::Idle
     ));
+
+    // Register finished session transitions idle/recording channel to cooldown
+    orchestrator
+        .register_finished_session("chan1", Some(12345))
+        .await;
+    assert!(matches!(
+        orchestrator.channel_state("chan1"),
+        ChannelLifecycleState::Cooldown {
+            live_id: Some(12345),
+            ..
+        }
+    ));
+
+    // Register active session transitions channel to recording
+    let session = chzzk_load::engine::ActiveSessionState::new(
+        "2026-10-01_1200".to_string(),
+        "StreamerOne".to_string(),
+        Some("StreamerOne".to_string()),
+        Default::default(),
+    );
+    orchestrator.register_active_session("chan1", session);
+    assert!(orchestrator.is_recording("chan1"));
+    assert_eq!(orchestrator.active_recording_ids(), vec!["chan1"]);
 }
 
 #[tokio::test]

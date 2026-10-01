@@ -12,8 +12,7 @@ use crate::chzzk::models::LiveStreamInfo;
 use crate::config::Settings;
 use crate::engine::dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
 use crate::engine::registry::{ChannelLifecycleRegistry, RestrictionReason};
-use crate::engine::session::{ActiveSessionState, FinishedSession};
-use crate::engine::state::EngineState;
+use crate::engine::session::ActiveSessionState;
 use crate::recorder::ffmpeg::{
     build_ffmpeg_command, build_ffmpeg_command_with_bin, is_ffmpeg_key_forbidden_error,
 };
@@ -35,7 +34,6 @@ impl RecordingSession {
         chzzk: ChzzkClient,
         event_tx: Sender<AppEvent>,
         registry: ChannelLifecycleRegistry,
-        state: EngineState,
         cancel_token: CancellationToken,
         ffmpeg_bin: Option<String>,
     ) -> tokio::task::JoinHandle<()> {
@@ -53,7 +51,7 @@ impl RecordingSession {
                 .find(|c| c.id == channel_id)
                 .and_then(|c| c.alias.clone());
 
-            let (session_folder_name, start_timestamp, initial_metadata_jsonl, session_cancel) = {
+            let (session_folder_name, initial_metadata_jsonl, session_cancel) = {
                 let existing_session = registry.active_session(&channel_id);
                 let (session, token) = match existing_session {
                     Some(s) => {
@@ -76,39 +74,8 @@ impl RecordingSession {
                     }
                 };
 
-                // Sync legacy state for backward compatibility
-                {
-                    let mut active = state.active_recordings.lock().await;
-                    active.insert(channel_id.clone());
-                }
-                {
-                    let mut sessions = state.active_sessions.lock().await;
-                    sessions.insert(channel_id.clone(), session.clone());
-                }
-                {
-                    let mut tokens = state.session_cancel_tokens.lock().await;
-                    tokens.insert(channel_id.clone(), token.clone());
-                }
-                {
-                    let mut restricted = state.restricted_channels.lock().await;
-                    restricted.remove(&channel_id);
-                }
-                {
-                    let mut r_ids = state.restricted_live_ids.lock().await;
-                    r_ids.remove(&channel_id);
-                }
-                {
-                    let mut api_restricted = state.api_restricted_channels.lock().await;
-                    api_restricted.remove(&channel_id);
-                }
-                {
-                    let mut finished = state.finished_sessions.lock().await;
-                    finished.remove(&channel_id);
-                }
-
                 (
                     session.folder_name(),
-                    session.start_timestamp.clone(),
                     session.format_metadata_jsonl(),
                     token,
                 )
@@ -126,12 +93,6 @@ impl RecordingSession {
                     ))))
                     .await;
                 registry.reset_to_idle(&channel_id);
-                let mut active = state.active_recordings.lock().await;
-                active.remove(&channel_id);
-                let mut sessions = state.active_sessions.lock().await;
-                sessions.remove(&channel_id);
-                let mut tokens = state.session_cancel_tokens.lock().await;
-                tokens.remove(&channel_id);
                 let _ = event_tx
                     .send(AppEvent::RecordingEnded {
                         channel_id: channel_id.clone(),
@@ -365,10 +326,6 @@ impl RecordingSession {
                         .await;
                     registry.reset_to_idle(&channel_id);
                     session_cancel.cancel();
-                    {
-                        let mut tokens = state.session_cancel_tokens.lock().await;
-                        tokens.remove(&channel_id);
-                    }
                     if let Some(mut chat_handle) = chat_task
                         && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
                             .await
@@ -382,10 +339,6 @@ impl RecordingSession {
                         }
                     }
                     let _ = tokio::fs::remove_dir(&session_dir).await;
-                    let mut active = state.active_recordings.lock().await;
-                    active.remove(&channel_id);
-                    let mut sessions = state.active_sessions.lock().await;
-                    sessions.remove(&channel_id);
                     let _ = event_tx
                         .send(AppEvent::RecordingEnded {
                             channel_id: channel_id.clone(),
@@ -579,36 +532,11 @@ impl RecordingSession {
                 }
                 let _ = tokio::fs::remove_dir(&session_dir).await;
 
-                {
-                    let mut tokens = state.session_cancel_tokens.lock().await;
-                    tokens.remove(&channel_id);
-                }
-                {
-                    let mut active = state.active_recordings.lock().await;
-                    active.remove(&channel_id);
-                }
-                {
-                    let mut sessions = state.active_sessions.lock().await;
-                    sessions.remove(&channel_id);
-                }
-
-                let is_newly_restricted = {
-                    let mut restricted = state.restricted_channels.lock().await;
-                    restricted.insert(channel_id.clone())
-                };
-
-                if let Some(lid) = info.live_id {
-                    let mut r_ids = state.restricted_live_ids.lock().await;
-                    r_ids.insert(channel_id.clone(), lid);
-                }
-
-                if is_newly_restricted {
-                    let log_msg = format!(
-                        "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
-                        channel_id, info.streamer_name
-                    );
-                    let _ = event_tx.send(AppEvent::Log(LogEntry::error(log_msg))).await;
-                }
+                let log_msg = format!(
+                    "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
+                    channel_id, info.streamer_name
+                );
+                let _ = event_tx.send(AppEvent::Log(LogEntry::error(log_msg))).await;
 
                 let _ = event_tx
                     .send(AppEvent::RecordingEnded {
@@ -641,14 +569,7 @@ impl RecordingSession {
             let metadata_jsonl = registry
                 .active_session(&channel_id)
                 .map(|s| s.format_metadata_jsonl())
-                .unwrap_or_else(|| {
-                    let sessions = state.active_sessions.try_lock().ok();
-                    sessions
-                        .as_ref()
-                        .and_then(|m| m.get(&channel_id))
-                        .map(|s| s.format_metadata_jsonl())
-                        .unwrap_or_default()
-                });
+                .unwrap_or_default();
             if !metadata_jsonl.is_empty()
                 && let Some(ref backend) = backend_opt
             {
@@ -673,40 +594,8 @@ impl RecordingSession {
                 }
             }
 
-            let is_restricted = registry.is_restricted(&channel_id)
-                || state.restricted_channels.lock().await.contains(&channel_id);
+            registry.finish_recording(&channel_id, info.live_id);
 
-            if !is_restricted {
-                registry.finish_recording(&channel_id, info.live_id);
-            }
-
-            {
-                let mut tokens = state.session_cancel_tokens.lock().await;
-                tokens.remove(&channel_id);
-            }
-            {
-                let mut active = state.active_recordings.lock().await;
-                active.remove(&channel_id);
-            }
-            {
-                let mut sessions = state.active_sessions.lock().await;
-                if sessions
-                    .get(&channel_id)
-                    .is_some_and(|s| s.start_timestamp == start_timestamp)
-                {
-                    sessions.remove(&channel_id);
-                }
-            }
-            if !is_restricted {
-                let mut finished = state.finished_sessions.lock().await;
-                finished.insert(
-                    channel_id.clone(),
-                    FinishedSession {
-                        live_id: info.live_id,
-                        finished_at: std::time::Instant::now(),
-                    },
-                );
-            }
             let _ = event_tx
                 .send(AppEvent::RecordingEnded {
                     channel_id: channel_id.clone(),
