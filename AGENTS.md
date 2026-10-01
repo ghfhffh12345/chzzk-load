@@ -16,6 +16,8 @@
 - **Metadata Event Tracking**: State transitions (title, category, tags, rules) tracked in `metadata.jsonl` with millisecond `stream_offset_ms` and synced via `backend.upload_text` (`rclone rcat`).
 - **Universal Cloud & Local Sync**: Rclone integration (70+ providers, progress parsing, non-blocking check) or local-only mode (`remote_path = ""`).
 - **Anti-Race Cooldown**: Deduplicates CDN cache TTL (10–30s) using finished `live_id`s and post-recording cooldown.
+- **Crash Recovery & Reconciliation**: Detects orphaned chunks on startup, validates contiguity, and quarantines partial tail chunks.
+- **Headless Console Mode**: `--headless`/`--no-tui` and non-TTY auto-detection bypasses TUI for service/Docker daemon environments.
 - **Event-Driven TUI**: Ratatui + `crossterm::event::EventStream`; zero-alloc log slicing, no CPU spinning, lockstep view scrolling.
 
 ---
@@ -28,13 +30,13 @@ chzzk-load/
 ├── npm/chzzk-load/    # Root wrapper CLI package & launcher (bin/chzzk-load.js)
 ├── scripts/           # prepare-npm.js (--resolve-release), test-npm-packages.js
 ├── src/
-│   ├── main.rs, lib.rs, app_path.rs, config.rs
+│   ├── main.rs, lib.rs, app_path.rs, config.rs, cli.rs, disk.rs
 │   ├── chzzk/         # client.rs (API/CDN extract), chat.rs (WebSocket), models.rs, models_chat.rs
 │   ├── recorder/      # ffmpeg.rs (process/flags), watcher.rs (numeric N+1 sealing), chat_writer.rs (batched I/O)
 │   ├── uploader/      # backend.rs (trait/mock), rclone.rs (CLI/rcat), worker.rs (non-blocking primary + DLQ)
-│   ├── engine/        # session.rs, dispatcher.rs, recording.rs, state.rs, cleanup.rs
+│   ├── engine/        # session.rs, dispatcher.rs, recording.rs, reconciliation.rs, state.rs, cleanup.rs
 │   └── tui/           # app.rs, ui.rs (layout/zero-alloc logs), event.rs, theme.rs, console.rs
-└── tests/             # Integration tests (chat, recorder, rclone, engine events, config, TUI)
+└── tests/             # Integration tests (chat, recorder, rclone, engine events, config, TUI, worker, disk, reconciliation, cli)
 ```
 
 ---

@@ -22,8 +22,11 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 - 💬 **Real-Time Live Chat Recording (`chat_%04d.jsonl`)**: Simultaneously captures live chat via WebSocket into structured JSON Lines format segmented into time-aligned chunks, preserving timestamps, user nicknames, badges, donations/cheeses, and message text.
 - 💽 **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD card and flash storage longevity on Single Board Computers (Raspberry Pi, ARM64) using in-memory byte buffering with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
 - 📊 **Stream Metadata Event Tracking (`metadata.jsonl`)**: Tracks all broadcast state transitions (title, category, tags, access tier, watch parties, policies, chat rules) with millisecond-accurate video synchronization, uploaded to cloud storage in real time.
-- 💾 **Strictly Bounded Disk Footprint**: Only 1–2 video segments and at most 1 chat chunk reside on disk simultaneously per active stream. Chunks are permanently deleted immediately upon verified cloud upload.
-- 🛡️ **N+1 Segment Boundary Safety**: Chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
+- 💾 **Strictly Bounded Disk Footprint & Disk Space Guarding**: Only 1–2 video segments and at most 1 chat chunk reside on disk simultaneously per active stream. Chunks are permanently deleted immediately upon verified cloud upload. An active cross-platform circuit breaker (`min_free_disk_gb`) gracefully pauses recordings if disk space falls below safe limits.
+- 🛡️ **N+1 Segment Boundary Safety**: Explicit numeric sequence parsing (`chunk_%04d.ts`) ensures chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
+- 📬 **Non-Blocking Dead-Letter Queue (DLQ)**: Upload failures never block subsequent chunks. Failed segments transfer to a background DLQ with exponential backoff (2s, 4s, 8s; max 3 retries), maintaining uplink progress and disk reclamation.
+- 🔄 **Startup Crash Reconciliation & Tail Chunk Quarantine**: Reconciles orphaned session folders from prior crashes or system reboots, validating contiguous sealed chunks for upload while safely quarantining unfinalized tail segments (`.quarantine`).
+- 🤖 **Headless Console Mode (`--headless` / `--no-tui`)**: Auto-detects non-TTY environments (or manual flags) to bypass TUI raw mode, streaming colorized logs to stdout for systemd services and Docker containers.
 - ☁️ **Universal Cloud Storage Sync via Rclone**: Seamless cloud synchronization powered by [rclone](https://rclone.org/), supporting 70+ storage providers including Google Drive, OneDrive, Amazon S3, Dropbox, WebDAV, SFTP, and local paths. Runs in **local-only recording mode** when cloud sync is disabled (`remote_path: ""`).
 - 🔀 **Intra-Channel FIFO Serialization & Multi-Stream Concurrency**: Guarantees segments belonging to the same stream upload strictly in sequential order while uploading across different channels concurrently (up to `upload_concurrency`, default: 3).
 - 🖥️ **Event-Driven Terminal Dashboard**: Powered by `crossterm::event::EventStream` with zero-allocation rendering, real-time channel states, live stream titles, chat message counters, upload progress gauges, transfer speed metrics, header statistics (active recordings, total duration, archived size), collapsible activity logs (`l` key), and native Windows UTF-8 console support.
@@ -62,6 +65,9 @@ chzzk-load --config /path/to/my-settings.toml
 
 # Or bypass remote connection check at startup
 chzzk-load --skip-rclone-check
+
+# Run in headless console mode (ideal for background systemd/Docker services)
+chzzk-load --headless
 ```
 
 On first startup, `chzzk-load` generates a default `settings.toml` template in the current working directory if one does not exist.
