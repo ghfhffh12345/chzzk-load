@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -5,6 +7,7 @@ use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::config::{ChannelConfig, ChzzkConfig, GeneralConfig, Settings};
 use chzzk_load::engine::{ChannelLifecycleState, EngineOrchestrator};
 use chzzk_load::tui::event::AppEvent;
+use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 
 #[tokio::test]
 async fn test_orchestrator_typed_query_seam_idle() {
@@ -343,35 +346,7 @@ async fn test_orchestrator_handles_ffmpeg_403_forbidden_via_registry() {
     let temp_dir = std::env::temp_dir().join(format!("test_orch_403_{}", rand::random::<u32>()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
-    let mock_bin = temp_dir.join(if cfg!(windows) {
-        "mock_ffmpeg.exe"
-    } else {
-        "mock_ffmpeg"
-    });
-    let src_path = temp_dir.join("mock_ffmpeg.rs");
-    std::fs::write(
-        &src_path,
-        r#"
-use std::io::Write;
-fn main() {
-    let stderr = std::io::stderr();
-    let mut handle = stderr.lock();
-    let _ = writeln!(handle, "[https @ 0xaaaaebe99930] HTTP error 403 Forbidden");
-    let _ = writeln!(handle, "[in#0 @ 0xaaaaebdbabe0] Unable to open key file https://api.chzzk.naver.com/service/v1/encryption/lives/21326414/aes_key, Server returned 403 Forbidden (access denied)");
-    let _ = handle.flush();
-    std::thread::sleep(std::time::Duration::from_secs(60));
-}
-"#,
-    )
-    .unwrap();
-
-    let compile_status = std::process::Command::new("rustc")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&mock_bin)
-        .status()
-        .expect("Failed to compile mock_ffmpeg");
-    assert!(compile_status.success(), "mock_ffmpeg compilation failed");
+    let mock_bin = get_mock_ffmpeg_bin();
 
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
@@ -443,7 +418,7 @@ fn main() {
         live_id: Some(21326414),
         streamer_name: "SportsStreamer".to_string(),
         title: "Sports Broadcast (Encrypted)".to_string(),
-        hls_url: "https://test.com/hls.m3u8".to_string(),
+        hls_url: "https://test.com/hls_key_error.m3u8".to_string(),
         chat_channel_id: None,
         metadata: Default::default(),
     };

@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+
+# Pre-commit hook: verify formatting and linting gates locally before commit
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings

@@ -1,86 +1,8 @@
+mod common;
+
 use chzzk_load::recorder::ffmpeg::{FfmpegEvent, FfmpegExit, FfmpegSession};
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 use std::time::Duration;
-
-static MOCK_BIN: OnceLock<PathBuf> = OnceLock::new();
-static MOCK_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-unsafe extern "C" {
-    fn atexit(cb: extern "C" fn()) -> std::ffi::c_int;
-}
-
-extern "C" fn cleanup_mock_bin() {
-    if let Some(dir) = MOCK_DIR.get() {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-}
-
-fn get_mock_ffmpeg_bin() -> &'static Path {
-    MOCK_BIN.get_or_init(|| {
-        let temp_dir =
-            std::env::temp_dir().join(format!("test_mock_ffmpeg_{}", rand::random::<u32>()));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let _ = MOCK_DIR.set(temp_dir.clone());
-        unsafe {
-            atexit(cleanup_mock_bin);
-        }
-        let bin_path = temp_dir.join(if cfg!(windows) {
-            "mock_ffmpeg.exe"
-        } else {
-            "mock_ffmpeg"
-        });
-        let src_path = temp_dir.join("mock_ffmpeg.rs");
-        std::fs::write(
-            &src_path,
-            r#"
-use std::io::{BufRead, Write};
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let is_hang = args.iter().any(|a| a.contains("hang"));
-    let is_key_error = args.iter().any(|a| a.contains("key_error"));
-    let is_logs_and_exit = args.iter().any(|a| a.contains("logs_and_exit"));
-    if is_hang {
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    } else if is_key_error {
-        let stderr = std::io::stderr();
-        let mut handle = stderr.lock();
-        let _ = writeln!(handle, "[in#0 @ 0xaaaaebdbabe0] Unable to open key file https://api.chzzk.naver.com/service/v1/encryption/lives/21326414/aes_key, Server returned 403 Forbidden (access denied)");
-        let _ = writeln!(handle, "segment 0001 skipping due to encryption error");
-        let _ = handle.flush();
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    } else if is_logs_and_exit {
-        let stderr = std::io::stderr();
-        let mut handle = stderr.lock();
-        let _ = writeln!(handle, "frame=  100 fps=30 q=-1.0 size=    1024kB");
-        let _ = handle.flush();
-        std::process::exit(0);
-    } else {
-        let stdin = std::io::stdin();
-        for line in stdin.lock().lines() {
-            if let Ok(l) = line {
-                if l.trim() == "q" {
-                    break;
-                }
-            }
-        }
-        std::process::exit(0);
-    }
-}
-"#,
-        )
-        .unwrap();
-
-        let status = std::process::Command::new("rustc")
-            .arg(&src_path)
-            .arg("-o")
-            .arg(&bin_path)
-            .status()
-            .expect("Failed to compile mock_ffmpeg");
-        assert!(status.success(), "mock_ffmpeg compilation failed");
-        bin_path
-    })
-}
 
 #[tokio::test]
 async fn test_ffmpeg_session_clean_exit_on_stop_graceful() {
