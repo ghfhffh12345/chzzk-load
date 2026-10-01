@@ -35,6 +35,7 @@ chzzk-load/
 ├── README.md                 # Primary documentation (English)
 ├── README.ko.md              # Documentation (Korean)
 ├── settings.toml             # Dedicated configuration file (portable)
+├── plans/                    # Architecture blueprints, readiness analyses, and milestone plans
 ├── npm/
 │   └── chzzk-load/           # Root npm CLI wrapper package
 │       ├── bin/
@@ -278,4 +279,5 @@ When implementing changes, AI agents must strictly preserve the following rules:
 13. **TOML Configuration & Channel Aliasing**: Configuration must strictly adhere to `settings.toml` parsed with `toml = "1.1"`. Legacy `settings.json` is completely deprecated and unsupported. Channel configuration supports both shorthand string arrays and `[[channels]]` tables with `id` and optional `alias`. Both local session directories and cloud storage folders strictly follow `[{timestamp}] [{alias}] {streamer_name} - {title}` (or `[{timestamp}] {streamer_name} - {title}` if no alias is configured). All folder and filename components are conservatively sanitized against `\`, `/`, `:`, `*`, `?`, `"`, `<`, `>`, `|`, control characters, and trailing spaces/dots consistently across local and cloud environments. The TUI displays `alias` (or streamer name fallback) consistently without online/offline state flipping.
 14. **Stream Metadata Tracking & Monotonic Synchronization**: Stream metadata changes must be tracked in `metadata.jsonl` using JSON Lines format with monotonic `stream_offset_ms` calculated from `session_start_instant.elapsed().as_millis()`. High-frequency telemetry (e.g. `concurrent_user_count`, `accumulate_count`) is excluded from triggering `METADATA_CHANGED` events to avoid write churn. `metadata.jsonl` is dual-written locally and synchronized with remote storage in real-time.
 15. **Explicit User Authorization Before Implementation**: AI agents must NEVER jump straight into code modifications, file creation, or implementation tasks following design interviews, planning sessions, or artifact generation without explicit user authorization (e.g., the user explicitly saying "proceed" or directing implementation to begin). Always present the plan, findings, or proposals and pause for explicit confirmation before touching any code or files in the repository.
+16. **Plans and Architecture Specifications Location**: All design specifications, readiness analyses, and implementation plans must be saved directly into the `plans/` directory at the repository root using the date-prefixed naming convention (`plans/YYYY-MM-DD-<topic>.md`). Do not scatter plan documents in temporary directories or ad-hoc paths.
 
