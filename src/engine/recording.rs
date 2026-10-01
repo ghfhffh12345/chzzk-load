@@ -319,38 +319,7 @@ impl RecordingSession {
                             Some(FfmpegEvent::Log(line)) => {
                                 let _ = event_tx.try_send(AppEvent::Log(LogEntry::ffmpeg(line)));
                             }
-                            Some(FfmpegEvent::Exited(status)) => {
-                                let _ = event_tx
-                                    .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "FFmpeg process exited with status: {status}"
-                                    ))))
-                                    .await;
-
-                                seal_and_enqueue_chunks(
-                                    &mut watcher,
-                                    &session_folder_name,
-                                    &channel_id,
-                                    &info.streamer_name,
-                                    &upload_tx,
-                                    &event_tx,
-                                    backend_opt.is_some(),
-                                    true,
-                                )
-                                .await;
-                                break;
-                            }
-                            None => {
-                                seal_and_enqueue_chunks(
-                                    &mut watcher,
-                                    &session_folder_name,
-                                    &channel_id,
-                                    &info.streamer_name,
-                                    &upload_tx,
-                                    &event_tx,
-                                    backend_opt.is_some(),
-                                    true,
-                                )
-                                .await;
+                            Some(FfmpegEvent::Exited(_)) | None => {
                                 break;
                             }
                         }
@@ -361,37 +330,6 @@ impl RecordingSession {
                                 "Cancellation received for channel {channel_id}, stopping FFmpeg gracefully..."
                             ))))
                             .await;
-
-                        match ffmpeg_session.stop_graceful(Duration::from_secs(3)).await {
-                            Ok(FfmpegExit::Clean(status)) => {
-                                let _ = event_tx
-                                    .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "FFmpeg process exited cleanly: {status}"
-                                    ))))
-                                    .await;
-                            }
-                            Ok(FfmpegExit::Killed(_)) | Err(_) => {
-                                let _ = event_tx
-                                    .send(AppEvent::Log(LogEntry::rec(
-                                        "FFmpeg did not exit within timeout, terminating process...",
-                                    )))
-                                    .await;
-                            }
-                        }
-
-                        // Collect lingering chunks on cancellation
-                        seal_and_enqueue_chunks(
-                            &mut watcher,
-                            &session_folder_name,
-                            &channel_id,
-                            &info.streamer_name,
-                            &upload_tx,
-                            &event_tx,
-                            backend_opt.is_some(),
-                            true,
-                        )
-                        .await;
-
                         break;
                     }
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {
@@ -406,44 +344,9 @@ impl RecordingSession {
                                             avail, min_disk
                                         ))))
                                         .await;
-
-                                    match ffmpeg_session.stop_graceful(Duration::from_secs(3)).await {
-                                        Ok(FfmpegExit::Clean(status)) => {
-                                            let _ = event_tx
-                                                .send(AppEvent::Log(LogEntry::rec(format!(
-                                                    "FFmpeg process exited cleanly: {status}"
-                                                ))))
-                                                .await;
-                                        }
-                                        Ok(FfmpegExit::Killed(_)) | Err(_) => {
-                                            let _ = event_tx
-                                                .send(AppEvent::Log(LogEntry::rec(
-                                                    "FFmpeg did not exit within timeout, terminating process...",
-                                                )))
-                                                .await;
-                                        }
-                                    }
-
-                                    seal_and_enqueue_chunks(
-                                        &mut watcher,
-                                        &session_folder_name,
-                                        &channel_id,
-                                        &info.streamer_name,
-                                        &upload_tx,
-                                        &event_tx,
-                                        backend_opt.is_some(),
-                                        true,
-                                    )
-                                    .await;
-
                                     break;
                                 }
                             }
-                        }
-
-                        if ffmpeg_session.is_key_forbidden() {
-                            restricted_abort = true;
-                            break;
                         }
 
                         seal_and_enqueue_chunks(
@@ -510,6 +413,36 @@ impl RecordingSession {
 
                 return;
             }
+
+            match ffmpeg_session.stop_graceful(Duration::from_secs(3)).await {
+                Ok(FfmpegExit::Clean(status)) => {
+                    let _ = event_tx
+                        .send(AppEvent::Log(LogEntry::rec(format!(
+                            "FFmpeg process exited cleanly: {status}"
+                        ))))
+                        .await;
+                }
+                Ok(FfmpegExit::Killed(_)) | Err(_) => {
+                    let _ = event_tx
+                        .send(AppEvent::Log(LogEntry::rec(
+                            "FFmpeg did not exit within timeout, terminating process...",
+                        )))
+                        .await;
+                }
+            }
+
+            // Collect lingering chunks on stream conclusion, cancellation, or low disk space
+            seal_and_enqueue_chunks(
+                &mut watcher,
+                &session_folder_name,
+                &channel_id,
+                &info.streamer_name,
+                &upload_tx,
+                &event_tx,
+                backend_opt.is_some(),
+                true,
+            )
+            .await;
 
             session_cancel.cancel();
             if let Some(mut chat_handle) = chat_task
