@@ -10,11 +10,14 @@
 # Check, lint, and format (PowerShell / Bash compatible)
 cargo check --all-targets; cargo clippy --all-targets -- -D warnings; cargo fmt --check
 
-# Test suite
-cargo test --test test_channel_lifecycle_registry   # Fast unit tests (<1s)
-cargo test                                          # Full test suite
-cargo test --test test_engine_events <filter>
-node scripts/test-npm-packages.js
+# Test suite (Tiered Fast Feedback)
+cargo test --test test_channel_lifecycle_registry   # Fast registry unit tests (<1s)
+cargo test --test test_engine_orchestrator_registry # Typed engine seam unit tests (<1s)
+cargo test --test test_recorder_watcher             # FFmpeg watcher unit tests (<1s)
+cargo test --test test_tui_state                    # TUI state unit tests (<1s)
+cargo test --test test_engine_events <filter>       # Heavy async integration tests (20-25s)
+cargo test                                          # Full test suite (final verification gate)
+node scripts/test-npm-packages.js                   # Node packaging and CLI launcher suite
 
 # Build release binary
 cargo build --release
@@ -58,6 +61,12 @@ cargo build --release
 - **TOML Configuration**: Adhere to `settings.toml` (`toml = "1.1"`). Directory format: `[{timestamp}] [{alias}] {streamer} - {title}` (omit `[{alias}]` if none). Sanitize `\/:*?"<>|` and control characters. Display channel alias consistently in TUI without flicker.
 - **Portable Path Resolution**: Resolve relative paths via `app_path::resolve_path(...)` (prioritizes CWD, falls back to executable directory, avoids `node_modules`).
 - **Resilient Test Ports & Paths**: Use dynamic ephemeral port binding (`127.0.0.1:0`), never hardcoded ports. All test filesystem mutations must operate strictly within `std::env::temp_dir()`.
+
+### 2.7. Testing & Fast-Feedback Discipline
+- **Tiered Test Execution**: Always run targeted unit tests first (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_tui_state`, etc., running in <1s) during tight TDD loops. Reserve heavy async integration suites (`test_engine_events`, taking 20–25s) and full `cargo test` for the final verification gate before commit.
+- **State Machine Invariant Coverage**: Every channel state transition guard, restriction condition, and cancellation behavior in `ChannelLifecycleRegistry` must have a dedicated zero-overhead unit test in `tests/test_channel_lifecycle_registry.rs`. Never rely exclusively on integration suites to catch lifecycle state regressions.
+- **Ephemeral Port & Directory Isolation**: Tests must never bind hardcoded network ports (use `127.0.0.1:0`) and must isolate all filesystem activity inside `std::env::temp_dir()`. Clean up directories upon test completion.
+- **Cross-Platform Shell Compatibility**: Write command snippets using semicolon statement separators `;` or separate lines rather than Bash-only `&&` operators to ensure compatibility with Windows PowerShell and POSIX shells.
 
 ---
 
