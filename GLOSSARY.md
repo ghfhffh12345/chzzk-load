@@ -43,3 +43,7 @@ _Avoid_: Retry loop, failed upload cache
 **Disk-Aware Retry Policy**:
 The eviction strategy used by the DLQ under extreme disk pressure. If remaining space drops to `min_free_disk_gb`, the DLQ permanently deletes the oldest pending chunks to prevent disk-full crashes.
 _Avoid_: Disk quota, auto-delete, purge strategy
+
+**Post-Recording Consolidation**:
+The post-processing task that losslessly merges and remuxes remote video chunks (`.ts` to `.mp4`) and deduplicates chat logs (`.jsonl`) entirely over the network with a strictly bounded memory footprint, circumventing local disk usage.
+_Avoid_: Cloud merge, remote stitch, post-processing script
