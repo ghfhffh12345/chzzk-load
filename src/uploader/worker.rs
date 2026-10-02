@@ -10,8 +10,8 @@ use crate::uploader::{UploadTask, broadcast_identifier};
 
 #[derive(Debug, Clone)]
 pub struct DlqConfig {
-    pub max_retries: usize,
     pub initial_delay: Duration,
+    pub max_backoff: Duration,
     pub max_tasks_per_channel: usize,
     pub circuit_breaker_failures: usize,
     pub circuit_breaker_cooldown: Duration,
@@ -20,12 +20,28 @@ pub struct DlqConfig {
 impl Default for DlqConfig {
     fn default() -> Self {
         Self {
-            max_retries: 3,
             initial_delay: Duration::from_secs(2),
+            max_backoff: Duration::from_secs(300),
             max_tasks_per_channel: 20,
             circuit_breaker_failures: 5,
             circuit_breaker_cooldown: Duration::from_secs(30),
         }
+    }
+}
+
+impl DlqConfig {
+    /// Computes the exponential backoff delay for a given retry attempt,
+    /// capped at `max_backoff`.
+    pub fn backoff_delay(&self, retry_attempt: usize) -> Duration {
+        if retry_attempt == 0 {
+            return self.initial_delay.min(self.max_backoff);
+        }
+        let multiplier = 1u32
+            .checked_shl(retry_attempt.min(30) as u32)
+            .unwrap_or(u32::MAX);
+        self.initial_delay
+            .saturating_mul(multiplier)
+            .min(self.max_backoff)
     }
 }
 
@@ -115,8 +131,8 @@ impl UploadWorker {
                         *consecutive_failures = 0;
                         if let TaskKind::Dlq { retry_attempt } = outcome.kind {
                             let _ = event_tx.try_send(AppEvent::Log(LogEntry::clean(format!(
-                                "[DLQ] Successfully uploaded {} on retry {}/{}",
-                                outcome.task.chunk_name, retry_attempt, dlq_config.max_retries
+                                "[DLQ] Successfully uploaded {} on retry {}",
+                                outcome.task.chunk_name, retry_attempt
                             ))));
                         }
                     }
@@ -133,79 +149,53 @@ impl UploadWorker {
                             ))));
                         }
 
-                        match outcome.kind {
+                        let (next_attempt, delay, log_msg) = match outcome.kind {
                             TaskKind::Primary => {
-                                let dlq = dlq_queues.entry(outcome.channel_id.clone()).or_default();
-                                if dlq.len() >= dlq_config.max_tasks_per_channel {
-                                    if let Some(old) = dlq.pop_front() {
-                                        let _ = event_tx.try_send(AppEvent::Log(LogEntry::warn(
-                                            format!(
-                                                "[DLQ] DLQ capacity reached ({}) for channel {}. Evicting oldest task {}.",
-                                                dlq_config.max_tasks_per_channel,
-                                                outcome.channel_id,
-                                                old.task.chunk_name
-                                            ),
-                                        )));
-                                    }
-                                }
-                                let delay = dlq_config.initial_delay;
-                                dlq.push_back(DlqTask {
-                                    task: outcome.task.clone(),
-                                    retry_attempt: 1,
-                                    next_retry_at: tokio::time::Instant::now() + delay,
-                                });
-                                let _ = event_tx.try_send(AppEvent::Log(LogEntry::warn(format!(
-                                    "[DLQ] Transferred {} to DLQ (retry 1/{} in {}s)",
-                                    outcome.task.chunk_name,
-                                    dlq_config.max_retries,
-                                    delay.as_secs()
-                                ))));
+                                let delay = dlq_config.backoff_delay(0);
+                                (
+                                    1,
+                                    delay,
+                                    format!(
+                                        "[DLQ] Transferred {} to DLQ (retry 1 in {}s)",
+                                        outcome.task.chunk_name,
+                                        delay.as_secs()
+                                    ),
+                                )
                             }
                             TaskKind::Dlq { retry_attempt } => {
-                                if retry_attempt < dlq_config.max_retries {
-                                    let next_attempt = retry_attempt + 1;
-                                    let multiplier = 1u32 << (retry_attempt);
-                                    let delay = dlq_config.initial_delay * multiplier;
-                                    let dlq =
-                                        dlq_queues.entry(outcome.channel_id.clone()).or_default();
-                                    if dlq.len() >= dlq_config.max_tasks_per_channel {
-                                        if let Some(old) = dlq.pop_front() {
-                                            let _ = event_tx.try_send(AppEvent::Log(LogEntry::warn(
-                                                format!(
-                                                    "[DLQ] DLQ capacity reached ({}) for channel {}. Evicting oldest task {}.",
-                                                    dlq_config.max_tasks_per_channel,
-                                                    outcome.channel_id,
-                                                    old.task.chunk_name
-                                                ),
-                                            )));
-                                        }
-                                    }
-                                    dlq.push_back(DlqTask {
-                                        task: outcome.task.clone(),
-                                        retry_attempt: next_attempt,
-                                        next_retry_at: tokio::time::Instant::now() + delay,
-                                    });
-                                    let _ = event_tx.try_send(AppEvent::Log(LogEntry::warn(
-                                        format!(
-                                            "[DLQ] Retry {}/{} failed for {}. Scheduled retry {}/{} in {}s",
-                                            retry_attempt,
-                                            dlq_config.max_retries,
-                                            outcome.task.chunk_name,
-                                            next_attempt,
-                                            dlq_config.max_retries,
-                                            delay.as_secs()
-                                        ),
-                                    )));
-                                } else {
-                                    let _ = event_tx.try_send(AppEvent::Log(LogEntry::error(
-                                        format!(
-                                            "[DLQ] Retries exhausted for {}. Preserved on disk for startup reconciliation.",
-                                            outcome.task.chunk_name
-                                        ),
-                                    )));
-                                }
+                                let next_attempt = retry_attempt.saturating_add(1);
+                                let delay = dlq_config.backoff_delay(retry_attempt);
+                                (
+                                    next_attempt,
+                                    delay,
+                                    format!(
+                                        "[DLQ] Retry {} failed for {}. Scheduled retry {} in {}s",
+                                        retry_attempt,
+                                        outcome.task.chunk_name,
+                                        next_attempt,
+                                        delay.as_secs()
+                                    ),
+                                )
+                            }
+                        };
+
+                        let dlq = dlq_queues.entry(outcome.channel_id.clone()).or_default();
+                        if dlq.len() >= dlq_config.max_tasks_per_channel {
+                            if let Some(old) = dlq.pop_front() {
+                                let _ = event_tx.try_send(AppEvent::Log(LogEntry::warn(format!(
+                                    "[DLQ] DLQ capacity reached ({}) for channel {}. Evicting oldest task {}.",
+                                    dlq_config.max_tasks_per_channel,
+                                    outcome.channel_id,
+                                    old.task.chunk_name
+                                ))));
                             }
                         }
+                        dlq.push_back(DlqTask {
+                            task: outcome.task.clone(),
+                            retry_attempt: next_attempt,
+                            next_retry_at: tokio::time::Instant::now() + delay,
+                        });
+                        let _ = event_tx.try_send(AppEvent::Log(LogEntry::warn(log_msg)));
                     }
                 }
 
@@ -802,7 +792,6 @@ mod tests {
         let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
 
         let fast_dlq = DlqConfig {
-            max_retries: 1,
             initial_delay: Duration::from_millis(5),
             ..Default::default()
         };
@@ -828,11 +817,10 @@ mod tests {
             .unwrap();
 
         drop(upload_tx);
-        worker_handle.await.unwrap();
 
         let mut saw_failed = false;
         let mut saw_panic_log = false;
-        while let Ok(ev) = event_rx.try_recv() {
+        while let Some(ev) = event_rx.recv().await {
             match ev {
                 AppEvent::UploadFailed { chunk_name, .. } if chunk_name == "chunk_panic.ts" => {
                     saw_failed = true;
@@ -842,7 +830,11 @@ mod tests {
                 }
                 _ => {}
             }
+            if saw_failed && saw_panic_log {
+                break;
+            }
         }
+        worker_handle.abort();
         assert!(saw_failed, "UploadFailed event should be emitted on panic");
         assert!(saw_panic_log, "Panic log entry should be emitted");
     }

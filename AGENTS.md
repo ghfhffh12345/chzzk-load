@@ -43,7 +43,7 @@ cargo build --release
 
 ### 2.3. Upload Pipeline & Disk Management (`src/uploader/`, `src/engine/`)
 - **Universal Cloud & Local Sync**: Use `RcloneBackend` for remote uploads (`rclone copyto ... --progress`, `rcat` for metadata). Respect `CHZZK_LOAD_RCLONE_BIN` override before `settings.rclone.rclone_bin` and `"rclone"` on `PATH`. If `remote_path` is empty (`""`), skip upload and retain files locally.
-- **Non-Blocking DLQ**: Process uploads through a non-blocking primary queue with cross-channel concurrency (default: 3). Failed uploads divert immediately to a Dead-Letter Queue (DLQ) with exponential backoff (2s, 4s, 8s, max 3 retries, capped at 20 tasks/channel in RAM) so subsequent chunks proceed without head-of-line blocking.
+- **Non-Blocking DLQ**: Process uploads through a non-blocking primary queue with cross-channel concurrency (default: 3). Failed uploads divert immediately to a Dead-Letter Queue (DLQ) with exponential backoff (initial 2s, capped at 5m, infinite retries, capped at 20 tasks/channel in RAM) so subsequent chunks proceed without head-of-line blocking.
 - **Strictly Bounded Disk Footprint**: Delete local video and chat chunks immediately upon confirmed upload (maintaining 1–2 video segments and at most 1 chat segment on disk per active stream).
 - **Disk Circuit Breaker**: Periodically check free disk space against `min_free_disk_gb`. If breached, gracefully terminate FFmpeg (`"q\n"`), seal/upload final chunks, and block new sessions until disk space recovers.
 - **Crash Recovery & Reconciliation**: Detect orphaned chunks on startup, validate contiguity, and quarantine partial tail chunks.

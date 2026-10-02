@@ -166,7 +166,6 @@ async fn test_dlq_non_blocking_primary_queue_advances() {
     let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
 
     let dlq_config = DlqConfig {
-        max_retries: 2,
         initial_delay: Duration::from_millis(50),
         ..Default::default()
     };
@@ -252,7 +251,6 @@ async fn test_dlq_retries_and_succeeds() {
     let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
 
     let dlq_config = DlqConfig {
-        max_retries: 3,
         initial_delay: Duration::from_millis(15),
         ..Default::default()
     };
@@ -284,7 +282,7 @@ async fn test_dlq_retries_and_succeeds() {
             AppEvent::Log(entry)
                 if entry
                     .message
-                    .contains("[DLQ] Successfully uploaded chunk_0000.ts on retry 1/3") =>
+                    .contains("[DLQ] Successfully uploaded chunk_0000.ts on retry 1") =>
             {
                 saw_dlq_success = true;
             }
@@ -302,22 +300,22 @@ async fn test_dlq_retries_and_succeeds() {
     );
 }
 
-#[tokio::test]
-async fn test_dlq_exhaustion_preserves_file_on_disk() {
-    let temp_guard = TempDirGuard::new("test_dlq_exhaust");
+#[tokio::test(start_paused = true)]
+async fn test_dlq_infinite_retry_does_not_drop_tasks() {
+    let temp_guard = TempDirGuard::new("test_dlq_infinite");
     let (task_fail, path_fail) =
-        create_chunk_file(temp_guard.path(), "chunk_fail.ts", b"video-fail");
+        create_chunk_file(temp_guard.path(), "chunk_fail.ts", b"video-infinite");
 
-    // Backend always fails for chunk_fail.ts.
-    let backend = Arc::new(FlexibleMockBackend::new(|_path, _attempt| true));
+    // Fails attempts 1 through 5 (1 primary + 4 DLQ retries), then succeeds on attempt 6 (retry 5).
+    // In the old implementation with max_retries: 3, it would have been dropped after attempt 4 (retry 3).
+    let backend = Arc::new(FlexibleMockBackend::new(|_path, attempt| attempt < 6));
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
     let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
 
     let dlq_config = DlqConfig {
-        max_retries: 3,
         initial_delay: Duration::from_millis(10),
-        circuit_breaker_failures: 10, // Prevent circuit breaker from pausing during retry progression
+        circuit_breaker_failures: 20, // Prevent circuit breaker from tripping during retry progression
         ..Default::default()
     };
 
@@ -328,28 +326,96 @@ async fn test_dlq_exhaustion_preserves_file_on_disk() {
     drop(upload_tx);
     worker_handle.await.unwrap();
 
-    // After 3 retries (1 primary + 3 retries = 4 attempts), verify file STILL EXISTS on disk.
+    // Verify chunk_fail.ts was uploaded on attempt 6 and deleted after success.
     assert!(
-        path_fail.exists(),
-        "chunk_fail.ts must be preserved on disk when DLQ retries are exhausted"
+        !path_fail.exists(),
+        "chunk_fail.ts must be deleted after DLQ retry succeeds on attempt 6"
     );
-    assert_eq!(backend.attempts_for("chunk_fail.ts"), 4);
+    assert_eq!(backend.attempts_for("chunk_fail.ts"), 6);
 
-    // Verify exhaustion error log was emitted.
-    let mut saw_exhaustion_log = false;
+    let mut saw_retry_5_success = false;
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(entry) = ev
-            && entry.message.contains(
-                "[DLQ] Retries exhausted for chunk_fail.ts. Preserved on disk for startup reconciliation.",
-            )
+            && entry
+                .message
+                .contains("[DLQ] Successfully uploaded chunk_fail.ts on retry 5")
         {
-            saw_exhaustion_log = true;
+            saw_retry_5_success = true;
         }
     }
 
     assert!(
-        saw_exhaustion_log,
-        "Retries exhausted error log must be emitted"
+        saw_retry_5_success,
+        "Success log on retry 5 must be emitted, proving retries loop beyond the old 3-attempt limit"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_dlq_backoff_capped_at_maximum() {
+    let temp_guard = TempDirGuard::new("test_dlq_cap");
+    let (task, path) = create_chunk_file(temp_guard.path(), "chunk_cap.ts", b"video-cap");
+
+    // Fail 4 attempts (1 primary + 3 DLQ retries), then succeed on attempt 5 (retry 4).
+    let backend = Arc::new(FlexibleMockBackend::new(|_path, attempt| attempt < 5));
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
+
+    // Initial delay is 1s. Exponential progression: 1s, 2s, 4s, 8s...
+    // With max_backoff = 3s:
+    // Primary fail -> retry 1 in 1s
+    // Retry 1 fail -> retry 2 in 2s
+    // Retry 2 fail -> retry 3 in min(4s, 3s) = 3s
+    // Retry 3 fail -> retry 4 in min(8s, 3s) = 3s
+    let dlq_config = DlqConfig {
+        initial_delay: Duration::from_secs(1),
+        max_backoff: Duration::from_secs(3),
+        circuit_breaker_failures: 20,
+        ..Default::default()
+    };
+
+    let worker_handle =
+        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+
+    upload_tx.send(task).await.unwrap();
+    drop(upload_tx);
+    worker_handle.await.unwrap();
+
+    assert!(!path.exists());
+    assert_eq!(backend.attempts_for("chunk_cap.ts"), 5);
+
+    let mut logs = Vec::new();
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = ev {
+            logs.push(entry.message);
+        }
+    }
+
+    // Check logs for scheduled retries
+    assert!(
+        logs.iter()
+            .any(|m| m.contains("[DLQ] Transferred chunk_cap.ts to DLQ (retry 1 in 1s)")),
+        "Expected retry 1 in 1s log, got: {logs:?}"
+    );
+    assert!(
+        logs.iter()
+            .any(|m| m.contains("[DLQ] Retry 1 failed for chunk_cap.ts. Scheduled retry 2 in 2s")),
+        "Expected retry 2 in 2s log, got: {logs:?}"
+    );
+    assert!(
+        logs.iter()
+            .any(|m| m.contains("[DLQ] Retry 2 failed for chunk_cap.ts. Scheduled retry 3 in 3s")),
+        "Expected retry 3 capped at 3s log, got: {logs:?}"
+    );
+    assert!(
+        logs.iter()
+            .any(|m| m.contains("[DLQ] Retry 3 failed for chunk_cap.ts. Scheduled retry 4 in 3s")),
+        "Expected retry 4 capped at 3s log, got: {logs:?}"
+    );
+    assert!(
+        logs.iter()
+            .any(|m| m.contains("[DLQ] Successfully uploaded chunk_cap.ts on retry 4")),
+        "Expected retry 4 success log, got: {logs:?}"
     );
 }
 
@@ -357,8 +423,8 @@ async fn test_dlq_exhaustion_preserves_file_on_disk() {
 async fn test_circuit_breaker_trips_on_consecutive_failures() {
     let temp_guard = TempDirGuard::new("test_dlq_breaker");
 
-    // Backend always fails uploads.
-    let backend = Arc::new(FlexibleMockBackend::new(|_path, _attempt| true));
+    // Backend fails chunk on attempt 1, but succeeds on retry (attempt 2).
+    let backend = Arc::new(FlexibleMockBackend::new(|_path, attempt| attempt == 1));
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
     let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
@@ -367,7 +433,6 @@ async fn test_circuit_breaker_trips_on_consecutive_failures() {
         circuit_breaker_failures: 5,
         circuit_breaker_cooldown: Duration::from_millis(50),
         initial_delay: Duration::from_millis(10),
-        max_retries: 1,
         ..Default::default()
     };
 
@@ -433,14 +498,13 @@ async fn test_dlq_capacity_eviction_drops_oldest_task() {
     let (task1, _path1) = create_chunk_file(temp_guard.path(), "chunk_0001.ts", b"video-1");
     let (task2, _path2) = create_chunk_file(temp_guard.path(), "chunk_0002.ts", b"video-2");
 
-    // Backend always fails uploads.
-    let backend = Arc::new(FlexibleMockBackend::new(|_path, _attempt| true));
+    // Backend fails on attempt 1, but succeeds on attempt 2 (retry).
+    let backend = Arc::new(FlexibleMockBackend::new(|_path, attempt| attempt == 1));
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
     let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
 
     let dlq_config = DlqConfig {
-        max_retries: 2,
         initial_delay: Duration::from_millis(20),
         max_tasks_per_channel: 2, // Cap at 2 tasks per channel
         circuit_breaker_failures: 10,

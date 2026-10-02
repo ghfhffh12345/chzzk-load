@@ -35,3 +35,11 @@ _Avoid_: Timeout, shutdown delay, wait interval
 **Force Exit**:
 An immediate process termination path triggered by a double `'q'` keystroke or Grace Period timeout expiration, aborting active tasks, executing bounded directory cleanup (<500ms), and exiting with code 1.
 _Avoid_: Hard crash, emergency kill, dirty exit
+
+**Dead-Letter Queue (DLQ)**:
+The background queue that continuously retries failed file uploads upon network recovery, ensuring eventual consistency.
+_Avoid_: Retry loop, failed upload cache
+
+**Disk-Aware Retry Policy**:
+The eviction strategy used by the DLQ under extreme disk pressure. If remaining space drops to `min_free_disk_gb`, the DLQ permanently deletes the oldest pending chunks to prevent disk-full crashes.
+_Avoid_: Disk quota, auto-delete, purge strategy
