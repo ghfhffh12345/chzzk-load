@@ -60,6 +60,18 @@ fn create_local_rclone_backend(remote_dir: &Path) -> RcloneBackend {
     RcloneBackend::new(config)
 }
 
+/// Helper to create a standard `UploadTask` for testing.
+fn make_test_task(session_id: &str, chunk_path: PathBuf, chunk_name: &str) -> UploadTask {
+    UploadTask {
+        channel_id: "ch_stream1".to_string(),
+        session_folder_id: session_id.to_string(),
+        remote_dir: session_id.to_string(),
+        chunk_path,
+        chunk_name: chunk_name.to_string(),
+        streamer_name: "StreamerA".to_string(),
+    }
+}
+
 type FailPredicate = Arc<dyn Fn(&Path, usize) -> bool + Send + Sync>;
 
 /// Wrapper around `RcloneBackend` that allows injecting mock upload failures
@@ -140,7 +152,6 @@ impl UploadBackend for ControlledRcloneBackend {
 #[tokio::test]
 async fn test_real_rclone_local_remote_basic_upload() {
     if !ensure_rclone_available() {
-        eprintln!("Skipping rclone integration test: rclone binary not available");
         return;
     }
 
@@ -151,14 +162,7 @@ async fn test_real_rclone_local_remote_basic_upload() {
     let payload = b"video-stream-data-chunk-0";
     std::fs::write(&chunk_path, payload).expect("failed to write local chunk");
 
-    let task = UploadTask {
-        channel_id: "ch_stream1".to_string(),
-        session_folder_id: "session_20261002".to_string(),
-        remote_dir: "session_20261002".to_string(),
-        chunk_path: chunk_path.clone(),
-        chunk_name: "chunk_0000.ts".to_string(),
-        streamer_name: "StreamerA".to_string(),
-    };
+    let task = make_test_task("session_20261002", chunk_path.clone(), "chunk_0000.ts");
 
     let backend = Arc::new(create_local_rclone_backend(remote_guard.path()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
@@ -210,7 +214,6 @@ async fn test_real_rclone_local_remote_basic_upload() {
 #[tokio::test]
 async fn test_real_rclone_dlq_infinite_retry_eventually_succeeds() {
     if !ensure_rclone_available() {
-        eprintln!("Skipping rclone integration test: rclone binary not available");
         return;
     }
 
@@ -221,14 +224,7 @@ async fn test_real_rclone_dlq_infinite_retry_eventually_succeeds() {
     let payload = b"retryable-chunk-data";
     std::fs::write(&chunk_path, payload).expect("failed to write local chunk");
 
-    let task = UploadTask {
-        channel_id: "ch_stream1".to_string(),
-        session_folder_id: "session_retry".to_string(),
-        remote_dir: "session_retry".to_string(),
-        chunk_path: chunk_path.clone(),
-        chunk_name: "chunk_0000.ts".to_string(),
-        streamer_name: "StreamerA".to_string(),
-    };
+    let task = make_test_task("session_retry", chunk_path.clone(), "chunk_0000.ts");
 
     // Configure backend to fail attempts 1, 2, and 3 (mock failure),
     // and then resolve on attempt 4 (retry 3) to execute genuine rclone upload.
@@ -324,7 +320,6 @@ async fn test_real_rclone_dlq_infinite_retry_eventually_succeeds() {
 #[tokio::test]
 async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     if !ensure_rclone_available() {
-        eprintln!("Skipping rclone integration test: rclone binary not available");
         return;
     }
 
@@ -343,25 +338,12 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     std::fs::write(&chunk1_ts, b"video-0001").expect("failed to write chunk1 ts");
     std::fs::write(&chunk1_chat, b"chat-0001").expect("failed to write chunk1 chat");
 
-    let task0 = UploadTask {
-        channel_id: "ch_stream1".to_string(),
-        session_folder_id: "session_evict".to_string(),
-        remote_dir: "session_evict".to_string(),
-        chunk_path: chunk0_ts.clone(),
-        chunk_name: "chunk_0000.ts".to_string(),
-        streamer_name: "StreamerA".to_string(),
-    };
+    let task0_ts = make_test_task("session_evict", chunk0_ts.clone(), "chunk_0000.ts");
+    let task0_chat = make_test_task("session_evict", chunk0_chat.clone(), "chat_0000.jsonl");
+    let task1_ts = make_test_task("session_evict", chunk1_ts.clone(), "chunk_0001.ts");
+    let task1_chat = make_test_task("session_evict", chunk1_chat.clone(), "chat_0001.jsonl");
 
-    let task1 = UploadTask {
-        channel_id: "ch_stream1".to_string(),
-        session_folder_id: "session_evict".to_string(),
-        remote_dir: "session_evict".to_string(),
-        chunk_path: chunk1_ts.clone(),
-        chunk_name: "chunk_0001.ts".to_string(),
-        streamer_name: "StreamerA".to_string(),
-    };
-
-    // Both tasks fail on attempt 1 to enter DLQ.
+    // All tasks fail on attempt 1 to enter DLQ.
     // On attempt 2, mock failure is resolved, delegating to real rclone.
     let real_rclone = create_local_rclone_backend(remote_guard.path());
     let backend = Arc::new(ControlledRcloneBackend::new(
@@ -391,9 +373,11 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     let worker_handle =
         UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
 
-    // Send task0 and task1
-    upload_tx.send(task0).await.unwrap();
-    upload_tx.send(task1).await.unwrap();
+    // Enqueue both video and coupled chat tasks for both chunks
+    upload_tx.send(task0_ts).await.unwrap();
+    upload_tx.send(task0_chat).await.unwrap();
+    upload_tx.send(task1_ts).await.unwrap();
+    upload_tx.send(task1_chat).await.unwrap();
     drop(upload_tx);
 
     worker_handle.await.unwrap();
@@ -408,39 +392,63 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
         "Coupled chat_0000.jsonl must be deleted from disk by disk eviction"
     );
 
-    // Verify Chunk 0 was never uploaded to remote
-    let remote_chunk0 = remote_guard
+    // Verify Chunk 0 pair was never uploaded to remote
+    let remote_chunk0_ts = remote_guard
         .path()
         .join("session_evict")
         .join("chunk_0000.ts");
+    let remote_chunk0_chat = remote_guard
+        .path()
+        .join("session_evict")
+        .join("chat_0000.jsonl");
     assert!(
-        !remote_chunk0.exists(),
+        !remote_chunk0_ts.exists(),
         "Evicted chunk_0000.ts must not exist on remote"
     );
+    assert!(
+        !remote_chunk0_chat.exists(),
+        "Evicted chat_0000.jsonl must not exist on remote"
+    );
 
-    // Verify Chunk 1 was spared, retried via real rclone, and deleted locally upon success
+    // Verify Chunk 1 pair was spared, retried via real rclone, and deleted locally upon success
     assert!(
         !chunk1_ts.exists(),
         "Spared chunk_0001.ts must be deleted locally after confirmed rclone upload"
     );
-    let remote_chunk1 = remote_guard
+    assert!(
+        !chunk1_chat.exists(),
+        "Spared chat_0001.jsonl must be deleted locally after confirmed rclone upload"
+    );
+
+    let remote_chunk1_ts = remote_guard
         .path()
         .join("session_evict")
         .join("chunk_0001.ts");
+    let remote_chunk1_chat = remote_guard
+        .path()
+        .join("session_evict")
+        .join("chat_0001.jsonl");
+
     assert!(
-        remote_chunk1.exists(),
+        remote_chunk1_ts.exists(),
         "Spared chunk_0001.ts must exist on remote after successful rclone upload"
     );
-    let uploaded_chunk1 = std::fs::read(&remote_chunk1).expect("failed to read remote chunk 1");
-    assert_eq!(
-        uploaded_chunk1, b"video-0001",
-        "Uploaded chunk 1 content must match payload"
+    assert!(
+        remote_chunk1_chat.exists(),
+        "Spared chat_0001.jsonl must exist on remote after successful rclone upload"
     );
 
-    // Verify chat_0001.jsonl was not deleted (only chunk 0 pair was evicted)
-    assert!(
-        chunk1_chat.exists(),
-        "chat_0001.jsonl was not evicted and must still exist"
+    let uploaded_chunk1_ts =
+        std::fs::read(&remote_chunk1_ts).expect("failed to read remote chunk 1 ts");
+    assert_eq!(
+        uploaded_chunk1_ts, b"video-0001",
+        "Uploaded chunk 1 ts content must match payload"
+    );
+    let uploaded_chunk1_chat =
+        std::fs::read(&remote_chunk1_chat).expect("failed to read remote chunk 1 chat");
+    assert_eq!(
+        uploaded_chunk1_chat, b"chat-0001",
+        "Uploaded chunk 1 chat content must match payload"
     );
 
     // Verify event logs
@@ -477,7 +485,6 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
 #[tokio::test]
 async fn test_real_rclone_subprocess_failure_enters_dlq() {
     if !ensure_rclone_available() {
-        eprintln!("Skipping rclone integration test: rclone binary not available");
         return;
     }
 
@@ -493,21 +500,13 @@ async fn test_real_rclone_subprocess_failure_enters_dlq() {
     std::fs::write(&blocked_dir, b"blocking-file-not-a-directory")
         .expect("failed to write blocker");
 
-    let task = UploadTask {
-        channel_id: "ch_stream1".to_string(),
-        session_folder_id: "blocked_session".to_string(),
-        remote_dir: "blocked_session".to_string(),
-        chunk_path: chunk_path.clone(),
-        chunk_name: "chunk_fail.ts".to_string(),
-        streamer_name: "StreamerA".to_string(),
-    };
+    let task = make_test_task("blocked_session", chunk_path.clone(), "chunk_fail.ts");
 
     let backend = Arc::new(create_local_rclone_backend(remote_guard.path()));
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
     let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
 
-    // Set circuit breaker to 1 so the failure immediately pauses retries,
-    // allowing the worker to exit cleanly when upload_tx is dropped.
+    // Configure circuit breaker to pause retries after the first failure.
     let dlq_config = DlqConfig {
         initial_delay: Duration::from_millis(50),
         circuit_breaker_failures: 1,
@@ -520,7 +519,7 @@ async fn test_real_rclone_subprocess_failure_enters_dlq() {
 
     upload_tx.send(task).await.unwrap();
 
-    // Wait until UploadFailed event is observed from the real rclone failure
+    // Wait until UploadFailed and DLQ transfer events are observed from the real rclone failure
     let mut saw_upload_failed = false;
     let mut saw_dlq_transferred = false;
 
@@ -535,7 +534,7 @@ async fn test_real_rclone_subprocess_failure_enters_dlq() {
                     .contains("[DLQ] Transferred chunk_fail.ts to DLQ") =>
             {
                 saw_dlq_transferred = true;
-                // Task has successfully entered DLQ, we can close the queue and exit
+                // Once DLQ transfer is observed, the test goal is satisfied.
                 break;
             }
             _ => {}
@@ -543,6 +542,7 @@ async fn test_real_rclone_subprocess_failure_enters_dlq() {
     }
 
     drop(upload_tx);
+    // Abort the worker since the unresolvable task remains queued in DLQ
     worker_handle.abort();
 
     assert!(
