@@ -80,6 +80,9 @@ cargo build --release
 
 ### 2.8. Tool Economy & Async Execution
 - **Reactive Background Execution**: When running async commands (tests, builds, subagents), immediately yield the turn without self-scheduling polling timers. Rely exclusively on reactive environment notifications (`<SYSTEM_MESSAGE>`).
+- **Native Tools over Shell Utilities**: Never use shell commands like `grep`, `ls`, or `cat` via `run_command`. Always prioritize native agent tools (e.g., `view_file` or `grep_search` if available).
+- **Scratch Space for Prototyping**: Do not run brittle, multi-line PowerShell scripts inside a single `run_command` string. Instead, create temporary scripts inside the artifact scratch space (`<appDataDir>\brain\<conversation-id>/scratch/`) using `write_to_file`, then execute them.
+- **Conditional Instructions**: Always read conditional documents (like `GLOSSARY.md` or ADRs) when a skill explicitly instructs you to check them.
 
 ---
 
