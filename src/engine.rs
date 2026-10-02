@@ -611,11 +611,16 @@ impl EngineOrchestrator {
     pub async fn run(self: Arc<Self>) {
         let concurrency = self.settings.rclone.upload_concurrency;
         let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<UploadTask>(50);
-        let upload_handle = Self::spawn_upload_consumer_with_concurrency(
+        let dlq_config = crate::uploader::DlqConfig {
+            min_free_disk_gb: self.settings.general.min_free_disk_gb,
+            ..Default::default()
+        };
+        let upload_handle = UploadWorker::spawn_with_options(
             self.backend.clone(),
             self.event_tx.clone(),
             upload_rx,
             concurrency,
+            dlq_config,
         );
         if let Ok(mut guard) = self.upload_handle.lock() {
             *guard = Some(upload_handle);

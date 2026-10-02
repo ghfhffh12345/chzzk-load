@@ -1,5 +1,6 @@
 use futures_util::FutureExt;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -8,13 +9,39 @@ use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::backend::{ProgressCallback, UploadBackend};
 use crate::uploader::{UploadTask, broadcast_identifier};
 
-#[derive(Debug, Clone)]
+/// Provider function type for checking free disk space in GB for a given path.
+pub type DiskSpaceProvider = Arc<dyn Fn(&Path) -> f64 + Send + Sync>;
+
+fn default_disk_space_provider() -> DiskSpaceProvider {
+    Arc::new(|path: &Path| {
+        crate::disk::get_disk_space(path)
+            .map(|s| s.available_gb())
+            .unwrap_or(f64::MAX)
+    })
+}
+
+#[derive(Clone)]
 pub struct DlqConfig {
     pub initial_delay: Duration,
     pub max_backoff: Duration,
     pub max_tasks_per_channel: usize,
     pub circuit_breaker_failures: usize,
     pub circuit_breaker_cooldown: Duration,
+    pub min_free_disk_gb: f64,
+    pub disk_space_provider: DiskSpaceProvider,
+}
+
+impl std::fmt::Debug for DlqConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DlqConfig")
+            .field("initial_delay", &self.initial_delay)
+            .field("max_backoff", &self.max_backoff)
+            .field("max_tasks_per_channel", &self.max_tasks_per_channel)
+            .field("circuit_breaker_failures", &self.circuit_breaker_failures)
+            .field("circuit_breaker_cooldown", &self.circuit_breaker_cooldown)
+            .field("min_free_disk_gb", &self.min_free_disk_gb)
+            .finish()
+    }
 }
 
 impl Default for DlqConfig {
@@ -25,6 +52,8 @@ impl Default for DlqConfig {
             max_tasks_per_channel: 20,
             circuit_breaker_failures: 5,
             circuit_breaker_cooldown: Duration::from_secs(30),
+            min_free_disk_gb: 2.0,
+            disk_space_provider: default_disk_space_provider(),
         }
     }
 }
@@ -42,6 +71,21 @@ impl DlqConfig {
         self.initial_delay
             .saturating_mul(multiplier)
             .min(self.max_backoff)
+    }
+
+    /// Builder method to inject a custom disk space provider closure.
+    pub fn with_disk_space_provider<F>(mut self, provider: F) -> Self
+    where
+        F: Fn(&Path) -> f64 + Send + Sync + 'static,
+    {
+        self.disk_space_provider = Arc::new(provider);
+        self
+    }
+
+    /// Builder method to inject a fixed free disk space value for testing.
+    pub fn with_free_disk_gb(mut self, free_gb: f64) -> Self {
+        self.disk_space_provider = Arc::new(move |_| free_gb);
+        self
     }
 }
 
@@ -64,6 +108,163 @@ struct WorkerTaskOutcome {
     task: UploadTask,
     kind: TaskKind,
     result: Result<u64, String>,
+}
+
+/// Represents paired physical video `.ts` chunk and chat `.jsonl` chunk paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairedChunkPaths {
+    pub ts_path: PathBuf,
+    pub jsonl_path: PathBuf,
+}
+
+/// Resolves paired physical video `.ts` chunk and chat `.jsonl` chunk paths.
+pub fn resolve_paired_paths(chunk_path: &Path) -> PairedChunkPaths {
+    let parent = chunk_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = chunk_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    if let Some(base) = file_name.strip_suffix(".ts") {
+        let ts_path = chunk_path.to_path_buf();
+        let jsonl_name = if let Some(suffix) = base.strip_prefix("chunk_") {
+            format!("chat_{suffix}.jsonl")
+        } else {
+            format!("{base}.jsonl")
+        };
+        PairedChunkPaths {
+            ts_path,
+            jsonl_path: parent.join(jsonl_name),
+        }
+    } else if let Some(base) = file_name.strip_suffix(".jsonl") {
+        let jsonl_path = chunk_path.to_path_buf();
+        let ts_name = if let Some(suffix) = base.strip_prefix("chat_") {
+            format!("chunk_{suffix}.ts")
+        } else {
+            format!("{base}.ts")
+        };
+        PairedChunkPaths {
+            ts_path: parent.join(ts_name),
+            jsonl_path,
+        }
+    } else {
+        PairedChunkPaths {
+            ts_path: chunk_path.with_extension("ts"),
+            jsonl_path: chunk_path.with_extension("jsonl"),
+        }
+    }
+}
+
+/// Parses the numeric chunk index from either a `chunk_XXXX.ts` or `chat_XXXX.jsonl` filename.
+pub fn parse_task_chunk_index(file_name: &str) -> Option<u64> {
+    let path = Path::new(file_name);
+    let stem = path.file_stem()?.to_str()?;
+    let index_str = stem
+        .strip_prefix("chunk_")
+        .or_else(|| stem.strip_prefix("chat_"))?;
+    index_str.parse().ok()
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TaskAgeKey<'a> {
+    file_time: std::time::SystemTime,
+    session_id: &'a str,
+    chunk_index: u64,
+    channel_id: &'a str,
+}
+
+/// Enforces the global disk-aware eviction strategy under disk pressure.
+/// If free disk space drops below `min_free_disk_gb`, it identifies the globally oldest
+/// chunk across the DLQ, permanently deletes both the `.ts` and `.jsonl` files from disk,
+/// and purges the corresponding envelopes from both DLQ and primary queues.
+async fn enforce_dlq_disk_eviction(
+    dlq_queues: &mut HashMap<String, VecDeque<DlqTask>>,
+    channel_queues: &mut HashMap<String, VecDeque<UploadTask>>,
+    dlq_config: &DlqConfig,
+    event_tx: &Sender<AppEvent>,
+) {
+    if dlq_config.min_free_disk_gb <= 0.0 || dlq_queues.is_empty() {
+        return;
+    }
+
+    let Some(sample_path) = dlq_queues
+        .values()
+        .flat_map(|q| q.front())
+        .map(|t| &t.task.chunk_path)
+        .next()
+    else {
+        return;
+    };
+
+    let free_space = (dlq_config.disk_space_provider)(sample_path);
+    if free_space >= dlq_config.min_free_disk_gb {
+        return;
+    }
+
+    let mut oldest: Option<(TaskAgeKey<'_>, UploadTask)> = None;
+
+    for (channel_id, queue) in dlq_queues.iter() {
+        for dlq_task in queue {
+            let file_time = std::fs::metadata(&dlq_task.task.chunk_path)
+                .and_then(|m| m.modified().or_else(|_| m.created()))
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let chunk_index = parse_task_chunk_index(&dlq_task.task.chunk_name).unwrap_or(u64::MAX);
+            let key = TaskAgeKey {
+                file_time,
+                session_id: &dlq_task.task.session_folder_id,
+                chunk_index,
+                channel_id,
+            };
+
+            if oldest.as_ref().is_none_or(|(best_key, _)| &key < best_key) {
+                oldest = Some((key, dlq_task.task.clone()));
+            }
+        }
+    }
+
+    let Some((_, oldest_task)) = oldest else {
+        return;
+    };
+
+    let paired = resolve_paired_paths(&oldest_task.chunk_path);
+
+    if paired.ts_path.exists() {
+        let _ = tokio::fs::remove_file(&paired.ts_path).await;
+    }
+    if paired.jsonl_path.exists() {
+        let _ = tokio::fs::remove_file(&paired.jsonl_path).await;
+    }
+
+    // Prune envelopes from DLQ
+    let mut channels_to_remove = Vec::new();
+    for (cid, queue) in dlq_queues.iter_mut() {
+        queue.retain(|item| {
+            item.task.chunk_path != paired.ts_path && item.task.chunk_path != paired.jsonl_path
+        });
+        if queue.is_empty() {
+            channels_to_remove.push(cid.clone());
+        }
+    }
+    for cid in channels_to_remove {
+        dlq_queues.remove(&cid);
+    }
+
+    // Also prune envelopes from primary queues to avoid dispatching deleted files
+    for queue in channel_queues.values_mut() {
+        queue.retain(|task| {
+            task.chunk_path != paired.ts_path && task.chunk_path != paired.jsonl_path
+        });
+    }
+
+    let ts_name = paired
+        .ts_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&oldest_task.chunk_name);
+    let _ = event_tx.try_send(AppEvent::Log(LogEntry::warn(format!(
+        "[DLQ] Disk space critically low ({:.2} GB < {:.2} GB). Evicted oldest chunk {} and coupled chat log.",
+        free_space, dlq_config.min_free_disk_gb, ts_name
+    ))));
 }
 
 /// Background upload worker managing per-channel FIFO serialization,
@@ -409,6 +610,17 @@ impl UploadWorker {
                             consecutive_failures = 0;
                         }
                     }
+                }
+
+                // Enforce DLQ disk-aware eviction strategy under disk pressure
+                if !dlq_queues.is_empty() {
+                    enforce_dlq_disk_eviction(
+                        &mut dlq_queues,
+                        &mut channel_queues,
+                        &dlq_config,
+                        &event_tx,
+                    )
+                    .await;
                 }
 
                 // Dispatch tasks while concurrency allows and circuit breaker is inactive

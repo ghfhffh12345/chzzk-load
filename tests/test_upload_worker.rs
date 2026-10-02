@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use chzzk_load::tui::event::AppEvent;
 use chzzk_load::uploader::backend::{BoxFuture, ProgressCallback, UploadBackend};
+use chzzk_load::uploader::worker::resolve_paired_paths;
 use chzzk_load::uploader::{DlqConfig, UploadTask, UploadWorker};
 
 /// RAII helper to clean up temporary test directories.
@@ -534,5 +535,183 @@ async fn test_dlq_capacity_eviction_drops_oldest_task() {
     assert!(
         saw_eviction,
         "Eviction log for oldest task chunk_0000.ts must be emitted when DLQ capacity is reached"
+    );
+}
+
+#[test]
+fn test_resolve_paired_paths() {
+    let p1 = Path::new("/recordings/session1/chunk_0042.ts");
+    let paired1 = resolve_paired_paths(p1);
+    assert_eq!(
+        paired1.ts_path,
+        Path::new("/recordings/session1/chunk_0042.ts")
+    );
+    assert_eq!(
+        paired1.jsonl_path,
+        Path::new("/recordings/session1/chat_0042.jsonl")
+    );
+
+    let p2 = Path::new("/recordings/session1/chat_0042.jsonl");
+    let paired2 = resolve_paired_paths(p2);
+    assert_eq!(
+        paired2.ts_path,
+        Path::new("/recordings/session1/chunk_0042.ts")
+    );
+    assert_eq!(
+        paired2.jsonl_path,
+        Path::new("/recordings/session1/chat_0042.jsonl")
+    );
+
+    let p3 = Path::new("/recordings/session1/custom.ts");
+    let paired3 = resolve_paired_paths(p3);
+    assert_eq!(paired3.ts_path, Path::new("/recordings/session1/custom.ts"));
+    assert_eq!(
+        paired3.jsonl_path,
+        Path::new("/recordings/session1/custom.jsonl")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_dlq_disk_aware_eviction_deletes_ts_and_jsonl_when_disk_low() {
+    let temp_guard = TempDirGuard::new("test_dlq_disk_evict");
+    let (task_ts, path_ts) = create_chunk_file(temp_guard.path(), "chunk_0000.ts", b"video-0000");
+    let (task_chat, path_chat) =
+        create_chunk_file(temp_guard.path(), "chat_0000.jsonl", b"chat-0000");
+
+    // Backend always fails uploads so tasks divert to DLQ
+    let backend = Arc::new(FlexibleMockBackend::new(|_path, _attempt| true));
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
+
+    // Mock free disk space provider returning 0.5 GB, below the 2.0 GB threshold
+    let dlq_config = DlqConfig {
+        initial_delay: Duration::from_millis(10),
+        min_free_disk_gb: 2.0,
+        ..Default::default()
+    }
+    .with_free_disk_gb(0.5);
+
+    let worker_handle =
+        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+
+    upload_tx.send(task_ts).await.unwrap();
+    upload_tx.send(task_chat).await.unwrap();
+    drop(upload_tx);
+
+    worker_handle.await.unwrap();
+
+    // Verify both files are permanently deleted from disk
+    assert!(
+        !path_ts.exists(),
+        "Physical .ts file must be deleted upon disk-aware eviction"
+    );
+    assert!(
+        !path_chat.exists(),
+        "Coupled .jsonl chat log must be deleted upon disk-aware eviction"
+    );
+
+    // Verify warning log was emitted
+    let mut saw_disk_eviction_log = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = ev
+            && entry
+                .message
+                .contains("[DLQ] Disk space critically low (0.50 GB < 2.00 GB). Evicted oldest chunk chunk_0000.ts")
+        {
+            saw_disk_eviction_log = true;
+        }
+    }
+
+    assert!(
+        saw_disk_eviction_log,
+        "DLQ disk eviction log must be emitted when disk space is below min_free_disk_gb"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_dlq_disk_aware_eviction_globally_evicts_oldest_first() {
+    let temp_guard = TempDirGuard::new("test_dlq_global_oldest");
+    let (task0_ts, path0_ts) = create_chunk_file(temp_guard.path(), "chunk_0000.ts", b"video-0000");
+    let (_task0_chat, path0_chat) =
+        create_chunk_file(temp_guard.path(), "chat_0000.jsonl", b"chat-0000");
+
+    let (task1_ts, path1_ts) = create_chunk_file(temp_guard.path(), "chunk_0001.ts", b"video-0001");
+    let (_task1_chat, _path1_chat) =
+        create_chunk_file(temp_guard.path(), "chat_0001.jsonl", b"chat-0001");
+
+    // Fail attempt 1 so tasks enter DLQ. On retry (attempt 2), allow chunk_0001.ts to succeed.
+    let backend = Arc::new(FlexibleMockBackend::new(|path, attempt| {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        !(name == "chunk_0001.ts" && attempt >= 2)
+    }));
+
+    // Provider returns 0.5 GB on first check (triggering eviction of chunk_0000),
+    // then 5.0 GB on subsequent checks (recovering, so chunk_0001 is spared).
+    let check_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let check_count_clone = check_count.clone();
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
+
+    let dlq_config = DlqConfig {
+        initial_delay: Duration::from_millis(10),
+        min_free_disk_gb: 2.0,
+        circuit_breaker_failures: 20,
+        ..Default::default()
+    }
+    .with_disk_space_provider(move |_path| {
+        let c = check_count_clone.fetch_add(1, Ordering::SeqCst);
+        if c == 0 { 0.5 } else { 5.0 }
+    });
+
+    let worker_handle =
+        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+
+    upload_tx.send(task0_ts).await.unwrap();
+    upload_tx.send(task1_ts).await.unwrap();
+    drop(upload_tx);
+
+    worker_handle.await.unwrap();
+
+    // Chunk 0000 and coupled chat were evicted due to disk pressure
+    assert!(
+        !path0_ts.exists(),
+        "Oldest chunk_0000.ts must be evicted under disk pressure"
+    );
+    assert!(
+        !path0_chat.exists(),
+        "Oldest chat_0000.jsonl must be evicted under disk pressure"
+    );
+
+    // Chunk 0001 was uploaded on retry 2 and deleted after successful upload
+    assert!(
+        !path1_ts.exists(),
+        "Spared chunk_0001.ts must be deleted after successful retry upload"
+    );
+
+    // Chunk 0001 was NOT evicted by disk pressure; it succeeded on retry 2 and was deleted by backend
+    let mut saw_chunk0_eviction = false;
+    let mut saw_chunk1_retry_success = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = ev {
+            if entry.message.contains("[DLQ] Disk space critically low")
+                && entry.message.contains("chunk_0000.ts")
+            {
+                saw_chunk0_eviction = true;
+            }
+            if entry
+                .message
+                .contains("[DLQ] Successfully uploaded chunk_0001.ts on retry 1")
+            {
+                saw_chunk1_retry_success = true;
+            }
+        }
+    }
+
+    assert!(saw_chunk0_eviction, "Chunk 0 eviction log must be emitted");
+    assert!(
+        saw_chunk1_retry_success,
+        "Chunk 1 must successfully retry after disk space recovers, not be falsely evicted"
     );
 }
