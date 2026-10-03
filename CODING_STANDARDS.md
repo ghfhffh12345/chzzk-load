@@ -38,3 +38,11 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Zero Terminal Pollution**: Never use `println!`, `eprintln!`, or unredirected subprocess outputs in the engine, recorder, or uploader layers.
 - **Non-Blocking Telemetry**: Telemetry sent to the TUI must use bounded channels with `try_send` or non-blocking forwarders; recording and WebSocket loops must never block on terminal rendering.
 - **Typed Semantic Outcomes**: Use typed enums (`FfmpegExit::Clean`, `FfmpegExit::Killed`, `RestrictionReason`) rather than unstructured error strings for state transitions and logging.
+
+---
+
+## 4. Domain Model Hygiene & Schema Transitions
+
+- **Contract Phase Canonicalization**: When completing the contract or purge phase of a schema refactoring, internal engine, recorder, and client modules must directly consume canonical type names (`StreamMetadataState`, `MetadataEvent`).
+  - *Code Smell (Middle Man / Speculative Generality)*: Retaining transitional version aliases (`*V2`, `*Old`) across internal callers after legacy models have been purged.
+  - *Resolution*: Migrate internal imports and usages directly to canonical types; preserve aliases only when required for external library consumers.

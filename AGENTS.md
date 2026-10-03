@@ -52,13 +52,14 @@ cargo build --release
 - **Module Topology**:
   - `src/engine.rs`: Top-level `EngineOrchestrator` runtime coordinator and poll loop.
   - `src/engine/recording.rs`: Per-stream `RecordingSession` subprocess and chunk lifecycle.
+  - `src/engine/session.rs`: Active recording session state, metadata history, and folder naming.
   - `src/engine/registry.rs`: Atomic lifecycle state machine (`ChannelLifecycleRegistry`).
   - `src/engine/cleanup.rs`: Session directory retention and empty-folder purge.
   - `src/engine/reconciliation.rs`: Startup crash recovery and orphaned chunk reconciliation.
   - `src/engine/dispatcher.rs`: Stream state evaluation and poll action dispatcher.
 - **Anti-Race Cooldown**: Deduplicate CDN cache TTL (10–30s) using finished `live_id`s and post-recording cooldown.
 - **Atomic Lifecycle Transitions**: State transitions across channel states (Idle, Recording, Cooldown, Restricted) are mediated exclusively by `ChannelLifecycleRegistry` under a short-lived sync mutex; never perform async I/O while holding registry locks.
-- **Stream Metadata Tracking**: Dual-write state changes (title, category, tags, rules) to `metadata.jsonl` with monotonic `stream_offset_ms` and sync via `rcat`. Exclude high-frequency telemetry (`concurrent_user_count`).
+- **Stream Metadata Tracking**: Dual-write state changes (title, category, tags, flags) to `metadata.jsonl` with monotonic `stream_offset_ms` and sync via `rcat`. Exclude high-frequency telemetry (`concurrent_user_count`).
 
 ### 2.5. TUI & Terminal Safety (`src/tui/`)
 - **Zero Terminal Pollution**: Never use `println!`, `eprintln!`, or unredirected subprocess outputs while TUI is active. Route all logs to `AppEvent::Log(...)`.

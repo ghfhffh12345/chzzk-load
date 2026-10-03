@@ -47,3 +47,7 @@ _Avoid_: Disk quota, auto-delete, purge strategy
 **Post-Recording Consolidation**:
 The post-processing task that losslessly merges and remuxes remote video chunks (`.ts` to `.mp4`) and deduplicates chat logs (`.jsonl`) entirely over the network with a strictly bounded memory footprint, circumventing local disk usage.
 _Avoid_: Cloud merge, remote stitch, post-processing script
+
+**Lean Metadata Snapshot**:
+The flat JSON Lines event format (`metadata.jsonl`) recording essential stream lifecycle and classification state with monotonic offsets, omitting volatile viewer telemetry and static CDN thumbnail URLs.
+_Avoid_: Metadata diff, delta log, stream telemetry
