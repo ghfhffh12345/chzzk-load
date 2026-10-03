@@ -51,3 +51,7 @@ _Avoid_: Cloud merge, remote stitch, post-processing script
 **Lean Metadata Snapshot**:
 The flat JSON Lines event format (`metadata.jsonl`) recording essential stream lifecycle and classification state with monotonic offsets, omitting volatile viewer telemetry and static CDN thumbnail URLs.
 _Avoid_: Metadata diff, delta log, stream telemetry
+
+**Live Stream Source**:
+The interface seam representing live broadcast stream intake, encapsulating broadcast detail polling, chat session authorization token acquisition, and optional chat WebSocket endpoint configuration, decoupling engine orchestration from HTTP network transport.
+_Avoid_: Poller, stream client, API wrapper, HTTP helper

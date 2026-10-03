@@ -7,6 +7,7 @@ use crate::chzzk::models::{
 };
 use crate::chzzk::models_chat::ChatAccessTokenResponse;
 use crate::chzzk::models_metadata::{CategoryType, StreamAccessTier, StreamMetadataState};
+use crate::chzzk::source::{BoxFuture, LiveStreamSource};
 use crate::config::ChzzkConfig;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
@@ -514,5 +515,25 @@ impl ChzzkClient {
             .content
             .ok_or_else(|| anyhow!("Chat access token response missing content"))?;
         Ok(content.access_token)
+    }
+}
+
+impl LiveStreamSource for ChzzkClient {
+    fn get_live_detail<'a>(
+        &'a self,
+        channel_id: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<LiveDetail>> {
+        Box::pin(self.get_live_detail(channel_id))
+    }
+
+    fn get_chat_access_token<'a>(
+        &'a self,
+        chat_channel_id: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<String>> {
+        Box::pin(self.get_chat_access_token(chat_channel_id))
+    }
+
+    fn chat_ws_url(&self) -> Option<&str> {
+        self.chat_ws_url()
     }
 }
