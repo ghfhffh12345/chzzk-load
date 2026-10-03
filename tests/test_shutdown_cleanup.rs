@@ -7,14 +7,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use chzzk_load::chzzk::client::ChzzkClient;
+use chzzk_load::chzzk::source::MockLiveStreamSource;
 use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::engine::EngineOrchestrator;
 use chzzk_load::tui::event::AppEvent;
 use chzzk_load::uploader::UploadBackend;
 
-#[path = "common/mock_ffmpeg.rs"]
-mod mock_ffmpeg;
-use mock_ffmpeg::get_mock_ffmpeg_bin;
+mod common;
+use common::mock_ffmpeg::get_mock_ffmpeg_bin;
+use common::mock_source::make_open_detail;
 
 fn ensure_rclone_available() -> bool {
     let bin = std::env::var("CHZZK_LOAD_RCLONE_BIN").unwrap_or_else(|_| "rclone".to_string());
@@ -41,30 +42,6 @@ async fn test_graceful_shutdown_cleans_session_folder_with_metadata_and_last_chu
     }
     let mock_bin = get_mock_ffmpeg_bin();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "liveId": 1234567,
-                    "status": "OPEN",
-                    "liveTitle": "Shutdown Cleanup Test Stream",
-                    "channel": { "channelId": "chan_clean_test", "channelName": "StreamerClean" },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}",
-                    "adult": false
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir =
         std::env::temp_dir().join(format!("test_shutdown_clean_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
@@ -84,9 +61,16 @@ async fn test_graceful_shutdown_cleans_session_folder_with_metadata_and_last_chu
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let chzzk = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_clean_test",
+        make_open_detail(
+            "chan_clean_test",
+            "StreamerClean",
+            "Shutdown Cleanup Test Stream",
+            1234567,
+            "https://mock/master.m3u8",
+        ),
+    ));
     let remote_dir =
         std::env::temp_dir().join(format!("test_shutdown_remote_{}", rand::random::<u32>()));
     fs::create_dir_all(&remote_dir).unwrap();

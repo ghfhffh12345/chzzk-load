@@ -5,7 +5,6 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use tiny_http::{Header, Response, Server, StatusCode};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -14,8 +13,10 @@ use common::observability::{TestLogRecorder, assert_with_logs, expect_with_logs}
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chzzk_load::chzzk::client::ChzzkClient;
-use chzzk_load::config::{ChannelConfig, ChzzkConfig, Settings};
+use chzzk_load::chzzk::models::LiveDetail;
+use chzzk_load::chzzk::models_metadata::StreamMetadataState;
+use chzzk_load::chzzk::source::MockLiveStreamSource;
+use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::engine::{
     ActiveSessionState, ChannelLifecycleState, EngineOrchestrator, RestrictionReason,
 };
@@ -23,6 +24,8 @@ use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::uploader::{
     BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend, UploadTask, broadcast_identifier,
 };
+
+use common::mock_source::{make_close_detail, make_open_detail, make_restricted_detail};
 
 struct ConcurrencyMockBackend {
     task2_started_tx: mpsc::Sender<()>,
@@ -185,54 +188,30 @@ async fn test_all_app_event_variants_mpsc() {
 #[tokio::test]
 async fn test_engine_orchestrator_instantiation() {
     let settings = Settings::default();
-    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
+    let mock = Arc::new(MockLiveStreamSource::new());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, mock, None, event_tx);
     assert!(orchestrator.active_recording_ids().is_empty());
     assert!(!orchestrator.is_recording("any_channel"));
 }
 
 #[tokio::test]
 async fn test_engine_orchestrator_poll_channel_offline() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        if let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "CLOSE",
-                    "liveTitle": null,
-                    "channel": {
-                        "channelId": "chan_offline",
-                        "channelName": "OfflineStreamer"
-                    },
-                    "livePlaybackJson": null
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let settings = Settings {
         channels: vec![ChannelConfig::with_alias("chan_offline", "OfflineStreamer")],
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let mock = Arc::new(
+        MockLiveStreamSource::new()
+            .with_channel_state("chan_offline", make_close_detail(Some("OfflineStreamer"))),
     );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(10);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, mock, None, event_tx);
     orchestrator.poll_channels_once(&upload_tx).await;
 
     let event = event_rx.recv().await.unwrap();
@@ -254,30 +233,18 @@ async fn test_engine_orchestrator_poll_channel_offline() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_poll_channel_error() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        if let Ok(request) = server.recv() {
-            let response =
-                Response::from_string("internal error").with_status_code(StatusCode(500));
-            let _ = request.respond(response);
-        }
-    });
-
     let settings = Settings {
         channels: vec![ChannelConfig::with_alias("chan_err", "ErrorStreamer")],
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let mock = Arc::new(MockLiveStreamSource::new());
+    mock.inject_channel_error("chan_err", "internal error");
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(10);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, mock, None, event_tx);
     orchestrator.poll_channels_once(&upload_tx).await;
 
     let event = event_rx.recv().await.unwrap();
@@ -291,53 +258,6 @@ async fn test_engine_orchestrator_poll_channel_error() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_poll_channel_live() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        // First poll
-        if let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveTitle": "Playing Games",
-                    "channel": {
-                        "channelId": "chan_live",
-                        "channelName": "LiveStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-
-        // Second poll
-        if let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveTitle": "Playing Games",
-                    "channel": {
-                        "channelId": "chan_live",
-                        "channelName": "LiveStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_live_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -350,14 +270,21 @@ async fn test_engine_orchestrator_poll_channel_live() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_live",
+        make_open_detail(
+            "chan_live",
+            "LiveStreamer",
+            "Playing Games",
+            12345,
+            "https://mock/master.m3u8",
+        ),
+    ));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, mock, None, event_tx);
 
     // Poll 1: transitions to live and starts recording session
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -428,80 +355,6 @@ async fn test_engine_orchestrator_poll_channel_live() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let request_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let req_count_server = request_count.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let count = req_count_server.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mock_body = match count {
-                // Poll 1: Channel is live with liveId 21212268
-                0 => {
-                    r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 21212268,
-                        "status": "OPEN",
-                        "liveTitle": "Stream A",
-                        "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
-                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
-                    }
-                }"#
-                }
-                // Poll 2: Stream ended, but CDN/cache still reports OPEN with same liveId 21212268!
-                1 => {
-                    r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 21212268,
-                        "status": "OPEN",
-                        "liveTitle": "Stream A",
-                        "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
-                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
-                    }
-                }"#
-                }
-                // Poll 3: CDN cache finally clears to CLOSE
-                2 => {
-                    r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 21212268,
-                        "status": "CLOSE",
-                        "liveTitle": null,
-                        "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
-                        "livePlaybackJson": null
-                    }
-                }"#
-                }
-                // Poll 4: Genuinely new stream starts with new liveId 21212269
-                _ => {
-                    r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 21212269,
-                        "status": "OPEN",
-                        "liveTitle": "Stream B (New)",
-                        "channel": { "channelId": "chan_race", "channelName": "StreamerRace" },
-                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
-                    }
-                }"#
-                }
-            };
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_race_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -515,14 +368,30 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let state1 = make_open_detail(
+        "chan_race",
+        "StreamerRace",
+        "Stream A",
+        21212268,
+        "https://mock/master.m3u8",
     );
+    let state2 = state1.clone();
+    let state3 = make_close_detail(Some("StreamerRace"));
+    let state4 = make_open_detail(
+        "chan_race",
+        "StreamerRace",
+        "Stream B (New)",
+        21212269,
+        "https://mock/master.m3u8",
+    );
+
+    let mock = Arc::new(MockLiveStreamSource::new());
+    mock.enqueue_channel_states("chan_race", vec![state1, state2, state3, state4]);
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, mock, None, event_tx);
 
     // --- Poll 1: Stream goes live -> starts session 1 ---
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -937,7 +806,7 @@ async fn test_engine_orchestrator_graceful_shutdown() {
         channels: vec![],
         ..Default::default()
     };
-    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
+    let chzzk = Arc::new(MockLiveStreamSource::new());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -976,32 +845,6 @@ async fn test_engine_orchestrator_graceful_shutdown() {
 async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
     use tokio_util::sync::CancellationToken;
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 123456,
-                    "liveTitle": "Live for shutdown test",
-                    "channel": {
-                        "channelId": "chan_shutdown",
-                        "channelName": "ShutdownStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!(
         "test_orch_shutdown_active_{}",
         rand::random::<u32>()
@@ -1020,19 +863,23 @@ async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
         )],
         ..Default::default()
     };
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_shutdown",
+        make_open_detail(
+            "chan_shutdown",
+            "ShutdownStreamer",
+            "Live for shutdown test",
+            123456,
+            "https://mock/master.m3u8",
+        ),
+    ));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
-    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
-        settings,
-        chzzk,
-        None,
-        event_tx,
-        cancel_token.clone(),
-    ));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::with_cancel_token(settings, mock, None, event_tx, cancel_token.clone())
+            .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy()),
+    );
 
     let run_handle = tokio::spawn(orchestrator.clone().run());
 
@@ -1088,33 +935,6 @@ async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
 async fn test_engine_orchestrator_manual_refresh() {
     use tokio_util::sync::CancellationToken;
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let (req_tx, mut req_rx) = mpsc::channel::<()>(10);
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let _ = req_tx.try_send(());
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "CLOSE",
-                    "liveTitle": null,
-                    "channel": {
-                        "channelId": "chan_refresh",
-                        "channelName": "RefreshStreamer"
-                    },
-                    "livePlaybackJson": null
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let settings = Settings {
         general: chzzk_load::config::GeneralConfig {
             poll_interval_seconds: 3600, // 1 hour interval
@@ -1123,15 +943,16 @@ async fn test_engine_orchestrator_manual_refresh() {
         channels: vec![ChannelConfig::with_alias("chan_refresh", "RefreshStreamer")],
         ..Default::default()
     };
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let mock = Arc::new(
+        MockLiveStreamSource::new()
+            .with_channel_state("chan_refresh", make_close_detail(Some("RefreshStreamer"))),
     );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings,
-        chzzk,
+        mock.clone(),
         None,
         event_tx,
         cancel_token.clone(),
@@ -1139,10 +960,19 @@ async fn test_engine_orchestrator_manual_refresh() {
 
     let run_handle = tokio::spawn(orchestrator.clone().run());
 
-    // First request should happen immediately on startup
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), req_rx.recv())
-        .await
-        .expect("Timeout waiting for initial poll");
+    // Wait until initial poll completes
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if mock.call_count("chan_refresh") >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        mock.call_count("chan_refresh"),
+        1,
+        "Initial poll must execute"
+    );
 
     // Clear event queue
     while event_rx.try_recv().is_ok() {}
@@ -1150,10 +980,19 @@ async fn test_engine_orchestrator_manual_refresh() {
     // Trigger manual refresh
     orchestrator.trigger_refresh();
 
-    // Second request must happen quickly despite 1 hour sleep interval
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), req_rx.recv())
-        .await
-        .expect("Timeout waiting for manual refresh poll");
+    // Second poll must happen quickly despite 1 hour sleep interval
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        if mock.call_count("chan_refresh") >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        mock.call_count("chan_refresh"),
+        2,
+        "Manual refresh poll must execute"
+    );
 
     // Clean up
     cancel_token.cancel();
@@ -1252,55 +1091,6 @@ async fn test_engine_orchestrator_concurrent_uploads() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl() {
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        // Poll 1: Initial title "Initial Stream Title"
-        if let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 999111,
-                    "liveTitle": "Initial Stream Title",
-                    "channel": {
-                        "channelId": "chan_rename",
-                        "channelName": "RenameStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-
-        // Poll 2: Streamer changes title to "Updated Stream Title? Playing Now?"
-        if let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 999111,
-                    "liveTitle": "Updated Stream Title? Playing Now?",
-                    "channel": {
-                        "channelId": "chan_rename",
-                        "channelName": "RenameStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_rename_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1313,16 +1103,30 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    let initial_state = make_open_detail(
+        "chan_rename",
+        "RenameStreamer",
+        "Initial Stream Title",
+        999111,
+        "https://mock/master.m3u8",
     );
+    let updated_state = make_open_detail(
+        "chan_rename",
+        "RenameStreamer",
+        "Updated Stream Title? Playing Now?",
+        999111,
+        "https://mock/master.m3u8",
+    );
+
+    let mock = Arc::new(MockLiveStreamSource::new());
+    mock.enqueue_channel_states("chan_rename", vec![initial_state, updated_state]);
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
     let orchestrator =
-        EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
+        EngineOrchestrator::new(settings, mock, Some(mock_backend.clone()), event_tx);
 
     let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
         live_id: Some(999111),
@@ -1380,55 +1184,6 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
 
 #[tokio::test]
 async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_file() {
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        // Poll 1: Initial title "Initial Stream Title"
-        if let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 999111,
-                    "liveTitle": "Initial Stream Title",
-                    "channel": {
-                        "channelId": "chan_rename",
-                        "channelName": "RenameStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-
-        // Poll 2: Streamer changes title to "Updated Stream Title? Playing Now?"
-        if let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 999111,
-                    "liveTitle": "Updated Stream Title? Playing Now?",
-                    "channel": {
-                        "channelId": "chan_rename",
-                        "channelName": "RenameStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir =
         std::env::temp_dir().join(format!("test_orch_history_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
@@ -1442,16 +1197,30 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    let initial_state = make_open_detail(
+        "chan_rename",
+        "RenameStreamer",
+        "Initial Stream Title",
+        999111,
+        "https://mock/master.m3u8",
     );
+    let updated_state = make_open_detail(
+        "chan_rename",
+        "RenameStreamer",
+        "Updated Stream Title? Playing Now?",
+        999111,
+        "https://mock/master.m3u8",
+    );
+
+    let mock = Arc::new(MockLiveStreamSource::new());
+    mock.enqueue_channel_states("chan_rename", vec![initial_state, updated_state]);
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
     let orchestrator =
-        EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
+        EngineOrchestrator::new(settings, mock, Some(mock_backend.clone()), event_tx);
 
     let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
         live_id: Some(999111),
@@ -1521,55 +1290,6 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
 
 #[tokio::test]
 async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        // Poll 1: Initial title "Early Title 1"
-        if let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 555666,
-                    "liveTitle": "Early Title 1",
-                    "channel": {
-                        "channelId": "chan_pre",
-                        "channelName": "PreStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-
-        // Poll 2: Title changes to "Early Title 2"
-        if let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 555666,
-                    "liveTitle": "Early Title 2? Pending?",
-                    "channel": {
-                        "channelId": "chan_pre",
-                        "channelName": "PreStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_pre_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1582,15 +1302,30 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    let initial_state = make_open_detail(
+        "chan_pre",
+        "PreStreamer",
+        "Early Title 1",
+        555666,
+        "https://mock/master.m3u8",
     );
+    let updated_state = make_open_detail(
+        "chan_pre",
+        "PreStreamer",
+        "Early Title 2? Pending?",
+        555666,
+        "https://mock/master.m3u8",
+    );
+
+    let mock = Arc::new(MockLiveStreamSource::new());
+    mock.enqueue_channel_states("chan_pre", vec![initial_state, updated_state]);
+
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, mock, None, event_tx);
 
-    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+    let initial_meta = StreamMetadataState {
         live_id: Some(555666),
         channel_id: "chan_pre".to_string(),
         channel_name: "PreStreamer".to_string(),
@@ -1641,64 +1376,6 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_transition() {
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        // Poll 1: Talk category, no watch party
-        if let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 888111,
-                    "liveTitle": "Just Chatting",
-                    "categoryType": "TALK",
-                    "liveCategory": "talk",
-                    "liveCategoryValue": "Just Chatting",
-                    "channel": {
-                        "channelId": "chan_trans",
-                        "channelName": "TransStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-
-        // Poll 2: Valorant game category + Watch party 520 ("2026아시안게임")
-        if let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 888111,
-                    "liveTitle": "Watch Party Asian Games!",
-                    "categoryType": "GAME",
-                    "liveCategory": "game",
-                    "liveCategoryValue": "Valorant",
-                    "watchPartyNo": 520,
-                    "watchPartyTag": "2026아시안게임",
-                    "watchPartyType": "RS",
-                    "channel": {
-                        "channelId": "chan_trans",
-                        "channelName": "TransStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_trans_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1711,16 +1388,42 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    let mut s1 = make_open_detail(
+        "chan_trans",
+        "TransStreamer",
+        "Just Chatting",
+        888111,
+        "https://mock/master.m3u8",
     );
+    if let LiveDetail::Open(ref mut info) = s1 {
+        info.metadata.category_type = Some(chzzk_load::chzzk::models_metadata::CategoryType::Talk);
+        info.metadata.live_category = Some("talk".to_string());
+        info.metadata.live_category_value = Some("Just Chatting".to_string());
+    }
+
+    let mut s2 = make_open_detail(
+        "chan_trans",
+        "TransStreamer",
+        "Watch Party Asian Games!",
+        888111,
+        "https://mock/master.m3u8",
+    );
+    if let LiveDetail::Open(ref mut info) = s2 {
+        info.metadata.category_type = Some(chzzk_load::chzzk::models_metadata::CategoryType::Game);
+        info.metadata.live_category = Some("game".to_string());
+        info.metadata.live_category_value = Some("Valorant".to_string());
+        info.metadata.is_watch_party = true;
+    }
+
+    let mock = Arc::new(MockLiveStreamSource::new());
+    mock.enqueue_channel_states("chan_trans", vec![s1, s2]);
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
     let orchestrator =
-        EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
+        EngineOrchestrator::new(settings, mock, Some(mock_backend.clone()), event_tx);
 
     let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
         live_id: Some(888111),
@@ -1834,7 +1537,7 @@ async fn test_engine_orchestrator_graceful_shutdown_cleans_empty_session_dirs() 
         channels: vec![],
         ..Default::default()
     };
-    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
+    let chzzk = Arc::new(MockLiveStreamSource::new());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -1928,29 +1631,6 @@ fn test_active_session_state_folder_name_formatting_and_sanitization() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupted_stream() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "liveId": 888999,
-                    "status": "OPEN",
-                    "liveTitle": "Ongoing Stream After Interruption",
-                    "channel": { "channelId": "chan_interrupt", "channelName": "StreamerInterrupt" },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_resume_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -1967,14 +1647,21 @@ async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupt
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_interrupt",
+        make_open_detail(
+            "chan_interrupt",
+            "StreamerInterrupt",
+            "Ongoing Stream After Interruption",
+            888999,
+            "https://mock/master.m3u8",
+        ),
+    ));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, mock, None, event_tx);
 
     // Simulate session interrupted in the past (liveId: 888999, cooldown: 1s)
     orchestrator
@@ -2010,32 +1697,6 @@ async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupt
 async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() {
     use tokio_util::sync::CancellationToken;
 
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 998877,
-                    "liveTitle": "Live for upload shutdown test",
-                    "channel": {
-                        "channelId": "chan_upload_shutdown",
-                        "channelName": "ShutdownUploader"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!(
         "test_orch_shutdown_upload_{}",
         rand::random::<u32>()
@@ -2058,19 +1719,30 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
-    );
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_upload_shutdown",
+        make_open_detail(
+            "chan_upload_shutdown",
+            "ShutdownUploader",
+            "Live for upload shutdown test",
+            998877,
+            "https://mock/master.m3u8",
+        ),
+    ));
+
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
-    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
-        settings,
-        chzzk,
-        Some(mock_backend.clone()),
-        event_tx,
-        cancel_token.clone(),
-    ));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::with_cancel_token(
+            settings,
+            mock,
+            Some(mock_backend.clone()),
+            event_tx,
+            cancel_token.clone(),
+        )
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy()),
+    );
 
     let run_handle = tokio::spawn(orchestrator.clone().run());
 
@@ -2128,6 +1800,7 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
                 && chunk_name == "chunk_0000.ts"
             {
                 got_completed = true;
+                break;
             }
         }
         recorder.drain_buffered(&mut event_rx);
@@ -2259,32 +1932,6 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
  {
     use tokio_util::sync::CancellationToken;
 
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 887766,
-                    "liveTitle": "Live for shutdown serialization test",
-                    "channel": {
-                        "channelId": "chan_shutdown_serial",
-                        "channelName": "ShutdownSerialStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!(
         "test_orch_shutdown_serial_{}",
         rand::random::<u32>()
@@ -2316,19 +1963,30 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
-    );
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_shutdown_serial",
+        make_open_detail(
+            "chan_shutdown_serial",
+            "ShutdownSerialStreamer",
+            "Live for shutdown serialization test",
+            887766,
+            "https://mock/master.m3u8",
+        ),
+    ));
+
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
-    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
-        settings,
-        chzzk,
-        Some(backend),
-        event_tx,
-        cancel_token.clone(),
-    ));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::with_cancel_token(
+            settings,
+            mock,
+            Some(backend),
+            event_tx,
+            cancel_token.clone(),
+        )
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy()),
+    );
 
     let run_handle = tokio::spawn(orchestrator.clone().run());
 
@@ -2421,43 +2079,29 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
     use std::collections::HashSet;
     use tokio_util::sync::CancellationToken;
 
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = chzzk_server.recv() {
-            let url = request.url().to_string();
-            let channel_id = if url.contains("chan_multi_1") {
-                "chan_multi_1"
-            } else if url.contains("chan_multi_2") {
-                "chan_multi_2"
-            } else {
-                "unknown"
-            };
-
-            let mock_body = format!(
-                r#"{{
-                    "code": 200,
-                    "message": null,
-                    "content": {{
-                        "status": "OPEN",
-                        "liveId": 112233,
-                        "liveTitle": "Concurrent Stream {channel_id}",
-                        "channel": {{
-                            "channelId": "{channel_id}",
-                            "channelName": "Streamer_{channel_id}"
-                        }},
-                        "livePlaybackJson": "{{\"media\":[{{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}}]}}]}}"
-                    }}
-                }}"#
-            );
-
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
+    let mock = Arc::new(
+        MockLiveStreamSource::new()
+            .with_channel_state(
+                "chan_multi_1",
+                make_open_detail(
+                    "chan_multi_1",
+                    "Streamer_1",
+                    "Concurrent Stream chan_multi_1",
+                    112233,
+                    "https://mock/master.m3u8",
+                ),
+            )
+            .with_channel_state(
+                "chan_multi_2",
+                make_open_detail(
+                    "chan_multi_2",
+                    "Streamer_2",
+                    "Concurrent Stream chan_multi_2",
+                    112233,
+                    "https://mock/master.m3u8",
+                ),
+            ),
+    );
 
     let temp_dir = std::env::temp_dir().join(format!("test_orch_multi_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
@@ -2478,19 +2122,19 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
-    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
-    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
-        settings,
-        chzzk,
-        Some(mock_backend.clone()),
-        event_tx,
-        cancel_token.clone(),
-    ));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::with_cancel_token(
+            settings,
+            mock,
+            Some(mock_backend.clone()),
+            event_tx,
+            cancel_token.clone(),
+        )
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy()),
+    );
 
     let run_handle = tokio::spawn(orchestrator.clone().run());
 
@@ -2628,29 +2272,6 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(req) = chzzk_server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "liveId": 88881,
-                    "status": "OPEN",
-                    "liveTitle": "Retry Stream",
-                    "channel": { "channelId": "chan_retry", "channelName": "StreamerRetry" },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}"
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = req.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_retry_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -2667,19 +2288,30 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
-    );
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_retry",
+        make_open_detail(
+            "chan_retry",
+            "StreamerRetry",
+            "Retry Stream",
+            88881,
+            "https://mock/master.m3u8",
+        ),
+    ));
+
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
-    let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
-        settings,
-        chzzk,
-        Some(mock_backend.clone()),
-        event_tx,
-        cancel_token.clone(),
-    ));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::with_cancel_token(
+            settings,
+            mock,
+            Some(mock_backend.clone()),
+            event_tx,
+            cancel_token.clone(),
+        )
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy()),
+    );
 
     let run_handle = tokio::spawn(orchestrator.clone().run());
 
@@ -2764,30 +2396,6 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_poll_channel_restricted_stream_sets_live_and_logs_once() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "liveId": 5001,
-                    "status": "OPEN",
-                    "liveTitle": "[19+] Midnight Broadcast",
-                    "channel": { "channelId": "chan_restricted", "channelName": "RestrictedStreamer" },
-                    "livePlaybackJson": null,
-                    "adult": true
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_restr_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -2803,9 +2411,16 @@ async fn test_engine_orchestrator_poll_channel_restricted_stream_sets_live_and_l
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let chzzk = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_restricted",
+        make_restricted_detail(
+            "chan_restricted",
+            "RestrictedStreamer",
+            "[19+] Midnight Broadcast",
+            Some(5001),
+            true,
+        ),
+    ));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
@@ -2869,50 +2484,6 @@ async fn test_engine_orchestrator_poll_channel_restricted_stream_sets_live_and_l
 
 #[tokio::test]
 async fn test_engine_orchestrator_restricted_stream_recovers_to_recordable() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let poll_count_clone = poll_count.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mock_body = if count == 0 {
-                // Poll 1: Restricted
-                r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 6001,
-                        "status": "OPEN",
-                        "liveTitle": "Watch Party (Restricted)",
-                        "channel": { "channelId": "chan_recover", "channelName": "RecoverStreamer" },
-                        "livePlaybackJson": null,
-                        "adult": false
-                    }
-                }"#
-            } else {
-                // Poll 2: Becomes recordable
-                r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 6001,
-                        "status": "OPEN",
-                        "liveTitle": "Watch Party (Public)",
-                        "channel": { "channelId": "chan_recover", "channelName": "RecoverStreamer" },
-                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}",
-                        "adult": false
-                    }
-                }"#
-            };
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_recov_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
@@ -2925,9 +2496,29 @@ async fn test_engine_orchestrator_restricted_stream_recovers_to_recordable() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let source = MockLiveStreamSource::new();
+    source.enqueue_channel_states(
+        "chan_recover",
+        vec![
+            // Poll 1: Restricted
+            make_restricted_detail(
+                "chan_recover",
+                "RecoverStreamer",
+                "Watch Party (Restricted)",
+                Some(6001),
+                false,
+            ),
+            // Poll 2: Becomes recordable
+            make_open_detail(
+                "chan_recover",
+                "RecoverStreamer",
+                "Watch Party (Public)",
+                6001,
+                "https://mock/master.m3u8",
+            ),
+        ],
     );
+    let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
@@ -2974,105 +2565,38 @@ async fn test_engine_orchestrator_normal_to_restricted_to_normal_transitions_int
     let temp_dir = std::env::temp_dir().join(format!("test_orch_trans_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let mock_bin = temp_dir.join(if cfg!(windows) {
-        "mock_ffmpeg.exe"
-    } else {
-        "mock_ffmpeg"
-    });
-    let src_path = temp_dir.join("mock_ffmpeg.rs");
-    fs::write(
-        &src_path,
-        r#"
-use std::io::Read;
-fn main() {
-    let exe = std::env::current_exe().unwrap();
-    let out_dir = exe.parent().unwrap();
-    let pid = std::process::id();
-    let start_file = out_dir.join(format!("ffmpeg_start_{pid}.txt"));
-    let exit_file = out_dir.join(format!("ffmpeg_exit_{pid}.txt"));
-    let _ = std::fs::write(&start_file, "running");
-    let mut stdin = std::io::stdin();
-    let mut buf = [0u8; 128];
-    while let Ok(n) = stdin.read(&mut buf) {
-        if n == 0 || buf[..n].contains(&b'q') {
-            break;
-        }
-    }
-    let _ = std::fs::write(&exit_file, "exited");
-}
-"#,
-    )
-    .unwrap();
+    let mock_bin = get_mock_ffmpeg_bin();
 
-    let compile_status = std::process::Command::new("rustc")
-        .arg(&src_path)
-        .arg("-o")
-        .arg(&mock_bin)
-        .status()
-        .expect("Failed to compile mock_ffmpeg");
-    assert!(compile_status.success(), "mock_ffmpeg compilation failed");
-
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let poll_count_clone = poll_count.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mock_body = match count {
-                0 => {
-                    // Poll 1: Normal stream
-                    r#"{
-                        "code": 200,
-                        "message": null,
-                        "content": {
-                            "liveId": 888777,
-                            "status": "OPEN",
-                            "liveTitle": "Public Stream Part 1",
-                            "channel": { "channelId": "chan_trans", "channelName": "TransStreamer" },
-                            "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}",
-                            "adult": false
-                        }
-                    }"#
-                }
-                1 => {
-                    // Poll 2: Transitions to Restricted (19+ adult without auth)
-                    r#"{
-                        "code": 200,
-                        "message": null,
-                        "content": {
-                            "liveId": 888777,
-                            "status": "OPEN",
-                            "liveTitle": "[19+] Restricted Stream Part 2",
-                            "channel": { "channelId": "chan_trans", "channelName": "TransStreamer" },
-                            "livePlaybackJson": null,
-                            "adult": true
-                        }
-                    }"#
-                }
-                _ => {
-                    // Poll 3: Returns back to Normal (Public stream again)
-                    r#"{
-                        "code": 200,
-                        "message": null,
-                        "content": {
-                            "liveId": 888777,
-                            "status": "OPEN",
-                            "liveTitle": "Public Stream Part 3 (Resumed)",
-                            "channel": { "channelId": "chan_trans", "channelName": "TransStreamer" },
-                            "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[]}]}",
-                            "adult": false
-                        }
-                    }"#
-                }
-            };
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
+    let source = MockLiveStreamSource::new();
+    source.enqueue_channel_states(
+        "chan_trans",
+        vec![
+            // Poll 1: Normal stream
+            make_open_detail(
+                "chan_trans",
+                "TransStreamer",
+                "Public Stream Part 1",
+                888777,
+                "https://mock/master.m3u8",
+            ),
+            // Poll 2: Transitions to Restricted (19+ adult without auth)
+            make_restricted_detail(
+                "chan_trans",
+                "TransStreamer",
+                "[19+] Restricted Stream Part 2",
+                Some(888777),
+                true,
+            ),
+            // Poll 3: Returns back to Normal (Public stream again)
+            make_open_detail(
+                "chan_trans",
+                "TransStreamer",
+                "Public Stream Part 3 (Resumed)",
+                888777,
+                "https://mock/master.m3u8",
+            ),
+        ],
+    );
 
     let settings = Settings {
         general: chzzk_load::config::GeneralConfig {
@@ -3085,9 +2609,7 @@ fn main() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx)
@@ -3147,16 +2669,13 @@ fn main() {
     let mut session1_exited = false;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     while tokio::time::Instant::now() < deadline {
-        let count = fs::read_dir(&temp_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("ffmpeg_exit_"))
-            .count();
-        if count >= 1 {
+        if let Ok(Some(AppEvent::RecordingEnded { ref channel_id })) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), event_rx.recv()).await
+            && channel_id == "chan_trans"
+        {
             session1_exited = true;
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert_with_logs(
         session1_exited,
@@ -3219,67 +2738,6 @@ fn main() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_restricted_stream_resets_on_offline() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let poll_count_clone = poll_count.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mock_body = match count {
-                0 => {
-                    // Poll 1: Restricted Stream A
-                    r#"{
-                        "code": 200,
-                        "message": null,
-                        "content": {
-                            "liveId": 7001,
-                            "status": "OPEN",
-                            "liveTitle": "Stream A",
-                            "channel": { "channelId": "chan_rst_off", "channelName": "StreamerRst" },
-                            "livePlaybackJson": null,
-                            "adult": true
-                        }
-                    }"#
-                }
-                1 => {
-                    // Poll 2: Channel goes CLOSE (offline)
-                    r#"{
-                        "code": 200,
-                        "message": null,
-                        "content": {
-                            "liveId": null,
-                            "status": "CLOSE",
-                            "liveTitle": null,
-                            "channel": { "channelId": "chan_rst_off", "channelName": "StreamerRst" },
-                            "livePlaybackJson": null
-                        }
-                    }"#
-                }
-                _ => {
-                    // Poll 3: Restricted Stream B starts
-                    r#"{
-                        "code": 200,
-                        "message": null,
-                        "content": {
-                            "liveId": 7002,
-                            "status": "OPEN",
-                            "liveTitle": "Stream B",
-                            "channel": { "channelId": "chan_rst_off", "channelName": "StreamerRst" },
-                            "livePlaybackJson": null,
-                            "adult": true
-                        }
-                    }"#
-                }
-            };
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir =
         std::env::temp_dir().join(format!("test_orch_rst_off_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
@@ -3293,9 +2751,20 @@ async fn test_engine_orchestrator_restricted_stream_resets_on_offline() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let source = MockLiveStreamSource::new();
+    source.enqueue_channel_states(
+        "chan_rst_off",
+        vec![
+            // Poll 1: Restricted Stream A
+            make_restricted_detail("chan_rst_off", "StreamerRst", "Stream A", Some(7001), true),
+            // Poll 2: Channel goes CLOSE (offline)
+            make_close_detail(Some("StreamerRst")),
+            // Poll 3: Restricted Stream B starts
+            make_restricted_detail("chan_rst_off", "StreamerRst", "Stream B", Some(7002), true),
+        ],
     );
+
+    let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
@@ -3440,30 +2909,6 @@ async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_e
         std::env::temp_dir().join(format!("test_orch_live_clean_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    // Channel goes CLOSE
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "CLOSE",
-                    "channel": {
-                        "channelId": "chan_ended",
-                        "channelName": "EndedStreamer"
-                    }
-                }
-            }"#;
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let empty_session_dir = temp_dir.join("chan_ended_20260927_100000");
     fs::create_dir_all(&empty_session_dir).unwrap();
 
@@ -3477,7 +2922,8 @@ async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_e
         ..Default::default()
     };
     let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+        MockLiveStreamSource::new()
+            .with_channel_state("chan_ended", make_close_detail(Some("EndedStreamer"))),
     );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -3533,7 +2979,7 @@ async fn test_recording_session_cleans_empty_folder_when_no_chunks_saved() {
         },
         ..Default::default()
     };
-    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
+    let chzzk = Arc::new(MockLiveStreamSource::new());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -3620,49 +3066,22 @@ async fn test_engine_orchestrator_handles_ffmpeg_key_403_forbidden_stream() {
 
     let mock_bin = get_mock_ffmpeg_bin();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let poll_count_clone = poll_count.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mock_body = if count == 0 {
-                // Poll 2: OPEN broadcast (API cache still OPEN)
-                r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 21326414,
-                        "status": "OPEN",
-                        "liveTitle": "Sports Broadcast (Encrypted)",
-                        "channel": { "channelId": "chan_sports", "channelName": "SportsStreamer" },
-                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls_key_error.m3u8\"}]}",
-                        "adult": false
-                    }
-                }"#
-            } else {
-                // Poll 3: CLOSE (offline)
-                r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 21326414,
-                        "status": "CLOSE",
-                        "liveTitle": "Sports Broadcast (Concluded)",
-                        "channel": { "channelId": "chan_sports", "channelName": "SportsStreamer" },
-                        "livePlaybackJson": null,
-                        "adult": false
-                    }
-                }"#
-            };
-            let response = Response::from_string(mock_body).with_header(
-                Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
+    let source = MockLiveStreamSource::new();
+    source.enqueue_channel_states(
+        "chan_sports",
+        vec![
+            // Poll 2: OPEN broadcast (API cache still OPEN)
+            make_open_detail(
+                "chan_sports",
+                "SportsStreamer",
+                "Sports Broadcast (Encrypted)",
+                21326414,
+                "https://test.com/hls_key_error.m3u8",
+            ),
+            // Poll 3: CLOSE (offline)
+            make_close_detail(Some("SportsStreamer")),
+        ],
+    );
 
     let settings = Settings {
         general: chzzk_load::config::GeneralConfig {
@@ -3673,9 +3092,7 @@ async fn test_engine_orchestrator_handles_ffmpeg_key_403_forbidden_stream() {
         channels: vec![ChannelConfig::with_alias("chan_sports", "SportsStreamer")],
         ..Default::default()
     };
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -4032,30 +3449,6 @@ fn test_engine_folder_naming_sanitizes_illegal_and_trailing_chars() {
 
 #[tokio::test]
 async fn test_engine_orchestrator_channel_update_uses_alias() {
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let server_handle = tokio::task::spawn_blocking(move || {
-        let req = server.recv().unwrap();
-        let body = r#"{
-            "code": 200,
-            "message": null,
-            "content": {
-                "status": "OPEN",
-                "liveTitle": "Live Stream",
-                "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://dummy.m3u8\"}]}",
-                "channel": {
-                    "channelId": "chan_alias",
-                    "channelName": "OfficialKoreanName"
-                }
-            }
-        }"#;
-        let response = Response::from_string(body).with_header(
-            Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-        );
-        let _ = req.respond(response);
-    });
-
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
     let (upload_tx, _upload_rx) = tokio::sync::mpsc::channel(32);
 
@@ -4064,13 +3457,19 @@ async fn test_engine_orchestrator_channel_update_uses_alias() {
         ..Default::default()
     };
 
-    let chzzk_config = ChzzkConfig::default();
-    let client =
-        Arc::new(ChzzkClient::new(&chzzk_config).with_base_url(format!("http://127.0.0.1:{port}")));
+    let client = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_alias",
+        make_open_detail(
+            "chan_alias",
+            "OfficialKoreanName",
+            "Live Stream",
+            9999,
+            "https://dummy.m3u8",
+        ),
+    ));
     let orchestrator = EngineOrchestrator::new(settings, client, None, event_tx);
 
     orchestrator.poll_channels_once(&upload_tx).await;
-    let _ = server_handle.await;
 
     let mut received_update = false;
     while let Ok(event) = event_rx.try_recv() {

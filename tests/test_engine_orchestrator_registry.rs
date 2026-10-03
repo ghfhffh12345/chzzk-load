@@ -10,6 +10,7 @@ use chzzk_load::config::{ChannelConfig, ChzzkConfig, GeneralConfig, Settings};
 use chzzk_load::engine::{ChannelLifecycleState, EngineOrchestrator};
 use chzzk_load::tui::event::AppEvent;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
+use common::mock_source::{make_close_detail, make_open_detail, make_restricted_detail};
 
 #[tokio::test]
 async fn test_orchestrator_typed_query_seam_idle() {
@@ -65,33 +66,6 @@ async fn test_orchestrator_typed_query_seam_idle() {
 
 #[tokio::test]
 async fn test_orchestrator_poll_delegates_to_evaluate_poll_and_starts_recording() {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        if let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 12345,
-                    "liveTitle": "Rust Stream",
-                    "channel": {
-                        "channelId": "chan_live",
-                        "channelName": "LiveStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = tiny_http::Response::from_string(mock_body).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                    .unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_reg_{}", rand::random::<u32>()));
     let _ = std::fs::create_dir_all(&temp_dir);
 
@@ -107,9 +81,15 @@ async fn test_orchestrator_poll_delegates_to_evaluate_poll_and_starts_recording(
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let live_detail = make_open_detail(
+        "chan_live",
+        "LiveStreamer",
+        "Rust Stream",
+        12345,
+        "https://mock/master.m3u8",
     );
+
+    let chzzk = Arc::new(MockLiveStreamSource::new().with_channel_state("chan_live", live_detail));
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
@@ -136,105 +116,6 @@ async fn test_orchestrator_poll_delegates_to_evaluate_poll_and_starts_recording(
 
 #[tokio::test]
 async fn test_orchestrator_poll_metadata_change_updates_registry_and_persists() {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        // Poll 1: Initial Title
-        if let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 55555,
-                    "liveTitle": "Initial Title",
-                    "channel": {
-                        "channelId": "chan_meta",
-                        "channelName": "MetaStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = tiny_http::Response::from_string(mock_body).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                    .unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-
-        // Poll 2: Updated Title
-        if let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 55555,
-                    "liveTitle": "Updated Title",
-                    "channel": {
-                        "channelId": "chan_meta",
-                        "channelName": "MetaStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = tiny_http::Response::from_string(mock_body).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                    .unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-
-        // Poll 3: Same Title, Changed Tags
-        if let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 55555,
-                    "liveTitle": "Updated Title",
-                    "tags": ["gaming"],
-                    "channel": {
-                        "channelId": "chan_meta",
-                        "channelName": "MetaStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = tiny_http::Response::from_string(mock_body).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                    .unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-
-        // Poll 4: Identical Metadata
-        if let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "status": "OPEN",
-                    "liveId": 55555,
-                    "liveTitle": "Updated Title",
-                    "tags": ["gaming"],
-                    "channel": {
-                        "channelId": "chan_meta",
-                        "channelName": "MetaStreamer"
-                    },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
-                }
-            }"#;
-            let response = tiny_http::Response::from_string(mock_body).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                    .unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let temp_dir = std::env::temp_dir().join(format!("test_orch_meta_{}", rand::random::<u32>()));
     let _ = std::fs::create_dir_all(&temp_dir);
 
@@ -250,9 +131,34 @@ async fn test_orchestrator_poll_metadata_change_updates_registry_and_persists() 
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let source = MockLiveStreamSource::new();
+    let make_info = |title: &str, tags: Vec<String>| {
+        LiveDetail::Open(LiveStreamInfo {
+            channel_id: "chan_meta".to_string(),
+            live_id: Some(55555),
+            streamer_name: "MetaStreamer".to_string(),
+            title: title.to_string(),
+            hls_url: "https://mock/master.m3u8".to_string(),
+            chat_channel_id: None,
+            metadata: chzzk_load::chzzk::models_metadata::StreamMetadataState {
+                live_title: title.to_string(),
+                live_id: Some(55555),
+                tags,
+                ..Default::default()
+            },
+        })
+    };
+    source.enqueue_channel_states(
+        "chan_meta",
+        vec![
+            make_info("Initial Title", vec![]),
+            make_info("Updated Title", vec![]),
+            make_info("Updated Title", vec!["gaming".to_string()]),
+            make_info("Updated Title", vec!["gaming".to_string()]),
+        ],
     );
+
+    let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
@@ -327,58 +233,6 @@ async fn test_orchestrator_poll_metadata_change_updates_registry_and_persists() 
 
 #[tokio::test]
 async fn test_orchestrator_handles_api_restricted_stream_via_registry() {
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let count_clone = count.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let c = count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mock_body = if c == 0 {
-                // Poll 1: Restricted (19+ adult)
-                r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "status": "OPEN",
-                        "liveId": 99999,
-                        "liveTitle": "Adult Only Stream",
-                        "channel": {
-                            "channelId": "chan_adult",
-                            "channelName": "AdultStreamer"
-                        },
-                        "livePlaybackJson": null,
-                        "adult": true
-                    }
-                }"#
-            } else {
-                // Poll 2: Offline (CLOSE)
-                r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "status": "CLOSE",
-                        "liveId": 99999,
-                        "liveTitle": null,
-                        "channel": {
-                            "channelId": "chan_adult",
-                            "channelName": "AdultStreamer"
-                        },
-                        "livePlaybackJson": null,
-                        "adult": false
-                    }
-                }"#
-            };
-            let response = tiny_http::Response::from_string(mock_body).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                    .unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let settings = Settings {
         channels: vec![ChannelConfig {
             id: "chan_adult".to_string(),
@@ -387,9 +241,22 @@ async fn test_orchestrator_handles_api_restricted_stream_via_registry() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let source = MockLiveStreamSource::new();
+    source.enqueue_channel_states(
+        "chan_adult",
+        vec![
+            make_restricted_detail(
+                "chan_adult",
+                "AdultStreamer",
+                "Adult Only Stream",
+                Some(99999),
+                true,
+            ),
+            make_close_detail(Some("AdultStreamer")),
+        ],
     );
+
+    let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
@@ -435,50 +302,22 @@ async fn test_orchestrator_handles_ffmpeg_403_forbidden_via_registry() {
 
     let mock_bin = get_mock_ffmpeg_bin();
 
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-    let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let poll_count_clone = poll_count.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let count = poll_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let mock_body = if count == 0 {
-                // Poll 2: OPEN broadcast (API cache still OPEN with same liveId)
-                r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 21326414,
-                        "status": "OPEN",
-                        "liveTitle": "Sports Broadcast (Encrypted)",
-                        "channel": { "channelId": "chan_sports", "channelName": "SportsStreamer" },
-                        "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
-                        "adult": false
-                    }
-                }"#
-            } else {
-                // Poll 3: CLOSE (offline)
-                r#"{
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "liveId": 21326414,
-                        "status": "CLOSE",
-                        "liveTitle": "Sports Broadcast (Concluded)",
-                        "channel": { "channelId": "chan_sports", "channelName": "SportsStreamer" },
-                        "livePlaybackJson": null,
-                        "adult": false
-                    }
-                }"#
-            };
-            let response = tiny_http::Response::from_string(mock_body).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                    .unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
+    let source = MockLiveStreamSource::new();
+    source.enqueue_channel_states(
+        "chan_sports",
+        vec![
+            // Poll 2: OPEN broadcast (API cache still OPEN with same liveId)
+            make_open_detail(
+                "chan_sports",
+                "SportsStreamer",
+                "Sports Broadcast (Encrypted)",
+                21326414,
+                "https://test.com/hls.m3u8",
+            ),
+            // Poll 3: CLOSE (offline)
+            make_close_detail(Some("SportsStreamer")),
+        ],
+    );
 
     let settings = Settings {
         general: GeneralConfig {
@@ -493,9 +332,7 @@ async fn test_orchestrator_handles_ffmpeg_403_forbidden_via_registry() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
@@ -562,31 +399,6 @@ async fn test_orchestrator_graceful_shutdown_drains_registry_sessions() {
         std::env::temp_dir().join(format!("test_orch_shutdown_{}", rand::random::<u32>()));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            let mock_body = r#"{
-                "code": 200,
-                "message": null,
-                "content": {
-                    "liveId": 88888,
-                    "status": "OPEN",
-                    "liveTitle": "Shutdown Test Stream",
-                    "channel": { "channelId": "chan_shutdown", "channelName": "ShutdownStreamer" },
-                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
-                    "adult": false
-                }
-            }"#;
-            let response = tiny_http::Response::from_string(mock_body).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                    .unwrap(),
-            );
-            let _ = request.respond(response);
-        }
-    });
-
     let settings = Settings {
         general: GeneralConfig {
             recordings_dir: temp_dir.to_string_lossy().to_string(),
@@ -601,9 +413,18 @@ async fn test_orchestrator_graceful_shutdown_drains_registry_sessions() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let source = MockLiveStreamSource::new().with_channel_state(
+        "chan_shutdown",
+        make_open_detail(
+            "chan_shutdown",
+            "ShutdownStreamer",
+            "Shutdown Test Stream",
+            88888,
+            "https://test.com/hls.m3u8",
+        ),
     );
+
+    let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
 
     let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
