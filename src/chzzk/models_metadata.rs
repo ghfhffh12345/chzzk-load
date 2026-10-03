@@ -146,6 +146,71 @@ pub struct StreamMetadataState {
     pub accumulate_count: Option<u64>,
 }
 
+/// Lean stream metadata state snapshot (version 2).
+///
+/// Contains essential broadcast identifiers, lifecycles, classification, and
+/// flattened boolean flags (`is_kr_only`, `is_chat_active`, `is_watch_party`,
+/// `paid_promotion`, `drops_campaign_no`). Volatile viewer counters, CDN image URLs,
+/// and marginal flags are omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamMetadataStateV2 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_date: Option<String>,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default, alias = "streamer_name")]
+    pub channel_name: String,
+    #[serde(default, alias = "title")]
+    pub live_title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_type: Option<CategoryType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_category_value: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub access_tier: StreamAccessTier,
+    #[serde(default)]
+    pub is_kr_only: bool,
+    #[serde(default = "default_true")]
+    pub is_chat_active: bool,
+    #[serde(default)]
+    pub is_watch_party: bool,
+    #[serde(default)]
+    pub paid_promotion: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drops_campaign_no: Option<String>,
+}
+
+impl Default for StreamMetadataStateV2 {
+    fn default() -> Self {
+        Self {
+            live_id: None,
+            open_date: None,
+            close_date: None,
+            channel_id: String::new(),
+            channel_name: String::new(),
+            live_title: String::new(),
+            category_type: None,
+            live_category: None,
+            live_category_value: None,
+            tags: Vec::new(),
+            access_tier: StreamAccessTier::Public,
+            is_kr_only: false,
+            is_chat_active: true,
+            is_watch_party: false,
+            paid_promotion: false,
+            drops_campaign_no: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MetadataEventType {
@@ -228,6 +293,111 @@ pub struct MetadataEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<MetadataDelta>,
     pub state: StreamMetadataState,
+}
+
+const fn default_version_2() -> u8 {
+    2
+}
+
+/// A version 2 JSON Lines record in `metadata.jsonl`.
+///
+/// Contains an RFC 3339 UTC timestamp, monotonic stream offset in milliseconds,
+/// and a full snapshot of the lean metadata state. Redundant local timestamps (`time_local`)
+/// and delta diff objects (`changes`) are omitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataEventV2 {
+    #[serde(default = "default_version_2")]
+    pub version: u8,
+    pub event: MetadataEventType,
+    pub timestamp: String,
+    pub stream_offset_ms: u64,
+    pub state: StreamMetadataStateV2,
+}
+
+pub type LeanMetadataEvent = MetadataEventV2;
+
+impl MetadataEventV2 {
+    pub fn new(
+        event: MetadataEventType,
+        timestamp: String,
+        stream_offset_ms: u64,
+        state: StreamMetadataStateV2,
+    ) -> Self {
+        Self {
+            version: 2,
+            event,
+            timestamp,
+            stream_offset_ms,
+            state,
+        }
+    }
+
+    pub fn initial(timestamp: String, state: StreamMetadataStateV2) -> Self {
+        Self::new(MetadataEventType::InitialState, timestamp, 0, state)
+    }
+
+    pub fn changed(timestamp: String, stream_offset_ms: u64, state: StreamMetadataStateV2) -> Self {
+        Self::new(
+            MetadataEventType::MetadataChanged,
+            timestamp,
+            stream_offset_ms,
+            state,
+        )
+    }
+
+    /// Serializes the event as a newline-terminated JSON Lines record.
+    pub fn to_json_line(&self) -> Result<String, serde_json::Error> {
+        let mut line = serde_json::to_string(self)?;
+        line.push('\n');
+        Ok(line)
+    }
+}
+
+impl From<&StreamMetadataState> for StreamMetadataStateV2 {
+    fn from(v1: &StreamMetadataState) -> Self {
+        Self {
+            live_id: v1.live_id,
+            open_date: v1.open_date.clone(),
+            close_date: v1.close_date.clone(),
+            channel_id: v1.channel_id.clone(),
+            channel_name: v1.channel_name.clone(),
+            live_title: v1.live_title.clone(),
+            category_type: v1.category_type.clone(),
+            live_category: v1.live_category.clone(),
+            live_category_value: v1.live_category_value.clone(),
+            tags: v1.tags.clone(),
+            access_tier: v1.access_tier,
+            is_kr_only: v1.policies.kr_only_viewing,
+            is_chat_active: v1.chat_rules.chat_active,
+            is_watch_party: v1.watch_party.is_active,
+            paid_promotion: v1.paid_promotion,
+            drops_campaign_no: v1.drops_campaign_no.clone(),
+        }
+    }
+}
+
+impl From<StreamMetadataState> for StreamMetadataStateV2 {
+    fn from(v1: StreamMetadataState) -> Self {
+        (&v1).into()
+    }
+}
+
+impl From<&MetadataEvent> for MetadataEventV2 {
+    fn from(v1: &MetadataEvent) -> Self {
+        Self {
+            version: 2,
+            event: v1.event,
+            timestamp: v1.timestamp.clone(),
+            stream_offset_ms: v1.stream_offset_ms,
+            state: (&v1.state).into(),
+        }
+    }
+}
+
+impl From<MetadataEvent> for MetadataEventV2 {
+    fn from(v1: MetadataEvent) -> Self {
+        (&v1).into()
+    }
 }
 
 impl StreamMetadataState {
