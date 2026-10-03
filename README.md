@@ -21,7 +21,7 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 - 🌐 **Direct CDN Stream Extraction (P2P/Grid Bypass)**: Automatically decodes base64-encoded `cdn_url` parameters from Chzzk `p2pPath` playlists, pulling direct 1080p/720p CDN HLS streams without requiring P2P or grid software.
 - 💬 **Real-Time Live Chat Recording (`chat_%04d.jsonl`)**: Simultaneously captures live chat via WebSocket into structured JSON Lines format segmented into time-aligned chunks, preserving timestamps, user nicknames, badges, donations/cheeses, and message text.
 - 💽 **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD card and flash storage longevity on Single Board Computers (Raspberry Pi, ARM64) using in-memory byte buffering with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
-- 📊 **Stream Metadata Event Tracking (`metadata.jsonl`)**: Tracks all broadcast state transitions (title, category, tags, access tier, watch parties, policies, chat rules) with millisecond-accurate video synchronization, uploaded to cloud storage in real time.
+- 📊 **Stream Metadata Event Tracking (`metadata.jsonl`)**: Tracks essential broadcast state transitions (title, category, tags, access tier, and playback/chat policy flags) using a lean JSON Lines snapshot format (v2) with millisecond-accurate video synchronization, uploaded to cloud storage in real time.
 - 💾 **Strictly Bounded Disk Footprint & Disk Space Guarding**: Only 1–2 video segments and at most 1 chat chunk reside on disk simultaneously per active stream. Chunks are permanently deleted immediately upon verified cloud upload. An active cross-platform circuit breaker (`min_free_disk_gb`) gracefully pauses recordings and actively evicts the oldest failed chunks in the Dead-Letter Queue (DLQ) if disk space falls below safe limits.
 - 🛡️ **N+1 Segment Boundary Safety**: Explicit numeric sequence parsing (`chunk_%04d.ts`) ensures chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
 - 📬 **Non-Blocking Dead-Letter Queue (DLQ)**: Upload failures never block subsequent chunks. Failed segments transfer to a background DLQ with exponential backoff (initial 2s, capped at 5m, infinite retries, capped at 20 tasks/channel in RAM), maintaining uplink progress and disk reclamation.
@@ -246,122 +246,77 @@ Live chat messages captured via WebSocket are serialized as structured JSON Line
 
 ### 2. Stream Metadata & Timeline Format (`metadata.jsonl`)
 
-`metadata.jsonl` tracks all broadcast state transitions across the lifetime of the stream with millisecond-accurate video timeline synchronization (`stream_offset_ms`). It is dual-written locally and updated in real time on cloud storage via `rclone rcat`.
+`metadata.jsonl` tracks essential broadcast state transitions across the lifetime of the stream with millisecond-accurate video timeline synchronization (`stream_offset_ms`) using a lean JSON Lines snapshot schema (v2). It is dual-written locally and updated in real time on cloud storage via `rclone rcat`.
 
 #### Event Types
 
-- **`INITIAL_STATE`**: Written once at stream startup (`stream_offset_ms: 0`), capturing the complete initial broadcast snapshot.
-- **`METADATA_CHANGED`**: Emitted whenever any tracked broadcast property changes (e.g. title update, category switch, watch party started, chat rules modified). Contains a `changes` diff alongside the updated `state` snapshot.
+- **`INITIAL_STATE`**: Written once at stream startup (`stream_offset_ms: 0`), capturing the initial broadcast state snapshot.
+- **`METADATA_CHANGED`**: Emitted whenever any tracked broadcast property changes (e.g. title update, category switch, watch party started, access tier or policy flags modified). Contains the complete updated `state` snapshot.
 
 #### Envelope Schema
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `version` | `number` | Schema version (`1`). |
+| `version` | `number` | Schema version (`2`). |
 | `event` | `string` | Event discriminator: `"INITIAL_STATE"` or `"METADATA_CHANGED"`. |
-| `timestamp` | `string` | UTC timestamp in ISO 8601 format (`YYYY-MM-DDTHH:mm:ssZ`). |
-| `time_local` | `string` | Local timestamp formatted as `YYYY-MM-DD HH:mm:ss`. |
+| `timestamp` | `string` | RFC 3339 / ISO 8601 UTC timestamp (`YYYY-MM-DDTHH:mm:ssZ`). |
 | `stream_offset_ms`| `number` | Milliseconds elapsed since the recording session started (`0` at initial start). Syncs directly with video timestamps. |
-| `changes` | `object \| null` | Field diff object (`null` for `"INITIAL_STATE"`). Contains `{ "old": ..., "new": ... }` for each changed property. |
-| `state` | `object` | Complete snapshot of the broadcast state after the event occurred. |
+| `state` | `object` | Complete snapshot of the lean broadcast state after the event occurred. |
+
+> [!NOTE]
+> In schema version 2, redundant local timestamps (`time_local`) and delta diff objects (`changes`) are omitted in favor of unified, full lean snapshots (`state`).
 
 #### State Snapshot Schema (`state`)
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
+| `live_id` | `number \| null` | Unique numeric broadcast session ID (omitted when null). |
+| `open_date` | `string \| null` | Broadcast start timestamp from Chzzk API (`YYYY-MM-DD HH:mm:ss`, omitted when null). |
+| `close_date` | `string \| null` | Broadcast end timestamp (populated upon stream completion, omitted when null). |
 | `channel_id` | `string` | Monitored Chzzk channel alphanumeric ID. |
 | `channel_name` | `string` | Streamer channel display name. |
 | `live_title` | `string` | Broadcast title. |
-| `live_id` | `number \| null` | Unique numeric broadcast session ID. |
-| `open_date` | `string \| null` | Stream start timestamp from Chzzk API. |
-| `close_date` | `string \| null` | Stream end timestamp (populated upon stream completion). |
-| `channel_image_url` | `string \| null` | Streamer profile picture CDN URL. |
-| `verified_mark` | `boolean` | Whether the streamer has an official verified partner mark. |
-| `category_type` | `string \| null` | Broad category classification (`"GAME"`, `"TALK"`, `"SPORTS"`, `"ETC"`, etc.). |
-| `live_category` | `string \| null` | Category slug identifier (e.g. `"game"`, `"talk"`). |
-| `live_category_value`| `string \| null` | Display category/game title (e.g. `"Valorant"`, `"League of Legends"`). |
+| `category_type` | `string \| null` | Broad category classification (`"GAME"`, `"TALK"`, `"SPORTS"`, `"ETC"`, etc., omitted when null). |
+| `live_category` | `string \| null` | Category slug identifier (e.g. `"game"`, `"talk"`, omitted when null). |
+| `live_category_value`| `string \| null` | Display category/game title (e.g. `"Valorant"`, `"League of Legends"`, omitted when null). |
 | `tags` | `string[]` | List of broadcast tags configured by the streamer. |
 | `access_tier` | `string` | Mutually exclusive access gating tier: `"PUBLIC"`, `"ADULT_ONLY"`, `"CHEAT_KEY"`, `"NAVER_PLUS"`, `"CHANNEL_SUBSCRIPTION"`, or `"PAY_PER_VIEW"`. |
-| `policies` | `object` | Broadcast access policies: `kr_only_viewing` (`bool`), `clip_active` (`bool`), `time_machine_active` (`bool`). |
-| `watch_party` | `object` | Watch party metadata: `is_active` (`bool`), `no` (`number \| null`), `tag` (`string \| null`), `party_type` (`string \| null`), `paid_product_id` (`string \| null`). |
-| `chat_rules` | `object` | Chat rules & restrictions: `chat_active` (`bool`), `chat_available_group` (`string \| null`), `chat_available_condition` (`string \| null`), `min_follower_minute` (`number \| null`), `allow_subscriber_in_follower_mode` (`bool`), `chat_slow_mode_sec` (`number \| null`), `chat_emoji_mode` (`bool`), `chat_donation_ranking_exposure` (`bool`). |
+| `is_kr_only` | `boolean` | Whether stream viewing is restricted to South Korea (`kr_only_viewing`). |
+| `is_chat_active` | `boolean` | Whether live chat is active for the broadcast. |
+| `is_watch_party` | `boolean` | Whether broadcast is an active watch party. |
 | `paid_promotion` | `boolean` | Whether paid sponsorship/advertisement is declared. |
-| `drops_campaign_no`| `string \| null` | Identifier of active Drops campaign, if any. |
-| `log_power_active` | `boolean` | Whether Chzzk Log Power integration is active. |
-| `live_thumbnail_image_url` | `string \| null` | Live preview thumbnail CDN URL. |
-| `default_thumbnail_image_url` | `string \| null` | Channel default fallback thumbnail CDN URL. |
-| `concurrent_user_count` | `number \| null` | Concurrent live viewer count at the moment of the event. |
-| `accumulate_count` | `number \| null` | Cumulative total viewer count at the moment of the event. |
+| `drops_campaign_no`| `string \| null` | Identifier of active Drops campaign, if any (omitted when null). |
 
 > [!TIP]
-> **Change Detection & Anti-Churn**: Fluctuating telemetry counters (`concurrent_user_count`, `accumulate_count`) and CDN thumbnail query token changes are captured in snapshots but **do not trigger** `METADATA_CHANGED` events to prevent write churn.
+> **Lean Snapshot Design & Anti-Churn**: Schema v2 captures essential stream lifecycles and classification state while intentionally omitting volatile viewer telemetry (`concurrent_user_count`, `accumulate_count`), static CDN thumbnail URLs, and complex nested objects. This avoids disk and cloud write churn while enabling fast, zero-overhead direct state equality comparisons during polling.
 
 #### Example Record (`METADATA_CHANGED`)
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "event": "METADATA_CHANGED",
-  "timestamp": "2026-09-30T14:35:10Z",
-  "time_local": "2026-09-30 23:35:10",
+  "timestamp": "2026-10-03T14:35:10Z",
   "stream_offset_ms": 2110450,
-  "changes": {
-    "live_title": {
-      "old": "Just Chatting and relaxing",
-      "new": "Switching to Valorant with viewers!"
-    },
-    "category_type": {
-      "old": "TALK",
-      "new": "GAME"
-    },
-    "live_category_value": {
-      "old": "Just Chatting",
-      "new": "Valorant"
-    }
-  },
   "state": {
+    "live_id": 3829140,
+    "open_date": "2026-10-03 23:00:00",
     "channel_id": "4c3b44869c9b1399723ec28ec236f736",
     "channel_name": "SampleStreamer",
-    "channel_image_url": "https://nng-phinf.pstatic.net/...",
-    "verified_mark": true,
     "live_title": "Switching to Valorant with viewers!",
-    "live_id": 3829140,
-    "open_date": "2026-09-30 23:00:00",
-    "close_date": null,
     "category_type": "GAME",
     "live_category": "game",
     "live_category_value": "Valorant",
-    "tags": ["Valorant", "FPS", "Viewers"],
+    "tags": [
+      "Valorant",
+      "FPS",
+      "Viewers"
+    ],
     "access_tier": "PUBLIC",
-    "policies": {
-      "kr_only_viewing": false,
-      "clip_active": true,
-      "time_machine_active": true
-    },
-    "watch_party": {
-      "is_active": false,
-      "no": null,
-      "tag": null,
-      "party_type": null,
-      "paid_product_id": null
-    },
-    "chat_rules": {
-      "chat_active": true,
-      "chat_available_group": null,
-      "chat_available_condition": null,
-      "min_follower_minute": null,
-      "allow_subscriber_in_follower_mode": false,
-      "chat_slow_mode_sec": null,
-      "chat_emoji_mode": false,
-      "chat_donation_ranking_exposure": true
-    },
-    "paid_promotion": false,
-    "drops_campaign_no": null,
-    "log_power_active": false,
-    "live_thumbnail_image_url": "https://livecloud-thumb.akamaized.net/...",
-    "default_thumbnail_image_url": "https://nng-phinf.pstatic.net/...",
-    "concurrent_user_count": 1840,
-    "accumulate_count": 8920
+    "is_kr_only": false,
+    "is_chat_active": true,
+    "is_watch_party": false,
+    "paid_promotion": false
   }
 }
 ```

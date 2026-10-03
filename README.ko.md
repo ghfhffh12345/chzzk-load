@@ -21,7 +21,7 @@
 - 🌐 **직접 CDN 스트림 주소 자동 추출 (P2P/그리드 우회)**: 치지직 `p2pPath` 플레이리스트에 포함된 base64 인코딩 `cdn_url` 매개변수를 자동 디코딩하여, 별도의 그리드 소프트웨어 설치 없이 원본 화질(1080p, 720p 등)의 직접 CDN HLS 스트림을 수집합니다.
 - 💬 **실시간 라이브 채팅 녹화 (`chat_%04d.jsonl`)**: WebSocket을 통해 실시간 방송 채팅을 동시 수집하여 시간 단위 분할 세그먼트(`chat_%04d.jsonl`)로 저장하며, 타임스탬프, 사용자 닉네임, 뱃지, 후원(치즈) 내역, 메시지 내용이 포함된 구조화된 JSON Lines 형식을 유지합니다.
 - 💽 **플래시 수명 보호 배치 I/O (SBC 최적화)**: 라즈베리 파이(Raspberry Pi), ARM64 등 단일 보드 컴퓨터(SBC)의 microSD 및 플래시 메모리 수명을 보존하기 위해 바이트 버퍼 메모리 버퍼링 및 듀얼 트리거 플러시(500개 메시지 / 64KB 도달 또는 주기적 타이머)를 적용하여 디스크 쓰기 빈도를 최소화합니다.
-- 📊 **실시간 방송 메타데이터 이벤트 추적 (`metadata.jsonl`)**: 방송 중 변경되는 모든 상태 전이(방제, 카테고리, 태그, 시청 권한 등급, 같이보기, 방송 정책, 채팅 규칙)를 밀리초 단위의 비디오 싱크와 함께 `metadata.jsonl`에 기록하고 실시간 클라우드 동기화를 지원합니다.
+- 📊 **실시간 방송 메타데이터 이벤트 추적 (`metadata.jsonl`)**: 방송 중 변경되는 핵심 상태 전이(방제, 카테고리, 태그, 시청 권한 등급, 시청 및 채팅 정책 플래그)를 v2 경량 JSON Lines 스냅샷 형식으로 밀리초 단위의 비디오 싱크와 함께 기록하고 실시간 클라우드 동기화를 지원합니다.
 - 💾 **엄격히 제한된 디스크 사용량 & 디스크 고갈 보호**: 활성 스트림당 최대 1~2개의 영상 세그먼트 및 1개의 채팅 청크만 로컬 디스크에 유지합니다. 클라우드 업로드 완료가 확인되는 즉시 세그먼트 청크는 로컬에서 영구 삭제됩니다. 크로스 플랫폼 디스크 공간 서킷 브레이커(`min_free_disk_gb`)가 작동하여 잔여 용량이 부족할 경우 녹화를 안전하게 일시 정지하고 데드 레터 큐(DLQ)에서 가장 오래된 실패 청크들을 능동적으로 삭제하여 디스크 공간을 확보합니다.
 - 🛡️ **N+1 세그먼트 경계 안전성**: 명시적 숫자 시퀀스 파싱(`chunk_%04d.ts`)을 통해 $N$번째 청크는 다음 $N+1$번째 청크가 디스크에 생성(파일 크기 > 0)된 것이 확인된 후에만 업로드 큐로 전달되어, 불완전하거나 손상된 청크의 업로드를 원천 차단합니다.
 - 📬 **비차단 데드 레터 큐 (DLQ) 재시도 구조**: 개별 청크 업로드가 실패하더라도 후속 청크의 업로드가 차단(Head-of-Line Blocking)되지 않고 백그라운드 DLQ로 즉시 이관되어 지수 백오프(초기 2초, 최대 5분 캡, 무한 재시도, 채널당 메모리 내 최대 20개 태스크 제한)로 재시도됩니다.
@@ -246,122 +246,77 @@ WebSocket을 통해 수집된 라이브 채팅 메시지는 구조화된 JSON Li
 
 ### 2. 방송 메타데이터 및 동기화 타임라인 포맷 (`metadata.jsonl`)
 
-`metadata.jsonl`은 방송 중 일어나는 모든 상태 전이(방제 변경, 카테고리 전환, 같이보기, 시청 권한 등)를 밀리초 단위의 비디오 싱크 타임라인(`stream_offset_ms`)과 함께 기록하는 추가 전용(append-only) JSON Lines 이벤트 스트림입니다. 로컬 디스크 기록과 동시에 rclone(`rcat`)을 통해 클라우드 스토리지로 실시간 동기화됩니다.
+`metadata.jsonl`은 방송 중 일어나는 핵심 상태 전이(방제 변경, 카테고리 전환, 시청 권한, 정책 플래그 등)를 밀리초 단위의 비디오 싱크 타임라인(`stream_offset_ms`)과 함께 기록하는 경량(v2) 추가 전용(append-only) JSON Lines 이벤트 스트림입니다. 로컬 디스크 기록과 동시에 rclone(`rcat`)을 통해 클라우드 스토리지로 실시간 동기화됩니다.
 
 #### 이벤트 유형
 
-- **`INITIAL_STATE`**: 녹화 세션 시작 시 1회 기록(`stream_offset_ms: 0`), 방송의 초기 전체 스냅샷을 캡처합니다.
-- **`METADATA_CHANGED`**: 모니터링 중 추적 대상 필드가 변경될 때마다 발행되며, 변경된 필드의 diff(`changes`) 및 최신 전체 상태 스냅샷(`state`)을 담고 있습니다.
+- **`INITIAL_STATE`**: 녹화 세션 시작 시 1회 기록(`stream_offset_ms: 0`), 방송의 초기 경량 상태 스냅샷을 캡처합니다.
+- **`METADATA_CHANGED`**: 모니터링 중 추적 대상 필드가 변경될 때마다 발행되며, 최신 방송 상태 스냅샷(`state`)을 담고 있습니다.
 
 #### 엔벨로프(Envelope) 스키마
 
 | 필드 | 타입 | 설명 |
 | :--- | :--- | :--- |
-| `version` | `number` | 스키마 버전 (`1`). |
+| `version` | `number` | 스키마 버전 (`2`). |
 | `event` | `string` | 이벤트 구분 식별자: `"INITIAL_STATE"` 또는 `"METADATA_CHANGED"`. |
-| `timestamp` | `string` | ISO 8601 표준 UTC 타임스탬프 (`YYYY-MM-DDTHH:mm:ssZ`). |
-| `time_local` | `string` | 로컬 시간 기준 문자열 (`YYYY-MM-DD HH:mm:ss`). |
+| `timestamp` | `string` | RFC 3339 / ISO 8601 표준 UTC 타임스탬프 (`YYYY-MM-DDTHH:mm:ssZ`). |
 | `stream_offset_ms`| `number` | 녹화 시작 시점으로부터 경과된 밀리초(ms) 단위 시간 (시작 시 `0`). MPEG-TS 비디오 타임라인과 밀리초 단위로 정확히 동기화됩니다. |
-| `changes` | `object \| null` | 필드 단위 변경 diff 객체 (`INITIAL_STATE`는 `null`). 변경된 각 항목별로 `{ "old": ..., "new": ... }` 쌍을 포함합니다. |
-| `state` | `object` | 상태 전이 발생 직후의 완전한 방송 상태 스냅샷. |
+| `state` | `object` | 상태 전이 발생 직후의 완전한 경량 방송 상태 스냅샷. |
+
+> [!NOTE]
+> 버전 2에서는 중복 로컬 타임스탬프(`time_local`) 및 델타 diff 객체(`changes`)가 제거되고 완전한 경량 스냅샷(`state`)으로 단일화되었습니다.
 
 #### 방송 상태 스냅샷 스키마 (`state`)
 
 | 필드 | 타입 | 설명 |
 | :--- | :--- | :--- |
+| `live_id` | `number \| null` | 방송 세션 고유 숫자 식별자 (liveId, `null`일 경우 생략). |
+| `open_date` | `string \| null` | 치지직 API 기준 방송 시작 일시 (`YYYY-MM-DD HH:mm:ss`, `null`일 경우 생략). |
+| `close_date` | `string \| null` | 방송 종료 일시 (방송 종료 시점에 입력됨, `null`일 경우 생략). |
 | `channel_id` | `string` | 모니터링 대상 치지직 채널 고유 ID. |
 | `channel_name` | `string` | 스트리머 채널 표시명. |
 | `live_title` | `string` | 방송 제목 (방제). |
-| `live_id` | `number \| null` | 방송 세션 고유 숫자 식별자 (liveId). |
-| `open_date` | `string \| null` | 치지직 API 기준 방송 시작 일시. |
-| `close_date` | `string \| null` | 방송 종료 일시 (방송 종료 시점에 입력됨). |
-| `channel_image_url` | `string \| null` | 스트리머 프로필 이미지 CDN URL. |
-| `verified_mark` | `boolean` | 공식 파트너 인증 마크 보유 여부. |
-| `category_type` | `string \| null` | 대분류 카테고리 (`"GAME"`, `"TALK"`, `"SPORTS"`, `"ETC"` 등). |
-| `live_category` | `string \| null` | 내부 카테고리 슬러그 (예: `"game"`, `"talk"`). |
-| `live_category_value`| `string \| null` | 상세 카테고리/게임 명칭 (예: `"Valorant"`, `"League of Legends"`). |
+| `category_type` | `string \| null` | 대분류 카테고리 (`"GAME"`, `"TALK"`, `"SPORTS"`, `"ETC"` 등, `null`일 경우 생략). |
+| `live_category` | `string \| null` | 내부 카테고리 슬러그 (예: `"game"`, `"talk"`, `null`일 경우 생략). |
+| `live_category_value`| `string \| null` | 상세 카테고리/게임 명칭 (예: `"Valorant"`, `"League of Legends"`, `null`일 경우 생략). |
 | `tags` | `string[]` | 스트리머가 설정한 방송 태그 목록. |
 | `access_tier` | `string` | 상호 배타적 시청 권한 등급: `"PUBLIC"`, `"ADULT_ONLY"`, `"CHEAT_KEY"`, `"NAVER_PLUS"`, `"CHANNEL_SUBSCRIPTION"`, 또는 `"PAY_PER_VIEW"`. |
-| `policies` | `object` | 방송 시청 정책: `kr_only_viewing` (`bool`), `clip_active` (`bool`), `time_machine_active` (`bool`). |
-| `watch_party` | `object` | 같이보기 상태: `is_active` (`bool`), `no` (`number \| null`), `tag` (`string \| null`), `party_type` (`string \| null`), `paid_product_id` (`string \| null`). |
-| `chat_rules` | `object` | 채팅 제한 및 규칙: `chat_active` (`bool`), `chat_available_group` (`string \| null`), `chat_available_condition` (`string \| null`), `min_follower_minute` (`number \| null`), `allow_subscriber_in_follower_mode` (`bool`), `chat_slow_mode_sec` (`number \| null`), `chat_emoji_mode` (`bool`), `chat_donation_ranking_exposure` (`bool`). |
+| `is_kr_only` | `boolean` | 한국 내 시청 제한 여부 (`kr_only_viewing`). |
+| `is_chat_active` | `boolean` | 방송 채팅 활성화 여부. |
+| `is_watch_party` | `boolean` | 같이보기 방송 여부. |
 | `paid_promotion` | `boolean` | 유료 광고/협찬 방송 고지 여부. |
-| `drops_campaign_no`| `string \| null` | 드롭스 캠페인이 활성화된 경우 해당 식별자. |
-| `log_power_active` | `boolean` | 치지직 로그 파워 연동 활성화 여부. |
-| `live_thumbnail_image_url` | `string \| null` | 실시간 라이브 미리보기 썸네일 CDN URL. |
-| `default_thumbnail_image_url` | `string \| null` | 채널 기본 썸네일 이미지 CDN URL. |
-| `concurrent_user_count` | `number \| null` | 이벤트 발생 시점의 실시간 시청자 수. |
-| `accumulate_count` | `number \| null` | 이벤트 발생 시점의 누적 시청자 수. |
+| `drops_campaign_no`| `string \| null` | 드롭스 캠페인이 활성화된 경우 해당 식별자 (`null`일 경우 생략). |
 
 > [!TIP]
-> **디스크 및 네트워크 부하 방지**: 시청자 수(`concurrent_user_count`, `accumulate_count`)나 CDN 썸네일 토큰처럼 지속적으로 요동치는 텔레메트리 필드는 스냅샷에는 갱신되지만, `METADATA_CHANGED` 이벤트를 자체적으로 **트리거하지 않도록 설계**되어 불필요한 쓰기 오버헤드를 원천 차단합니다.
+> **경량 스냅샷 설계 및 부하 방지**: 스키마 버전 2는 방송의 핵심 생명주기 및 분류 정보를 보존하면서, 지속적으로 요동치는 실시간 시청자 수(`concurrent_user_count`, `accumulate_count`), 정적 CDN 썸네일 URL, 복잡한 중첩 구조체를 제외하였습니다. 이를 통해 디스크 및 클라우드 쓰기 오버헤드를 원천 차단하고 폴링 루프에서 즉각적인 상태 동등성(direct equality) 비교를 가능하게 합니다.
 
 #### 레코드 예시 (`METADATA_CHANGED`)
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "event": "METADATA_CHANGED",
-  "timestamp": "2026-09-30T14:35:10Z",
-  "time_local": "2026-09-30 23:35:10",
+  "timestamp": "2026-10-03T14:35:10Z",
   "stream_offset_ms": 2110450,
-  "changes": {
-    "live_title": {
-      "old": "저녁 토크 및 소통 방송",
-      "new": "발로란트 시청자 참여전 시작!"
-    },
-    "category_type": {
-      "old": "TALK",
-      "new": "GAME"
-    },
-    "live_category_value": {
-      "old": "저녁 토크",
-      "new": "Valorant"
-    }
-  },
   "state": {
+    "live_id": 3829140,
+    "open_date": "2026-10-03 23:00:00",
     "channel_id": "4c3b44869c9b1399723ec28ec236f736",
     "channel_name": "SampleStreamer",
-    "channel_image_url": "https://nng-phinf.pstatic.net/...",
-    "verified_mark": true,
     "live_title": "발로란트 시청자 참여전 시작!",
-    "live_id": 3829140,
-    "open_date": "2026-09-30 23:00:00",
-    "close_date": null,
     "category_type": "GAME",
     "live_category": "game",
     "live_category_value": "Valorant",
-    "tags": ["발로란트", "FPS", "시참"],
+    "tags": [
+      "발로란트",
+      "FPS",
+      "시참"
+    ],
     "access_tier": "PUBLIC",
-    "policies": {
-      "kr_only_viewing": false,
-      "clip_active": true,
-      "time_machine_active": true
-    },
-    "watch_party": {
-      "is_active": false,
-      "no": null,
-      "tag": null,
-      "party_type": null,
-      "paid_product_id": null
-    },
-    "chat_rules": {
-      "chat_active": true,
-      "chat_available_group": null,
-      "chat_available_condition": null,
-      "min_follower_minute": null,
-      "allow_subscriber_in_follower_mode": false,
-      "chat_slow_mode_sec": null,
-      "chat_emoji_mode": false,
-      "chat_donation_ranking_exposure": true
-    },
-    "paid_promotion": false,
-    "drops_campaign_no": null,
-    "log_power_active": false,
-    "live_thumbnail_image_url": "https://livecloud-thumb.akamaized.net/...",
-    "default_thumbnail_image_url": "https://nng-phinf.pstatic.net/...",
-    "concurrent_user_count": 1840,
-    "accumulate_count": 8920
+    "is_kr_only": false,
+    "is_chat_active": true,
+    "is_watch_party": false,
+    "paid_promotion": false
   }
 }
 ```
