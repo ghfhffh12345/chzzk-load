@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use crate::chzzk::models_metadata::{MetadataEventV2, StreamMetadataStateV2};
+use crate::chzzk::models_metadata::{MetadataEvent, StreamMetadataState};
 use crate::recorder::ffmpeg::sanitize_filename;
 
 #[derive(Debug, Clone)]
@@ -17,8 +17,8 @@ pub struct ActiveSessionState {
     pub alias: Option<String>,
     pub initial_title: String,
     pub current_title: String,
-    pub current_metadata: StreamMetadataStateV2,
-    pub metadata_history: Vec<MetadataEventV2>,
+    pub current_metadata: StreamMetadataState,
+    pub metadata_history: Vec<MetadataEvent>,
 }
 
 impl Default for ActiveSessionState {
@@ -30,7 +30,7 @@ impl Default for ActiveSessionState {
             alias: None,
             initial_title: String::new(),
             current_title: String::new(),
-            current_metadata: StreamMetadataStateV2::default(),
+            current_metadata: StreamMetadataState::default(),
             metadata_history: Vec::new(),
         }
     }
@@ -41,13 +41,13 @@ impl ActiveSessionState {
         start_timestamp: String,
         streamer_name: String,
         alias: Option<String>,
-        initial_metadata: impl Into<StreamMetadataStateV2>,
+        initial_metadata: impl Into<StreamMetadataState>,
     ) -> Self {
         let utc_now = Utc::now();
         let initial_metadata = initial_metadata.into();
         let initial_title = initial_metadata.live_title.clone();
 
-        let initial_event = MetadataEventV2::initial(
+        let initial_event = MetadataEvent::initial(
             utc_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             initial_metadata.clone(),
         );
@@ -99,8 +99,8 @@ impl ActiveSessionState {
 
     pub fn record_metadata_change(
         &mut self,
-        new_metadata: impl Into<StreamMetadataStateV2>,
-    ) -> Option<MetadataEventV2> {
+        new_metadata: impl Into<StreamMetadataState>,
+    ) -> Option<MetadataEvent> {
         let new_metadata = new_metadata.into();
         if self.current_metadata == new_metadata {
             return None;
@@ -109,7 +109,7 @@ impl ActiveSessionState {
         let utc_now = Utc::now();
         let stream_offset_ms = self.session_start_instant.elapsed().as_millis() as u64;
 
-        let event = MetadataEventV2::changed(
+        let event = MetadataEvent::changed(
             utc_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             stream_offset_ms,
             new_metadata.clone(),
@@ -141,7 +141,7 @@ pub mod tests {
             "2026-03-30_1200".to_string(),
             streamer.to_string(),
             alias.map(|s| s.to_string()),
-            StreamMetadataStateV2 {
+            StreamMetadataState {
                 live_title: title.to_string(),
                 live_category: Some("Game".to_string()),
                 live_category_value: Some("Gaming".to_string()),

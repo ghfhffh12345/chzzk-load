@@ -216,7 +216,7 @@ pub struct LiveStreamInfo {
     pub title: String,
     pub hls_url: String,
     pub chat_channel_id: Option<String>,
-    pub metadata: crate::chzzk::models_metadata::StreamMetadataStateV2,
+    pub metadata: crate::chzzk::models_metadata::StreamMetadataState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

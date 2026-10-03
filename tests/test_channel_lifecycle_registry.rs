@@ -1,4 +1,4 @@
-use chzzk_load::chzzk::models_metadata::StreamMetadataStateV2;
+use chzzk_load::chzzk::models_metadata::StreamMetadataState;
 use chzzk_load::engine::registry::{
     ChannelLifecycleKind, ChannelLifecycleRegistry, ChannelLifecycleState, RestrictionReason,
 };
@@ -10,7 +10,7 @@ fn make_test_session(streamer: &str, title: &str) -> ActiveSessionState {
         "2026-10-01_150000".to_string(),
         streamer.to_string(),
         None,
-        StreamMetadataStateV2 {
+        StreamMetadataState {
             live_title: title.to_string(),
             ..Default::default()
         },
@@ -222,7 +222,7 @@ fn make_open_detail(
         title: title.to_string(),
         hls_url: "https://example.com/live.m3u8".to_string(),
         chat_channel_id: Some("chat_123".to_string()),
-        metadata: StreamMetadataStateV2 {
+        metadata: StreamMetadataState {
             live_title: title.to_string(),
             ..Default::default()
         },

@@ -6,7 +6,7 @@ use crate::chzzk::models::{
     PlaybackMeta,
 };
 use crate::chzzk::models_chat::ChatAccessTokenResponse;
-use crate::chzzk::models_metadata::{CategoryType, StreamAccessTier, StreamMetadataStateV2};
+use crate::chzzk::models_metadata::{CategoryType, StreamAccessTier, StreamMetadataState};
 use crate::config::ChzzkConfig;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
@@ -461,7 +461,7 @@ impl ChzzkClient {
                 _ => CategoryType::Unknown,
             });
 
-            let metadata = StreamMetadataStateV2 {
+            let metadata = StreamMetadataState {
                 live_id,
                 open_date: content.open_date.clone(),
                 close_date: content.close_date.clone(),

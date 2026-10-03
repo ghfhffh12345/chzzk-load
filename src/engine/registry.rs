@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::chzzk::models::{LiveDetail, LiveStreamInfo};
-use crate::chzzk::models_metadata::MetadataEventV2;
+use crate::chzzk::models_metadata::MetadataEvent;
 use crate::engine::session::ActiveSessionState;
 
 /// Autonomous polling decision returned by [`ChannelLifecycleRegistry::evaluate_poll`].
@@ -19,7 +19,7 @@ pub enum PollAction {
     },
     /// Channel is currently recording and incoming metadata differs from current state.
     RecordingMetadataChanged {
-        event: MetadataEventV2,
+        event: MetadataEvent,
         title_changed: bool,
         remote_dir: String,
         full_jsonl: String,

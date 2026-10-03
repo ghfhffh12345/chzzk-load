@@ -54,7 +54,7 @@ async fn test_orchestrator_typed_query_seam_idle() {
         "2026-10-01_1200".to_string(),
         "StreamerOne".to_string(),
         Some("StreamerOne".to_string()),
-        chzzk_load::chzzk::models_metadata::StreamMetadataStateV2::default(),
+        chzzk_load::chzzk::models_metadata::StreamMetadataState::default(),
     );
     orchestrator.register_active_session("chan1", session);
     assert!(orchestrator.is_recording("chan1"));
