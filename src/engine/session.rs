@@ -1,9 +1,6 @@
-use chrono::{Local, Utc};
-use std::fmt::Write;
+use chrono::Utc;
 
-use crate::chzzk::models_metadata::{
-    MetadataDelta, MetadataEvent, MetadataEventType, StreamMetadataState,
-};
+use crate::chzzk::models_metadata::{MetadataEventV2, StreamMetadataStateV2};
 use crate::recorder::ffmpeg::sanitize_filename;
 
 #[derive(Debug, Clone)]
@@ -20,8 +17,8 @@ pub struct ActiveSessionState {
     pub alias: Option<String>,
     pub initial_title: String,
     pub current_title: String,
-    pub current_metadata: StreamMetadataState,
-    pub metadata_history: Vec<MetadataEvent>,
+    pub current_metadata: StreamMetadataStateV2,
+    pub metadata_history: Vec<MetadataEventV2>,
 }
 
 impl Default for ActiveSessionState {
@@ -33,7 +30,7 @@ impl Default for ActiveSessionState {
             alias: None,
             initial_title: String::new(),
             current_title: String::new(),
-            current_metadata: StreamMetadataState::default(),
+            current_metadata: StreamMetadataStateV2::default(),
             metadata_history: Vec::new(),
         }
     }
@@ -44,21 +41,16 @@ impl ActiveSessionState {
         start_timestamp: String,
         streamer_name: String,
         alias: Option<String>,
-        initial_metadata: StreamMetadataState,
+        initial_metadata: impl Into<StreamMetadataStateV2>,
     ) -> Self {
-        let now = Local::now();
         let utc_now = Utc::now();
+        let initial_metadata = initial_metadata.into();
         let initial_title = initial_metadata.live_title.clone();
 
-        let initial_event = MetadataEvent {
-            version: 1,
-            event: MetadataEventType::InitialState,
-            timestamp: utc_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            time_local: now.format("%Y-%m-%d %H:%M:%S").to_string(),
-            stream_offset_ms: 0,
-            changes: None,
-            state: initial_metadata.clone(),
-        };
+        let initial_event = MetadataEventV2::initial(
+            utc_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            initial_metadata.clone(),
+        );
 
         Self {
             start_timestamp,
@@ -107,34 +99,33 @@ impl ActiveSessionState {
 
     pub fn record_metadata_change(
         &mut self,
-        new_metadata: StreamMetadataState,
-    ) -> Option<(MetadataDelta, MetadataEvent)> {
-        let delta = self.current_metadata.compute_delta(&new_metadata)?;
-        let now = Local::now();
+        new_metadata: impl Into<StreamMetadataStateV2>,
+    ) -> Option<MetadataEventV2> {
+        let new_metadata = new_metadata.into();
+        if self.current_metadata == new_metadata {
+            return None;
+        }
+
         let utc_now = Utc::now();
         let stream_offset_ms = self.session_start_instant.elapsed().as_millis() as u64;
 
-        let event = MetadataEvent {
-            version: 1,
-            event: MetadataEventType::MetadataChanged,
-            timestamp: utc_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            time_local: now.format("%Y-%m-%d %H:%M:%S").to_string(),
+        let event = MetadataEventV2::changed(
+            utc_now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             stream_offset_ms,
-            changes: Some(delta.clone()),
-            state: new_metadata.clone(),
-        };
+            new_metadata.clone(),
+        );
 
         self.current_title = new_metadata.live_title.clone();
         self.current_metadata = new_metadata;
         self.metadata_history.push(event.clone());
-        Some((delta, event))
+        Some(event)
     }
 
     pub fn format_metadata_jsonl(&self) -> String {
         let mut out = String::new();
         for event in &self.metadata_history {
-            if let Ok(line) = serde_json::to_string(event) {
-                let _ = writeln!(out, "{line}");
+            if let Ok(line) = event.to_json_line() {
+                out.push_str(&line);
             }
         }
         out
@@ -150,7 +141,7 @@ pub mod tests {
             "2026-03-30_1200".to_string(),
             streamer.to_string(),
             alias.map(|s| s.to_string()),
-            StreamMetadataState {
+            StreamMetadataStateV2 {
                 live_title: title.to_string(),
                 live_category: Some("Game".to_string()),
                 live_category_value: Some("Gaming".to_string()),
@@ -251,11 +242,12 @@ pub mod tests {
 
         let parsed_initial: serde_json::Value =
             serde_json::from_str(initial_jsonl.lines().next().unwrap()).unwrap();
-        assert_eq!(parsed_initial["version"], 1);
+        assert_eq!(parsed_initial["version"], 2);
         assert_eq!(parsed_initial["event"], "INITIAL_STATE");
         assert_eq!(parsed_initial["stream_offset_ms"], 0);
         assert_eq!(parsed_initial["state"]["live_title"], "Initial");
-        assert!(parsed_initial["changes"].is_null());
+        assert!(parsed_initial.get("changes").is_none());
+        assert!(parsed_initial.get("time_local").is_none());
 
         let mut updated_meta = session.current_metadata.clone();
         updated_meta.live_title = "Second Title".to_string();
@@ -266,13 +258,31 @@ pub mod tests {
         assert_eq!(lines.len(), 2);
 
         let parsed_second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
-        assert_eq!(parsed_second["version"], 1);
+        assert_eq!(parsed_second["version"], 2);
         assert_eq!(parsed_second["event"], "METADATA_CHANGED");
-        assert_eq!(parsed_second["changes"]["live_title"]["old"], "Initial");
-        assert_eq!(
-            parsed_second["changes"]["live_title"]["new"],
-            "Second Title"
-        );
+        assert!(parsed_second.get("changes").is_none());
+        assert!(parsed_second.get("time_local").is_none());
         assert_eq!(parsed_second["state"]["live_title"], "Second Title");
+    }
+
+    #[test]
+    pub fn test_active_session_state_direct_equality_check() {
+        use crate::chzzk::models_metadata::MetadataEventType;
+
+        let mut session = test_session("Streamer", None, "Initial");
+        let same_meta = session.current_metadata.clone();
+        // Identical metadata must return None and not append to history
+        assert!(session.record_metadata_change(same_meta).is_none());
+        assert_eq!(session.metadata_history.len(), 1);
+
+        // Different metadata must return Some(event) and append to history
+        let mut changed_meta = session.current_metadata.clone();
+        changed_meta.tags = vec!["new_tag".to_string()];
+        let event = session
+            .record_metadata_change(changed_meta)
+            .expect("must detect change");
+        assert_eq!(event.event, MetadataEventType::MetadataChanged);
+        assert_eq!(event.version, 2);
+        assert_eq!(session.metadata_history.len(), 2);
     }
 }

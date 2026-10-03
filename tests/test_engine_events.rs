@@ -1311,7 +1311,9 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
     let orchestrator =
         EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
-    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataStateV2 {
+        live_id: Some(999111),
+        channel_id: "chan_rename".to_string(),
         channel_name: "RenameStreamer".to_string(),
         live_title: "Initial Stream Title".to_string(),
         ..Default::default()
@@ -1437,7 +1439,9 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
     let orchestrator =
         EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
-    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataStateV2 {
+        live_id: Some(999111),
+        channel_id: "chan_rename".to_string(),
         channel_name: "RenameStreamer".to_string(),
         live_title: "Initial Stream Title".to_string(),
         ..Default::default()
@@ -1448,13 +1452,11 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
     fs::create_dir_all(&session_dir).unwrap();
     let initial_jsonl = format!(
         "{}\n",
-        serde_json::to_string(&chzzk_load::chzzk::models_metadata::MetadataEvent {
-            version: 1,
+        serde_json::to_string(&chzzk_load::chzzk::models_metadata::MetadataEventV2 {
+            version: 2,
             event: chzzk_load::chzzk::models_metadata::MetadataEventType::InitialState,
             timestamp: "2026-09-22T10:00:00Z".to_string(),
-            time_local: "2026-09-22 10:00:00".to_string(),
             stream_offset_ms: 0,
-            changes: None,
             state: initial_meta.clone(),
         })
         .unwrap()
@@ -1573,7 +1575,9 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
 
-    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataStateV2 {
+        live_id: Some(555666),
+        channel_id: "chan_pre".to_string(),
         channel_name: "PreStreamer".to_string(),
         live_title: "Early Title 1".to_string(),
         ..Default::default()
@@ -1702,7 +1706,9 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
     let orchestrator =
         EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
 
-    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataState {
+    let initial_meta = chzzk_load::chzzk::models_metadata::StreamMetadataStateV2 {
+        live_id: Some(888111),
+        channel_id: "chan_trans".to_string(),
         channel_name: "TransStreamer".to_string(),
         live_title: "Just Chatting".to_string(),
         category_type: Some(chzzk_load::chzzk::models_metadata::CategoryType::Talk),
@@ -1734,7 +1740,7 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
     let content = &texts[0].2;
     assert!(content.contains("\"METADATA_CHANGED\""));
     assert!(content.contains("Valorant"));
-    assert!(content.contains("2026아시안게임"));
+    assert!(content.contains("\"is_watch_party\":true"));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

@@ -404,8 +404,8 @@ impl EngineOrchestrator {
                             );
                         }
                         PollAction::RecordingMetadataChanged {
-                            delta,
                             event,
+                            title_changed,
                             remote_dir,
                             full_jsonl,
                             display_name,
@@ -415,8 +415,7 @@ impl EngineOrchestrator {
                             let recordings_base =
                                 resolve_path(Path::new(&self.settings.general.recordings_dir));
                             let session_dir = recordings_base.join(&remote_dir);
-                            let event_line = serde_json::to_string(&event).unwrap_or_default();
-                            if !event_line.is_empty() {
+                            if let Ok(event_line) = event.to_json_line() {
                                 use tokio::io::AsyncWriteExt;
                                 if let Ok(mut file) = tokio::fs::OpenOptions::new()
                                     .create(true)
@@ -424,8 +423,7 @@ impl EngineOrchestrator {
                                     .open(session_dir.join("metadata.jsonl"))
                                     .await
                                 {
-                                    let _ =
-                                        file.write_all(format!("{event_line}\n").as_bytes()).await;
+                                    let _ = file.write_all(event_line.as_bytes()).await;
                                     let _ = file.flush().await;
                                 }
                             }
@@ -465,27 +463,17 @@ impl EngineOrchestrator {
                                     .await;
                             }
 
-                            if delta.live_title.is_some() {
+                            if title_changed {
                                 let _ = self
                                     .event_tx
                                     .send(AppEvent::ChannelUpdate {
                                         channel_id: channel.id.clone(),
-                                        channel_name: display_name.clone(),
+                                        channel_name: display_name,
                                         is_live: true,
-                                        title: title.clone(),
+                                        title,
                                     })
                                     .await;
                             }
-
-                            let _ = self
-                                .event_tx
-                                .send(AppEvent::ChannelUpdate {
-                                    channel_id: channel.id.clone(),
-                                    channel_name: display_name,
-                                    is_live: true,
-                                    title,
-                                })
-                                .await;
                         }
                         PollAction::AlreadyRecording {
                             display_name,

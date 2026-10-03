@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::chzzk::models::{LiveDetail, LiveStreamInfo};
-use crate::chzzk::models_metadata::{MetadataDelta, MetadataEvent};
+use crate::chzzk::models_metadata::MetadataEventV2;
 use crate::engine::session::ActiveSessionState;
 
 /// Autonomous polling decision returned by [`ChannelLifecycleRegistry::evaluate_poll`].
@@ -19,8 +19,8 @@ pub enum PollAction {
     },
     /// Channel is currently recording and incoming metadata differs from current state.
     RecordingMetadataChanged {
-        delta: MetadataDelta,
-        event: MetadataEvent,
+        event: MetadataEventV2,
+        title_changed: bool,
         remote_dir: String,
         full_jsonl: String,
         display_name: String,
@@ -471,23 +471,25 @@ impl ChannelLifecycleRegistry {
                             display_name,
                             was_api_restricted: false,
                         }
-                    } else if let Some((delta, event)) =
-                        session.record_metadata_change(info.metadata.clone())
-                    {
-                        let remote_dir = session.folder_name();
-                        let full_jsonl = session.format_metadata_jsonl();
-                        PollAction::RecordingMetadataChanged {
-                            delta,
-                            event,
-                            remote_dir,
-                            full_jsonl,
-                            display_name,
-                            title: info.title.clone(),
-                        }
                     } else {
-                        PollAction::AlreadyRecording {
-                            display_name,
-                            title: info.title.clone(),
+                        let title_changed =
+                            session.current_metadata.live_title != info.metadata.live_title;
+                        if let Some(event) = session.record_metadata_change(info.metadata.clone()) {
+                            let remote_dir = session.folder_name();
+                            let full_jsonl = session.format_metadata_jsonl();
+                            PollAction::RecordingMetadataChanged {
+                                event,
+                                title_changed,
+                                remote_dir,
+                                full_jsonl,
+                                display_name,
+                                title: info.title.clone(),
+                            }
+                        } else {
+                            PollAction::AlreadyRecording {
+                                display_name,
+                                title: info.title.clone(),
+                            }
                         }
                     }
                 }

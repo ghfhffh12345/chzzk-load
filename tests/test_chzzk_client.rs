@@ -927,3 +927,101 @@ fn test_resolve_access_tier_precedence() {
         StreamAccessTier::PayPerView
     );
 }
+
+#[tokio::test]
+async fn test_get_live_detail_lean_metadata_mapping_and_omits_telemetry() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 888123,
+                    "liveTitle": "Chzzk Championship Finals",
+                    "channel": {
+                        "channelId": "chan_lean",
+                        "channelName": "EsportsBroadcaster",
+                        "channelImageUrl": "https://ssl.pstatic.net/avatar.png",
+                        "verifiedMark": true
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://test.com/hls.m3u8\"}]}",
+                    "chatChannelId": "chat_chan_lean",
+                    "adult": false,
+                    "openDate": "2026-10-03 12:00:00",
+                    "closeDate": null,
+                    "categoryType": "GAME",
+                    "liveCategory": "game",
+                    "liveCategoryValue": "League of Legends",
+                    "tags": ["esports", "finals"],
+                    "paidPromotion": true,
+                    "dropsCampaignNo": "camp_888",
+                    "krOnlyViewing": true,
+                    "chatActive": false,
+                    "watchPartyNo": 777,
+                    "watchPartyTag": "watch_party_final",
+                    "concurrentUserCount": 45000,
+                    "accumulateCount": 120000,
+                    "liveImageUrl": "https://ssl.pstatic.net/thumb.jpg",
+                    "defaultThumbnailImageUrl": "https://ssl.pstatic.net/def.jpg",
+                    "logPowerActive": true
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = chzzk_load::chzzk::client::ChzzkClient::new(&config)
+        .with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let detail = client.get_live_detail("chan_lean").await.unwrap();
+    match detail {
+        LiveDetail::Open(stream_info) => {
+            assert_eq!(stream_info.channel_id, "chan_lean");
+            assert_eq!(stream_info.streamer_name, "EsportsBroadcaster");
+            assert_eq!(stream_info.title, "Chzzk Championship Finals");
+            assert_eq!(stream_info.live_id, Some(888123));
+
+            let meta = stream_info.metadata;
+            // Preserved core identifiers & lifecycles
+            assert_eq!(meta.live_id, Some(888123));
+            assert_eq!(meta.channel_id, "chan_lean");
+            assert_eq!(meta.channel_name, "EsportsBroadcaster");
+            assert_eq!(meta.live_title, "Chzzk Championship Finals");
+            assert_eq!(meta.open_date, Some("2026-10-03 12:00:00".to_string()));
+            assert_eq!(meta.close_date, None);
+
+            // Classification & tags
+            assert_eq!(
+                meta.category_type,
+                Some(chzzk_load::chzzk::models_metadata::CategoryType::Game)
+            );
+            assert_eq!(meta.live_category, Some("game".to_string()));
+            assert_eq!(
+                meta.live_category_value,
+                Some("League of Legends".to_string())
+            );
+            assert_eq!(meta.tags, vec!["esports".to_string(), "finals".to_string()]);
+            assert_eq!(
+                meta.access_tier,
+                chzzk_load::chzzk::models_metadata::StreamAccessTier::Public
+            );
+
+            // Flattened flags
+            assert!(meta.is_kr_only);
+            assert!(!meta.is_chat_active);
+            assert!(meta.is_watch_party);
+            assert!(meta.paid_promotion);
+            assert_eq!(meta.drops_campaign_no, Some("camp_888".to_string()));
+        }
+        other => panic!("Expected LiveDetail::Open, got {other:?}"),
+    }
+}

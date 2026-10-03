@@ -1,4 +1,4 @@
-use chzzk_load::chzzk::models_metadata::StreamMetadataState;
+use chzzk_load::chzzk::models_metadata::StreamMetadataStateV2;
 use chzzk_load::engine::registry::{
     ChannelLifecycleKind, ChannelLifecycleRegistry, ChannelLifecycleState, RestrictionReason,
 };
@@ -10,7 +10,7 @@ fn make_test_session(streamer: &str, title: &str) -> ActiveSessionState {
         "2026-10-01_150000".to_string(),
         streamer.to_string(),
         None,
-        StreamMetadataState {
+        StreamMetadataStateV2 {
             live_title: title.to_string(),
             ..Default::default()
         },
@@ -222,7 +222,7 @@ fn make_open_detail(
         title: title.to_string(),
         hls_url: "https://example.com/live.m3u8".to_string(),
         chat_channel_id: Some("chat_123".to_string()),
-        metadata: StreamMetadataState {
+        metadata: StreamMetadataStateV2 {
             live_title: title.to_string(),
             ..Default::default()
         },
@@ -264,7 +264,7 @@ fn test_evaluate_poll_recording_metadata_change_and_already_recording() {
     let token = CancellationToken::new();
     registry.start_recording("ch1", session, token);
 
-    // 1. Same title -> AlreadyRecording
+    // 1. Same title and metadata -> AlreadyRecording (no redundant action)
     let detail_same = make_open_detail("ch1", Some(101), "Streamer1", "Initial Title");
     let action = registry.evaluate_poll("ch1", None, &detail_same, Duration::from_secs(30));
     match action {
@@ -278,7 +278,7 @@ fn test_evaluate_poll_recording_metadata_change_and_already_recording() {
         other => panic!("Expected AlreadyRecording, got {other:?}"),
     }
 
-    // 2. Changed title -> RecordingMetadataChanged
+    // 2. Changed title -> RecordingMetadataChanged with title_changed = true
     let mut detail_new = make_open_detail("ch1", Some(101), "Streamer1", "Updated Title");
     if let chzzk_load::chzzk::models::LiveDetail::Open(ref mut info) = detail_new {
         info.metadata.live_title = "Updated Title".to_string();
@@ -286,17 +286,57 @@ fn test_evaluate_poll_recording_metadata_change_and_already_recording() {
     let action2 = registry.evaluate_poll("ch1", None, &detail_new, Duration::from_secs(30));
     match action2 {
         PollAction::RecordingMetadataChanged {
-            delta,
+            event,
+            title_changed,
             display_name,
             title,
             ..
         } => {
+            assert!(title_changed);
             assert_eq!(display_name, "Streamer1");
             assert_eq!(title, "Updated Title");
-            assert_eq!(delta.live_title.as_ref().unwrap().old, "Initial Title");
-            assert_eq!(delta.live_title.as_ref().unwrap().new, "Updated Title");
+            assert_eq!(event.state.live_title, "Updated Title");
+            assert_eq!(event.version, 2);
         }
         other => panic!("Expected RecordingMetadataChanged, got {other:?}"),
+    }
+
+    // 3. Changed tags (title unchanged) -> RecordingMetadataChanged with title_changed = false
+    let mut detail_tag_change = make_open_detail("ch1", Some(101), "Streamer1", "Updated Title");
+    if let chzzk_load::chzzk::models::LiveDetail::Open(ref mut info) = detail_tag_change {
+        info.metadata.tags = vec!["esports".to_string()];
+    }
+    let action3 = registry.evaluate_poll("ch1", None, &detail_tag_change, Duration::from_secs(30));
+    match action3 {
+        PollAction::RecordingMetadataChanged {
+            event,
+            title_changed,
+            display_name,
+            title,
+            ..
+        } => {
+            assert!(!title_changed);
+            assert_eq!(display_name, "Streamer1");
+            assert_eq!(title, "Updated Title");
+            assert_eq!(event.state.tags, vec!["esports".to_string()]);
+            assert_eq!(event.version, 2);
+        }
+        other => {
+            panic!("Expected RecordingMetadataChanged with title_changed=false, got {other:?}")
+        }
+    }
+
+    // 4. Repeated identical metadata -> AlreadyRecording (no redundant action)
+    let action4 = registry.evaluate_poll("ch1", None, &detail_tag_change, Duration::from_secs(30));
+    match action4 {
+        PollAction::AlreadyRecording {
+            display_name,
+            title,
+        } => {
+            assert_eq!(display_name, "Streamer1");
+            assert_eq!(title, "Updated Title");
+        }
+        other => panic!("Expected AlreadyRecording, got {other:?}"),
     }
 }
 

@@ -54,7 +54,7 @@ async fn test_orchestrator_typed_query_seam_idle() {
         "2026-10-01_1200".to_string(),
         "StreamerOne".to_string(),
         Some("StreamerOne".to_string()),
-        Default::default(),
+        chzzk_load::chzzk::models_metadata::StreamMetadataStateV2::default(),
     );
     orchestrator.register_active_session("chan1", session);
     assert!(orchestrator.is_recording("chan1"));
@@ -181,6 +181,54 @@ async fn test_orchestrator_poll_metadata_change_updates_registry_and_persists() 
             );
             let _ = request.respond(response);
         }
+
+        // Poll 3: Same Title, Changed Tags
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 55555,
+                    "liveTitle": "Updated Title",
+                    "tags": ["gaming"],
+                    "channel": {
+                        "channelId": "chan_meta",
+                        "channelName": "MetaStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+
+        // Poll 4: Identical Metadata
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "status": "OPEN",
+                    "liveId": 55555,
+                    "liveTitle": "Updated Title",
+                    "tags": ["gaming"],
+                    "channel": {
+                        "channelId": "chan_meta",
+                        "channelName": "MetaStreamer"
+                    },
+                    "livePlaybackJson": "{\"media\":[{\"mediaId\":\"HLS\",\"path\":\"https://mock/master.m3u8\",\"encodingTrack\":[{\"encodingTrackId\":\"1080p\",\"path\":\"https://mock/1080p.m3u8\"}]}]}"
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
     });
 
     let temp_dir = std::env::temp_dir().join(format!("test_orch_meta_{}", rand::random::<u32>()));
@@ -215,14 +263,15 @@ async fn test_orchestrator_poll_metadata_change_updates_registry_and_persists() 
             .live_title,
         "Initial Title"
     );
+    while event_rx.try_recv().is_ok() {}
 
-    // Poll 2: Metadata change
+    // Poll 2: Metadata change (title changed)
     orchestrator.poll_channels_once(&upload_tx).await;
     assert!(orchestrator.is_recording("chan_meta"));
     let updated_session = orchestrator.active_session("chan_meta").unwrap();
     assert_eq!(updated_session.current_metadata.live_title, "Updated Title");
 
-    // Verify metadata event was emitted or logged
+    // Verify title change triggered ChannelUpdate
     let mut got_channel_update = false;
     while let Ok(event) = event_rx.try_recv() {
         if let AppEvent::ChannelUpdate { title, is_live, .. } = event {
@@ -233,7 +282,37 @@ async fn test_orchestrator_poll_metadata_change_updates_registry_and_persists() 
     }
     assert!(
         got_channel_update,
-        "Must emit ChannelUpdate with updated title"
+        "Must emit ChannelUpdate when title changed"
+    );
+
+    // Poll 3: Metadata change with UNCHANGED title (only tags changed)
+    orchestrator.poll_channels_once(&upload_tx).await;
+    let tag_updated_session = orchestrator.active_session("chan_meta").unwrap();
+    assert_eq!(
+        tag_updated_session.current_metadata.tags,
+        vec!["gaming".to_string()]
+    );
+    assert_eq!(tag_updated_session.metadata_history.len(), 3);
+
+    // Verify NO ChannelUpdate was emitted since title did not change
+    let mut saw_channel_update_on_tag_change = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if let AppEvent::ChannelUpdate { .. } = event {
+            saw_channel_update_on_tag_change = true;
+        }
+    }
+    assert!(
+        !saw_channel_update_on_tag_change,
+        "Must NOT emit ChannelUpdate when title did not change"
+    );
+
+    // Poll 4: Identical metadata poll
+    orchestrator.poll_channels_once(&upload_tx).await;
+    let identical_session = orchestrator.active_session("chan_meta").unwrap();
+    assert_eq!(
+        identical_session.metadata_history.len(),
+        3,
+        "Identical metadata must not append to history"
     );
 
     // Clean up
