@@ -46,3 +46,13 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Contract Phase Canonicalization**: When completing the contract or purge phase of a schema refactoring, internal engine, recorder, and client modules must directly consume canonical type names (`StreamMetadataState`, `MetadataEvent`).
   - *Code Smell (Middle Man / Speculative Generality)*: Retaining transitional version aliases (`*V2`, `*Old`) across internal callers after legacy models have been purged.
   - *Resolution*: Migrate internal imports and usages directly to canonical types; preserve aliases only when required for external library consumers.
+
+---
+
+## 5. Filesystem Invariants & Windows OS Safety
+
+- **Windows Transient Lock & Unlink Resilience**: All filesystem deletion routines operating on child process outputs (`upload_file_and_delete`) or directory unlinks (`cleanup_session_dir_if_empty`) must implement bounded exponential backoff retries handling `ERROR_SHARING_VIOLATION` (32), `ERROR_ACCESS_DENIED` (5), and `ERROR_DIR_NOT_EMPTY` (145), and treat `ErrorKind::NotFound` as success.
+  - *Hard Violation*: Single-attempt `tokio::fs::remove_file` or `remove_dir` immediately following child process termination or file deletion.
+  - *Resolution*: Retry up to 5–10 attempts with exponential backoff (20ms–200ms) before returning an I/O error, allowing background Windows antivirus and filesystem filter drivers to release locks.
+- **External Subprocess Hermeticity**: Integration tests invoking real external binaries (`rclone`, `ffmpeg`) must guard execution behind an availability check (e.g. `ensure_rclone_available()`, `ensure_ffmpeg_available()`) to prevent environment-dependent test failures in lightweight runner environments. External live network streams or credentials must be marked `#[ignore]`.
+

@@ -3,5 +3,6 @@ set -e
 
 # Pre-commit hook: verify formatting, linting, and fast unit/smoke tests locally before commit
 cargo fmt --check
+RUSTFLAGS="-D warnings" cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
-cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state
+cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state --test test_shutdown_cleanup

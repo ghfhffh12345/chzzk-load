@@ -47,6 +47,8 @@ cargo build --release
 - **Strictly Bounded Disk Footprint**: Delete local video and chat chunks immediately upon confirmed upload (maintaining 1–2 video segments and at most 1 chat segment on disk per active stream).
 - **Disk Circuit Breaker**: Periodically check free disk space against `min_free_disk_gb`. If breached, gracefully terminate FFmpeg (`"q\n"`), seal/upload final chunks, and block new sessions until disk space recovers.
 - **Crash Recovery & Reconciliation**: Detect orphaned chunks on startup, validate contiguity, and quarantine partial tail chunks.
+- **Graceful Shutdown Barrier**: Maintain strict exit order: (1) terminate FFmpeg gracefully, (2) seal lingering chunks (`is_stream_finished = true`), (3) await all session tasks, (4) drop `upload_tx`, (5) drain and await `UploadWorker`, and (6) purge empty local session directories. Never invoke folder cleanup before the upload worker finishes in-flight chunk deletions.
+- **Windows File Lock Resilience**: Bounded exponential backoff retries when removing files post-upload (`rclone.rs`) or purging directories (`cleanup.rs`) to absorb transient Windows sharing violations (32), access denied errors (5), and asynchronous unlink latency (145).
 
 ### 2.4. Stream Polling & Orchestration (`src/engine/`)
 - **Module Topology**:

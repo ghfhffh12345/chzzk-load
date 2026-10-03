@@ -28,6 +28,11 @@ jobs:
       - name: Run clippy linter
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Check compiler warnings
+        run: cargo check --all-targets
+        env:
+          RUSTFLAGS: "-D warnings"
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -39,17 +44,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg (Linux)
+      - name: Install FFmpeg & Rclone (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout="15"
-          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 ffmpeg
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 ffmpeg rclone
 
       - name: Set up FFmpeg (Windows)
         if: runner.os == 'Windows'
         uses: FedericoCarboni/setup-ffmpeg@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rclone (Windows)
+        if: runner.os == 'Windows'
+        run: choco install rclone --no-progress
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
