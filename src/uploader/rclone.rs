@@ -208,10 +208,40 @@ impl UploadBackend for RcloneBackend {
                 .with_context(|| "failed to wait for rclone copyto process")?;
             if status.success() {
                 on_progress(file_size, file_size, last_speed);
-                tokio::fs::remove_file(local_path).await.with_context(|| {
-                    format!("failed to remove local file after upload: {local_path:?}")
-                })?;
-                Ok(file_size)
+                // On Windows, background virus scanners or shell handlers can briefly hold
+                // a read lock immediately after a file is closed by rclone.exe.
+                // Retry with exponential backoff for transient sharing violations or access denied.
+                let mut remove_res = tokio::fs::remove_file(local_path).await;
+                let mut attempts = 0;
+                while let Err(ref e) = remove_res {
+                    if attempts >= 10 || e.kind() == std::io::ErrorKind::NotFound {
+                        break;
+                    }
+                    let raw_os = e.raw_os_error();
+                    let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
+                        || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+                        || e.kind() == std::io::ErrorKind::PermissionDenied;
+
+                    if is_transient_lock {
+                        attempts += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(std::cmp::min(
+                            50 * attempts,
+                            200,
+                        )))
+                        .await;
+                        remove_res = tokio::fs::remove_file(local_path).await;
+                    } else {
+                        break;
+                    }
+                }
+
+                match remove_res {
+                    Ok(_) => Ok(file_size),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(file_size),
+                    Err(e) => Err(e).with_context(|| {
+                        format!("failed to remove local file after upload: {local_path:?}")
+                    }),
+                }
             } else {
                 let err_msg = stderr_logs.join("\n");
                 let trimmed = err_msg.trim();

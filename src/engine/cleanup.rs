@@ -30,9 +30,50 @@ pub async fn cleanup_session_dir_if_empty(session_dir: &Path) -> std::io::Result
 
     if is_empty_or_metadata_only {
         if has_metadata {
-            let _ = tokio::fs::remove_file(session_dir.join("metadata.jsonl")).await;
+            let meta_path = session_dir.join("metadata.jsonl");
+            let mut remove_res = tokio::fs::remove_file(&meta_path).await;
+            let mut attempts = 0;
+            while let Err(ref e) = remove_res {
+                if attempts >= 5 || e.kind() == std::io::ErrorKind::NotFound {
+                    break;
+                }
+                let raw_os = e.raw_os_error();
+                let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
+                    || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+                    || e.kind() == std::io::ErrorKind::PermissionDenied;
+
+                if is_transient_lock {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(20 * attempts)).await;
+                    remove_res = tokio::fs::remove_file(&meta_path).await;
+                } else {
+                    break;
+                }
+            }
         }
-        if tokio::fs::remove_dir(session_dir).await.is_ok() {
+
+        let mut remove_dir_res = tokio::fs::remove_dir(session_dir).await;
+        let mut attempts = 0;
+        while let Err(ref e) = remove_dir_res {
+            if attempts >= 5 || e.kind() == std::io::ErrorKind::NotFound {
+                break;
+            }
+            let raw_os = e.raw_os_error();
+            let is_transient_lock = raw_os == Some(145) // ERROR_DIR_NOT_EMPTY (pending unlinks)
+                || raw_os == Some(32) // ERROR_SHARING_VIOLATION
+                || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+                || e.kind() == std::io::ErrorKind::PermissionDenied;
+
+            if is_transient_lock {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(20 * attempts)).await;
+                remove_dir_res = tokio::fs::remove_dir(session_dir).await;
+            } else {
+                break;
+            }
+        }
+
+        if remove_dir_res.is_ok() || !session_dir.exists() {
             return Ok(true);
         }
     }

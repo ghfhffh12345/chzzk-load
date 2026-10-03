@@ -445,42 +445,49 @@ impl RecordingSession {
             .await;
 
             session_cancel.cancel();
-            if let Some(mut chat_handle) = chat_task
-                && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
-                    .await
-                    .is_err()
-            {
-                chat_handle.abort();
-            }
-            let _ = tokio::time::timeout(Duration::from_secs(2), chat_forward_handle).await;
-
             let metadata_jsonl = registry
                 .active_session(&channel_id)
                 .map(|s| s.format_metadata_jsonl())
                 .unwrap_or_default();
-            if !metadata_jsonl.is_empty()
-                && let Some(ref backend) = backend_opt
-            {
-                match backend
-                    .upload_text(&session_folder_name, "metadata.jsonl", &metadata_jsonl)
-                    .await
+
+            let upload_metadata_fut = async {
+                if !metadata_jsonl.is_empty()
+                    && let Some(ref backend) = backend_opt
                 {
-                    Ok(_) => {
-                        let _ = event_tx
-                            .send(AppEvent::Log(LogEntry::rec(format!(
-                                "Uploaded 'metadata.jsonl' for {channel_id}"
-                            ))))
-                            .await;
-                    }
-                    Err(e) => {
-                        let _ = event_tx
-                            .send(AppEvent::Log(LogEntry::warn(format!(
-                                "Failed to upload 'metadata.jsonl' for {channel_id}: {e}"
-                            ))))
-                            .await;
+                    match backend
+                        .upload_text(&session_folder_name, "metadata.jsonl", &metadata_jsonl)
+                        .await
+                    {
+                        Ok(_) => {
+                            let _ = event_tx
+                                .send(AppEvent::Log(LogEntry::rec(format!(
+                                    "Uploaded 'metadata.jsonl' for {channel_id}"
+                                ))))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = event_tx
+                                .send(AppEvent::Log(LogEntry::warn(format!(
+                                    "Failed to upload 'metadata.jsonl' for {channel_id}: {e}"
+                                ))))
+                                .await;
+                        }
                     }
                 }
-            }
+            };
+
+            let teardown_chat_fut = async {
+                if let Some(mut chat_handle) = chat_task
+                    && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
+                        .await
+                        .is_err()
+                {
+                    chat_handle.abort();
+                }
+                let _ = tokio::time::timeout(Duration::from_secs(2), chat_forward_handle).await;
+            };
+
+            tokio::join!(upload_metadata_fut, teardown_chat_fut);
 
             registry.finish_recording(&channel_id, info.live_id);
 
