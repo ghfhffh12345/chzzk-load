@@ -185,7 +185,7 @@ async fn test_all_app_event_variants_mpsc() {
 #[tokio::test]
 async fn test_engine_orchestrator_instantiation() {
     let settings = Settings::default();
-    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
@@ -225,7 +225,9 @@ async fn test_engine_orchestrator_poll_channel_offline() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(10);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -268,7 +270,9 @@ async fn test_engine_orchestrator_poll_channel_error() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(10);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -346,7 +350,9 @@ async fn test_engine_orchestrator_poll_channel_live() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -509,7 +515,9 @@ async fn test_engine_orchestrator_prevents_duplicate_session_race_condition() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -929,7 +937,7 @@ async fn test_engine_orchestrator_graceful_shutdown() {
         channels: vec![],
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -1012,7 +1020,9 @@ async fn test_engine_orchestrator_graceful_shutdown_with_active_session() {
         )],
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -1113,7 +1123,9 @@ async fn test_engine_orchestrator_manual_refresh() {
         channels: vec![ChannelConfig::with_alias("chan_refresh", "RefreshStreamer")],
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -1301,8 +1313,9 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    );
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
@@ -1429,8 +1442,9 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    );
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
@@ -1568,8 +1582,9 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
@@ -1696,8 +1711,9 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    );
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
@@ -1818,7 +1834,7 @@ async fn test_engine_orchestrator_graceful_shutdown_cleans_empty_session_dirs() 
         channels: vec![],
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = CancellationToken::new();
 
@@ -1951,7 +1967,9 @@ async fn test_engine_orchestrator_resumes_recording_after_cooldown_for_interrupt
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -2040,8 +2058,9 @@ async fn test_engine_orchestrator_graceful_shutdown_awaits_in_progress_upload() 
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
@@ -2297,8 +2316,9 @@ async fn test_engine_orchestrator_graceful_shutdown_serializes_final_chunk_after
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
@@ -2458,8 +2478,9 @@ async fn test_engine_orchestrator_two_concurrent_live_streams() {
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
@@ -2646,8 +2667,9 @@ async fn test_engine_orchestrator_recovers_and_uploads_pending_chunks() {
         ..Default::default()
     };
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{chzzk_port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let cancel_token = CancellationToken::new();
 
@@ -2781,7 +2803,9 @@ async fn test_engine_orchestrator_poll_channel_restricted_stream_sets_live_and_l
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
@@ -2901,7 +2925,9 @@ async fn test_engine_orchestrator_restricted_stream_recovers_to_recordable() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
@@ -3059,7 +3085,9 @@ fn main() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx)
@@ -3265,7 +3293,9 @@ async fn test_engine_orchestrator_restricted_stream_resets_on_offline() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
 
@@ -3446,7 +3476,9 @@ async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_e
         channels: vec![ChannelConfig::with_alias("chan_ended", "EndedStreamer")],
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -3501,7 +3533,7 @@ async fn test_recording_session_cleans_empty_folder_when_no_chunks_saved() {
         },
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -3641,7 +3673,9 @@ async fn test_engine_orchestrator_handles_ffmpeg_key_403_forbidden_stream() {
         channels: vec![ChannelConfig::with_alias("chan_sports", "SportsStreamer")],
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -4031,7 +4065,8 @@ async fn test_engine_orchestrator_channel_update_uses_alias() {
     };
 
     let chzzk_config = ChzzkConfig::default();
-    let client = ChzzkClient::new(&chzzk_config).with_base_url(format!("http://127.0.0.1:{port}"));
+    let client =
+        Arc::new(ChzzkClient::new(&chzzk_config).with_base_url(format!("http://127.0.0.1:{port}")));
     let orchestrator = EngineOrchestrator::new(settings, client, None, event_tx);
 
     orchestrator.poll_channels_once(&upload_tx).await;

@@ -1,6 +1,6 @@
 use crate::app_path::resolve_path;
-use crate::chzzk::client::ChzzkClient;
 use crate::chzzk::models::LiveStreamInfo;
+use crate::chzzk::source::LiveStreamSource;
 use crate::config::Settings;
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{UploadBackend, UploadTask, UploadWorker};
@@ -34,7 +34,7 @@ pub use session::{ActiveSessionState, FinishedSession};
 
 pub struct EngineOrchestrator {
     settings: Settings,
-    chzzk: ChzzkClient,
+    chzzk: Arc<dyn LiveStreamSource>,
     backend: Option<Arc<dyn UploadBackend>>,
     event_tx: Sender<AppEvent>,
     registry: ChannelLifecycleRegistry,
@@ -48,7 +48,7 @@ pub struct EngineOrchestrator {
 impl EngineOrchestrator {
     pub fn new(
         settings: Settings,
-        chzzk: ChzzkClient,
+        chzzk: Arc<dyn LiveStreamSource>,
         backend: Option<Arc<dyn UploadBackend>>,
         event_tx: Sender<AppEvent>,
     ) -> Self {
@@ -57,7 +57,7 @@ impl EngineOrchestrator {
 
     pub fn with_cancel_token(
         settings: Settings,
-        chzzk: ChzzkClient,
+        chzzk: Arc<dyn LiveStreamSource>,
         backend: Option<Arc<dyn UploadBackend>>,
         event_tx: Sender<AppEvent>,
         cancel_token: CancellationToken,

@@ -84,7 +84,9 @@ async fn test_graceful_shutdown_cleans_session_folder_with_metadata_and_last_chu
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let remote_dir =
         std::env::temp_dir().join(format!("test_shutdown_remote_{}", rand::random::<u32>()));
     fs::create_dir_all(&remote_dir).unwrap();
@@ -337,7 +339,9 @@ async fn test_real_ffmpeg_shutdown_cleanup() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let rclone_config = chzzk_load::config::RcloneConfig {
         remote_path: remote_dir.to_string_lossy().replace('\\', "/"),
         upload_concurrency: 1,
@@ -495,7 +499,7 @@ async fn test_live_chzzk_shutdown_cleanup() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
     let rclone_config = chzzk_load::config::RcloneConfig {
         remote_path: "gdrive:chzzk".to_string(),
         upload_concurrency: 3,

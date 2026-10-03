@@ -281,9 +281,14 @@ async fn test_per_channel_call_counting_and_reset() {
 #[tokio::test]
 async fn test_chat_ws_url_configuration() {
     let mock = MockLiveStreamSource::new().with_chat_ws_url("wss://mock.chat.naver.com/chat");
+    assert_eq!(mock.chat_ws_url_call_count(), 0);
 
-    let source: Arc<dyn LiveStreamSource> = Arc::new(mock);
+    let source: Arc<dyn LiveStreamSource> = Arc::new(mock.clone());
     assert_eq!(source.chat_ws_url(), Some("wss://mock.chat.naver.com/chat"));
+    assert_eq!(mock.chat_ws_url_call_count(), 1);
+
+    mock.reset_call_counts();
+    assert_eq!(mock.chat_ws_url_call_count(), 0);
 }
 
 #[tokio::test]
@@ -311,4 +316,33 @@ async fn test_chzzk_client_implements_live_stream_source_directly() {
 
     let token_result = source.get_chat_access_token("test_chat_id").await;
     assert!(token_result.is_err());
+}
+
+#[tokio::test]
+async fn test_cookie_header_configuration() {
+    use chzzk_load::chzzk::client::ChzzkClient;
+    use chzzk_load::config::ChzzkConfig;
+
+    let mock_default = MockLiveStreamSource::new();
+    let source_default: Arc<dyn LiveStreamSource> = Arc::new(mock_default);
+    assert_eq!(source_default.cookie_header(), None);
+
+    let mock_with_cookie =
+        MockLiveStreamSource::new().with_cookie_header("NID_AUT=test; NID_SES=test");
+    let source_with_cookie: Arc<dyn LiveStreamSource> = Arc::new(mock_with_cookie);
+    assert_eq!(
+        source_with_cookie.cookie_header(),
+        Some("NID_AUT=test; NID_SES=test")
+    );
+
+    let config = ChzzkConfig {
+        nid_aut: "test_aut".to_string(),
+        nid_ses: "test_ses".to_string(),
+    };
+    let client = ChzzkClient::new(&config);
+    let client_source: Arc<dyn LiveStreamSource> = Arc::new(client);
+    assert_eq!(
+        client_source.cookie_header(),
+        Some("NID_AUT=test_aut; NID_SES=test_ses")
+    );
 }

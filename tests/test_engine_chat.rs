@@ -10,8 +10,9 @@ use tokio_util::sync::CancellationToken;
 
 use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::chzzk::models::LiveStreamInfo;
-use chzzk_load::config::{ChannelConfig, Settings};
-use chzzk_load::engine::EngineOrchestrator;
+use chzzk_load::chzzk::source::MockLiveStreamSource;
+use chzzk_load::config::{ChannelConfig, GeneralConfig, Settings};
+use chzzk_load::engine::{ChannelLifecycleRegistry, EngineOrchestrator, RecordingSession};
 use chzzk_load::tui::event::AppEvent;
 use chzzk_load::uploader::{MockUploadBackend, UploadTask};
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
@@ -94,9 +95,11 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     settings.general.chat_flush_interval_seconds = 1;
     settings.channels = vec![ChannelConfig::with_alias("chan_chat_test", "ChatStreamer")];
 
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_game_base_url(format!("http://127.0.0.1:{port}"))
-        .with_chat_ws_url(ws_url);
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk)
+            .with_game_base_url(format!("http://127.0.0.1:{port}"))
+            .with_chat_ws_url(ws_url),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -221,8 +224,9 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
     settings.general.record_chat = false; // Chat disabled!
     settings.channels = vec![ChannelConfig::with_alias("chan_no_chat", "NoChatStreamer")];
 
-    let chzzk =
-        ChzzkClient::new(&settings.chzzk).with_game_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_game_base_url(format!("http://127.0.0.1:{port}")),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -308,9 +312,11 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = true;
 
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_game_base_url(format!("http://127.0.0.1:{port}"))
-        .with_chat_ws_url(ws_url);
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk)
+            .with_game_base_url(format!("http://127.0.0.1:{port}"))
+            .with_chat_ws_url(ws_url),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -432,9 +438,11 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = true;
 
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_game_base_url(format!("http://127.0.0.1:{chzzk_port}"))
-        .with_chat_ws_url(ws_url);
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk)
+            .with_game_base_url(format!("http://127.0.0.1:{chzzk_port}"))
+            .with_chat_ws_url(ws_url),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -655,9 +663,11 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     settings.general.chat_flush_interval_seconds = 1;
     settings.channels = vec![ChannelConfig::with_alias("chan_chat_inc", "IncStreamer")];
 
-    let chzzk = ChzzkClient::new(&settings.chzzk)
-        .with_game_base_url(format!("http://127.0.0.1:{port}"))
-        .with_chat_ws_url(ws_url);
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk)
+            .with_game_base_url(format!("http://127.0.0.1:{port}"))
+            .with_chat_ws_url(ws_url),
+    );
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -738,5 +748,92 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
 
     consumer_handle.abort();
     let _ = ws_handle.await;
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_recording_session_resolves_chat_token_and_ws_url_from_source() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_chat_token_{}", rand::random::<u32>()));
+    let _ = fs::create_dir_all(&temp_dir);
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            record_chat: true,
+            chunk_duration_seconds: 60,
+            chat_flush_interval_seconds: 5,
+            stream_cooldown_seconds: 1,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_chat".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let mock = Arc::new(
+        MockLiveStreamSource::new()
+            .with_chat_token("chat_chan_chat", "mock_secret_token_xyz")
+            .with_chat_ws_url("wss://custom-ws.example.com"),
+    );
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(100);
+    let registry = ChannelLifecycleRegistry::new();
+    let cancel_token = CancellationToken::new();
+
+    let info = LiveStreamInfo {
+        channel_id: "chan_chat".to_string(),
+        live_id: Some(77777),
+        streamer_name: "ChatStreamer".to_string(),
+        title: "Chat Test Stream".to_string(),
+        hls_url: "https://mock.stream/live.m3u8".to_string(),
+        chat_channel_id: Some("chat_chan_chat".to_string()),
+        metadata: Default::default(),
+    };
+
+    let session_handle = RecordingSession::spawn(
+        "chan_chat".to_string(),
+        info,
+        upload_tx,
+        settings,
+        None,
+        mock.clone(),
+        event_tx,
+        registry,
+        cancel_token.clone(),
+        Some(get_mock_ffmpeg_bin().to_string_lossy().to_string()),
+    );
+
+    // Wait for chat token resolution log event
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_token_log = false;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(AppEvent::Log(entry))) =
+            tokio::time::timeout(Duration::from_millis(50), event_rx.recv()).await
+        {
+            if entry
+                .message
+                .contains("Retrieved chat access token for channel chan_chat")
+            {
+                saw_token_log = true;
+                break;
+            }
+        }
+    }
+
+    cancel_token.cancel();
+    let _ = session_handle.await;
+
+    assert!(saw_token_log, "Must log chat token retrieval");
+    assert_eq!(mock.chat_token_call_count("chat_chan_chat"), 1);
+    assert_eq!(
+        mock.chat_ws_url_call_count(),
+        1,
+        "Recording session must query chat_ws_url from the intake source"
+    );
+
     let _ = fs::remove_dir_all(&temp_dir);
 }

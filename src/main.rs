@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use chzzk_load::app_path::resolve_path;
 use chzzk_load::chzzk::client::ChzzkClient;
+use chzzk_load::chzzk::source::LiveStreamSource;
 use chzzk_load::cli::Cli;
 use chzzk_load::config::Settings;
 use chzzk_load::engine::EngineOrchestrator;
@@ -137,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let chzzk: Arc<dyn LiveStreamSource> = Arc::new(ChzzkClient::new(&settings.chzzk));
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings.clone(),
         chzzk,

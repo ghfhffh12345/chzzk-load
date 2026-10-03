@@ -4,6 +4,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use chzzk_load::chzzk::client::ChzzkClient;
+use chzzk_load::chzzk::models::{LiveDetail, LiveStreamInfo};
+use chzzk_load::chzzk::source::MockLiveStreamSource;
 use chzzk_load::config::{ChannelConfig, ChzzkConfig, GeneralConfig, Settings};
 use chzzk_load::engine::{ChannelLifecycleState, EngineOrchestrator};
 use chzzk_load::tui::event::AppEvent;
@@ -18,7 +20,7 @@ async fn test_orchestrator_typed_query_seam_idle() {
         }],
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&ChzzkConfig::default());
+    let chzzk = Arc::new(ChzzkClient::new(&ChzzkConfig::default()));
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
@@ -105,7 +107,9 @@ async fn test_orchestrator_poll_delegates_to_evaluate_poll_and_starts_recording(
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
@@ -246,7 +250,9 @@ async fn test_orchestrator_poll_metadata_change_updates_registry_and_persists() 
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
@@ -381,7 +387,9 @@ async fn test_orchestrator_handles_api_restricted_stream_via_registry() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
@@ -485,7 +493,9 @@ async fn test_orchestrator_handles_ffmpeg_403_forbidden_via_registry() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
@@ -591,7 +601,9 @@ async fn test_orchestrator_graceful_shutdown_drains_registry_sessions() {
         ..Default::default()
     };
 
-    let chzzk = ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}"));
+    let chzzk = Arc::new(
+        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    );
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
 
     let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
@@ -662,7 +674,7 @@ async fn test_orchestrator_cleanup_empty_session_dirs_bounded() {
 #[tokio::test]
 async fn test_orchestrator_abort_all_terminates_registered_sessions_and_cancels_tokens() {
     let settings = Settings::default();
-    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
     let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
 
@@ -695,7 +707,7 @@ async fn test_orchestrator_grace_period_timeout_escalation() {
         },
         ..Default::default()
     };
-    let chzzk = ChzzkClient::new(&settings.chzzk);
+    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
     let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
 
@@ -737,6 +749,442 @@ async fn test_orchestrator_grace_period_timeout_escalation() {
     .expect("bounded cleanup must succeed");
     assert_eq!(cleaned, 1);
     assert!(!empty_dir.exists());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_polling_offline_with_fake_source() {
+    let settings = Settings {
+        channels: vec![ChannelConfig {
+            id: "chan_offline".to_string(),
+            alias: Some("OfflineStreamer".to_string()),
+        }],
+        ..Default::default()
+    };
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state(
+        "chan_offline",
+        LiveDetail::Close {
+            streamer_name: Some("OfflineStreamer".to_string()),
+        },
+    ));
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(100);
+
+    let orchestrator = EngineOrchestrator::new(settings, mock.clone(), None, event_tx);
+
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    assert!(!orchestrator.is_recording("chan_offline"));
+    assert!(!orchestrator.is_restricted("chan_offline"));
+    assert!(matches!(
+        orchestrator.channel_state("chan_offline"),
+        ChannelLifecycleState::Idle
+    ));
+    assert_eq!(mock.call_count("chan_offline"), 1);
+}
+
+#[tokio::test]
+async fn test_orchestrator_polling_live_starts_recording_with_fake_source() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_fake_live_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_live".to_string(),
+            alias: Some("StreamerAlias".to_string()),
+        }],
+        ..Default::default()
+    };
+
+    let live_detail = LiveDetail::Open(LiveStreamInfo {
+        channel_id: "chan_live".to_string(),
+        live_id: Some(12345),
+        streamer_name: "LiveStreamer".to_string(),
+        title: "Rust Intake Stream".to_string(),
+        hls_url: "https://mock.stream/live.m3u8".to_string(),
+        chat_channel_id: Some("chat_live".to_string()),
+        metadata: chzzk_load::chzzk::models_metadata::StreamMetadataState {
+            live_title: "Rust Intake Stream".to_string(),
+            live_id: Some(12345),
+            ..Default::default()
+        },
+    });
+
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state("chan_live", live_detail));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(100);
+
+    let orchestrator = EngineOrchestrator::new(settings, mock.clone(), None, event_tx)
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy());
+
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    assert!(orchestrator.is_recording("chan_live"));
+    assert_eq!(orchestrator.active_recording_ids(), vec!["chan_live"]);
+    assert!(matches!(
+        orchestrator.channel_state("chan_live"),
+        ChannelLifecycleState::Recording { .. }
+    ));
+    let session = orchestrator
+        .active_session("chan_live")
+        .expect("active session must exist");
+    assert_eq!(session.streamer_name, "LiveStreamer");
+    assert_eq!(session.alias, Some("StreamerAlias".to_string()));
+    assert_eq!(session.current_metadata.live_title, "Rust Intake Stream");
+    assert_eq!(mock.call_count("chan_live"), 1);
+
+    // Verify ChannelUpdate event emitted
+    let mut saw_channel_update = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if let AppEvent::ChannelUpdate {
+            channel_id,
+            is_live,
+            title,
+            ..
+        } = event
+        {
+            if channel_id == "chan_live" && is_live && title == "Rust Intake Stream" {
+                saw_channel_update = true;
+            }
+        }
+    }
+    assert!(saw_channel_update);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_polling_restricted_stream_with_fake_source() {
+    let settings = Settings {
+        channels: vec![ChannelConfig {
+            id: "chan_restricted".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let restricted_detail = LiveDetail::Restricted {
+        channel_id: "chan_restricted".to_string(),
+        live_id: Some(99999),
+        streamer_name: "AdultStreamer".to_string(),
+        title: "19+ Broadcast".to_string(),
+        chat_channel_id: None,
+        adult: true,
+    };
+
+    let mock = Arc::new(
+        MockLiveStreamSource::new().with_channel_state("chan_restricted", restricted_detail),
+    );
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(100);
+
+    let orchestrator = EngineOrchestrator::new(settings, mock.clone(), None, event_tx);
+
+    // Poll 1: Restricted
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(orchestrator.is_restricted("chan_restricted"));
+    assert!(!orchestrator.is_recording("chan_restricted"));
+    assert!(matches!(
+        orchestrator.channel_state("chan_restricted"),
+        ChannelLifecycleState::Restricted {
+            reason: chzzk_load::engine::RestrictionReason::AgeRestricted,
+            ..
+        }
+    ));
+    assert_eq!(mock.call_count("chan_restricted"), 1);
+
+    // Verify warning log emitted
+    let mut saw_log = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = event {
+            if entry.message.contains("19+ age-restricted") {
+                saw_log = true;
+            }
+        }
+    }
+    assert!(saw_log);
+
+    // Poll 2: Stream goes offline (Close) -> transitions back to Idle
+    mock.set_channel_state(
+        "chan_restricted",
+        LiveDetail::Close {
+            streamer_name: Some("AdultStreamer".to_string()),
+        },
+    );
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(!orchestrator.is_restricted("chan_restricted"));
+    assert!(!orchestrator.is_recording("chan_restricted"));
+    assert!(matches!(
+        orchestrator.channel_state("chan_restricted"),
+        ChannelLifecycleState::Idle
+    ));
+    assert_eq!(mock.call_count("chan_restricted"), 2);
+}
+
+#[tokio::test]
+async fn test_orchestrator_polling_error_handling_with_fake_source() {
+    let settings = Settings {
+        channels: vec![ChannelConfig {
+            id: "chan_err".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let mock = Arc::new(MockLiveStreamSource::new());
+    mock.inject_channel_error("chan_err", "500 Internal Server Error: Gateway Timeout");
+
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(100);
+
+    let orchestrator = EngineOrchestrator::new(settings, mock.clone(), None, event_tx);
+
+    // Poll 1: Errored query must not crash orchestrator and must retain Idle state
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(!orchestrator.is_recording("chan_err"));
+    assert!(!orchestrator.is_restricted("chan_err"));
+    assert!(matches!(
+        orchestrator.channel_state("chan_err"),
+        ChannelLifecycleState::Idle
+    ));
+    assert_eq!(mock.call_count("chan_err"), 1);
+
+    // Verify warning log for polling failure
+    let mut saw_warn = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = event {
+            if entry.message.contains("Polling failed for chan_err") {
+                saw_warn = true;
+            }
+        }
+    }
+    assert!(saw_warn, "Must log warning when polling fails");
+
+    // Clear error and verify recovery
+    mock.clear_channel_error("chan_err");
+    mock.set_channel_state(
+        "chan_err",
+        LiveDetail::Close {
+            streamer_name: Some("RecoveredStreamer".to_string()),
+        },
+    );
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert_eq!(mock.call_count("chan_err"), 2);
+}
+
+#[tokio::test]
+async fn test_orchestrator_polling_sequential_transitions_with_fake_source() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_fake_seq_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_seq".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let mock = Arc::new(MockLiveStreamSource::new());
+    mock.enqueue_channel_states(
+        "chan_seq",
+        vec![
+            LiveDetail::Close {
+                streamer_name: Some("SeqStreamer".to_string()),
+            },
+            LiveDetail::Open(LiveStreamInfo {
+                channel_id: "chan_seq".to_string(),
+                live_id: Some(11111),
+                streamer_name: "SeqStreamer".to_string(),
+                title: "Sequential Stream 1".to_string(),
+                hls_url: "https://mock.stream/live.m3u8".to_string(),
+                chat_channel_id: None,
+                metadata: chzzk_load::chzzk::models_metadata::StreamMetadataState {
+                    live_title: "Sequential Stream 1".to_string(),
+                    live_id: Some(11111),
+                    ..Default::default()
+                },
+            }),
+            LiveDetail::Open(LiveStreamInfo {
+                channel_id: "chan_seq".to_string(),
+                live_id: Some(11111),
+                streamer_name: "SeqStreamer".to_string(),
+                title: "Sequential Stream 1 Updated".to_string(),
+                hls_url: "https://mock.stream/live.m3u8".to_string(),
+                chat_channel_id: None,
+                metadata: chzzk_load::chzzk::models_metadata::StreamMetadataState {
+                    live_title: "Sequential Stream 1 Updated".to_string(),
+                    live_id: Some(11111),
+                    ..Default::default()
+                },
+            }),
+            LiveDetail::Restricted {
+                channel_id: "chan_seq".to_string(),
+                live_id: Some(11111),
+                streamer_name: "SeqStreamer".to_string(),
+                title: "Restricted Stream".to_string(),
+                chat_channel_id: None,
+                adult: true,
+            },
+            LiveDetail::Close {
+                streamer_name: Some("SeqStreamer".to_string()),
+            },
+        ],
+    );
+
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(100);
+
+    let orchestrator = EngineOrchestrator::new(settings, mock.clone(), None, event_tx)
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy());
+
+    // Poll 1: Close -> Idle
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(!orchestrator.is_recording("chan_seq"));
+    assert_eq!(mock.call_count("chan_seq"), 1);
+
+    // Poll 2: Open -> Recording
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(orchestrator.is_recording("chan_seq"));
+    assert_eq!(
+        orchestrator
+            .active_session("chan_seq")
+            .unwrap()
+            .current_metadata
+            .live_title,
+        "Sequential Stream 1"
+    );
+    assert_eq!(mock.call_count("chan_seq"), 2);
+
+    // Poll 3: Metadata update -> Still Recording, title updated
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(orchestrator.is_recording("chan_seq"));
+    assert_eq!(
+        orchestrator
+            .active_session("chan_seq")
+            .unwrap()
+            .current_metadata
+            .live_title,
+        "Sequential Stream 1 Updated"
+    );
+    assert_eq!(mock.call_count("chan_seq"), 3);
+
+    // Poll 4: Restricted -> Transitions to Restricted
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(orchestrator.is_restricted("chan_seq"));
+    assert!(!orchestrator.is_recording("chan_seq"));
+    assert_eq!(mock.call_count("chan_seq"), 4);
+
+    // Poll 5: Close -> Transitions to Idle
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(!orchestrator.is_restricted("chan_seq"));
+    assert!(!orchestrator.is_recording("chan_seq"));
+    assert!(matches!(
+        orchestrator.channel_state("chan_seq"),
+        ChannelLifecycleState::Idle
+    ));
+    assert_eq!(mock.call_count("chan_seq"), 5);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_polling_cooldown_evaluation_with_fake_source() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_cooldown_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            record_chat: false,
+            poll_interval_seconds: 1,
+            stream_cooldown_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_cd".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let fake_stream = LiveDetail::Open(LiveStreamInfo {
+        channel_id: "chan_cd".to_string(),
+        live_id: Some(44444),
+        streamer_name: "CooldownStreamer".to_string(),
+        title: "Cooldown Stream".to_string(),
+        hls_url: "https://mock.stream/live.m3u8".to_string(),
+        chat_channel_id: None,
+        metadata: Default::default(),
+    });
+
+    let mock = Arc::new(MockLiveStreamSource::new().with_channel_state("chan_cd", fake_stream));
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(100);
+
+    let orchestrator = EngineOrchestrator::new(settings, mock.clone(), None, event_tx)
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy());
+
+    // Mark channel as finished / in cooldown for live_id 44444
+    orchestrator
+        .register_finished_session("chan_cd", Some(44444))
+        .await;
+    assert!(matches!(
+        orchestrator.channel_state("chan_cd"),
+        ChannelLifecycleState::Cooldown {
+            live_id: Some(44444),
+            ..
+        }
+    ));
+
+    // Poll 1: While within cooldown window and live_id is unchanged, poll evaluation remains in Cooldown
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(!orchestrator.is_recording("chan_cd"));
+    assert!(matches!(
+        orchestrator.channel_state("chan_cd"),
+        ChannelLifecycleState::Cooldown { .. }
+    ));
+    assert_eq!(mock.call_count("chan_cd"), 1);
+
+    // Verify InCooldown AppEvent::Log was emitted
+    let mut saw_cooldown_log = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = event {
+            if entry.message.contains("Waiting for API cache to close") {
+                saw_cooldown_log = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_cooldown_log, "Must log cooldown waiting message");
+
+    // Enqueue a new stream with a DIFFERENT live_id -> Cooldown should be bypassed and start recording immediately
+    let new_stream = LiveDetail::Open(LiveStreamInfo {
+        channel_id: "chan_cd".to_string(),
+        live_id: Some(55555),
+        streamer_name: "CooldownStreamer".to_string(),
+        title: "New Stream".to_string(),
+        hls_url: "https://mock.stream/live.m3u8".to_string(),
+        chat_channel_id: None,
+        metadata: Default::default(),
+    });
+    mock.set_channel_state("chan_cd", new_stream);
+
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(orchestrator.is_recording("chan_cd"));
+    assert_eq!(mock.call_count("chan_cd"), 2);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

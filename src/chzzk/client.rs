@@ -536,4 +536,8 @@ impl LiveStreamSource for ChzzkClient {
     fn chat_ws_url(&self) -> Option<&str> {
         self.chat_ws_url()
     }
+
+    fn cookie_header(&self) -> Option<&str> {
+        self.cookie_header()
+    }
 }

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::chzzk::models::LiveDetail;
@@ -28,6 +29,11 @@ pub trait LiveStreamSource: Send + Sync {
     fn chat_ws_url(&self) -> Option<&str> {
         None
     }
+
+    /// Returns an optional cookie header value for live stream playback if configured.
+    fn cookie_header(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Default)]
@@ -49,6 +55,8 @@ struct MockState {
 pub struct MockLiveStreamSource {
     state: Arc<Mutex<MockState>>,
     chat_ws_url: Option<String>,
+    cookie_header: Option<String>,
+    chat_ws_url_call_count: Arc<AtomicUsize>,
 }
 
 impl MockLiveStreamSource {
@@ -58,6 +66,11 @@ impl MockLiveStreamSource {
 
     pub fn with_chat_ws_url(mut self, url: impl Into<String>) -> Self {
         self.chat_ws_url = Some(url.into());
+        self
+    }
+
+    pub fn with_cookie_header(mut self, cookie: impl Into<String>) -> Self {
+        self.cookie_header = Some(cookie.into());
         self
     }
 
@@ -206,11 +219,17 @@ impl MockLiveStreamSource {
         state.chat_token_call_counts.values().sum()
     }
 
-    /// Resets all channel detail and chat token invocation counters to zero.
+    /// Returns the number of times `chat_ws_url` was requested.
+    pub fn chat_ws_url_call_count(&self) -> usize {
+        self.chat_ws_url_call_count.load(Ordering::SeqCst)
+    }
+
+    /// Resets all channel detail, chat token, and WebSocket URL invocation counters to zero.
     pub fn reset_call_counts(&self) {
         let mut state = self.state.lock().unwrap();
         state.channel_call_counts.clear();
         state.chat_token_call_counts.clear();
+        self.chat_ws_url_call_count.store(0, Ordering::SeqCst);
     }
 }
 
@@ -288,6 +307,11 @@ impl LiveStreamSource for MockLiveStreamSource {
     }
 
     fn chat_ws_url(&self) -> Option<&str> {
+        self.chat_ws_url_call_count.fetch_add(1, Ordering::SeqCst);
         self.chat_ws_url.as_deref()
+    }
+
+    fn cookie_header(&self) -> Option<&str> {
+        self.cookie_header.as_deref()
     }
 }

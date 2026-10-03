@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app_path::resolve_path;
 use crate::chzzk::chat::ChzzkChatClient;
-use crate::chzzk::client::ChzzkClient;
 use crate::chzzk::models::LiveStreamInfo;
+use crate::chzzk::source::LiveStreamSource;
 use crate::config::Settings;
 use crate::engine::dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
 use crate::engine::registry::{ChannelLifecycleRegistry, RestrictionReason};
@@ -29,7 +29,7 @@ impl RecordingSession {
         upload_tx: Sender<UploadTask>,
         settings: Settings,
         backend_opt: Option<Arc<dyn UploadBackend>>,
-        chzzk: ChzzkClient,
+        chzzk: Arc<dyn LiveStreamSource>,
         event_tx: Sender<AppEvent>,
         registry: ChannelLifecycleRegistry,
         cancel_token: CancellationToken,
