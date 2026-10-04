@@ -21,6 +21,9 @@ cargo test --test test_engine_events <filter>       # Heavy async integration te
 cargo test                                          # Full test suite (final verification gate)
 node scripts/test-npm-packages.js                   # Node packaging and CLI launcher suite
 
+# Git commit (triggers .githooks/pre-commit: fmt, check, clippy, fast unit tests; calibrate WaitMsBeforeAsync: 20000)
+git commit -m "feat/fix: ..."
+
 # Build release binary
 cargo build --release
 ```
@@ -79,9 +82,10 @@ cargo build --release
 - **State Machine Invariant Coverage**: Every channel state transition guard, restriction condition, and cancellation behavior in `ChannelLifecycleRegistry` must have a dedicated zero-overhead unit test in `tests/test_channel_lifecycle_registry.rs`. Never rely exclusively on integration suites to catch lifecycle state regressions.
 - **Ephemeral Port & Directory Isolation**: Tests must never bind hardcoded network ports (use `127.0.0.1:0`) and must isolate all filesystem activity inside `std::env::temp_dir()`. Clean up directories upon test completion.
 - **Cross-Platform Shell Compatibility**: Write command snippets using semicolon statement separators `;` or separate lines rather than Bash-only `&&` operators to ensure compatibility with Windows PowerShell and POSIX shells.
+- **Pre-Commit Hook Calibration**: The repository enforces pre-commit hooks via git `core.hooksPath = .githooks` (`cargo fmt`, `cargo check`, `cargo clippy`, and the 6 fast unit test suites). When running `git commit` via `run_command`, calibrate with `WaitMsBeforeAsync: 20000` so the hook finishes synchronously without unexpected async backgrounding. Slower suites (`test_shutdown_cleanup`, `test_engine_events`) run only during `cargo test` as the full verification gate.
 
 ### 2.8. Tool Economy & Async Execution
-- **Reactive Background Execution**: Yield immediately upon launching async commands. The execution environment awakens the turn automatically upon task exit.
+- **Reactive Yielding**: Stop calling tools and yield the turn immediately after launching background commands (`run_command`) or subagents (`invoke_subagent`) when no local work remains. Rely exclusively on reactive environment wakeup messages on task exit or subagent reply; never poll or loop over `manage_task(Action='status')` or `manage_subagents(Action='list')`.
 - **Native Tools over Shell Utilities**: Prioritize native agent tools (e.g., `view_file`) for file inspection. Use `git grep -n <query>` via `run_command` for repository-wide audits when searching for symbols or strings across multiple files. Avoid ad-hoc shell navigation commands (`cat`, `ls`).
 - **Scratch Space for Prototyping**: Do not run brittle, multi-line PowerShell scripts inside a single `run_command` string. Instead, create temporary scripts inside the artifact scratch space (`<appDataDir>\brain\<conversation-id>/scratch/`) using `write_to_file`, then execute them.
 - **Conditional Instructions**: Always read conditional documents (like `GLOSSARY.md` or ADRs) when a skill explicitly instructs you to check them.

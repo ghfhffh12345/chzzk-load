@@ -5,4 +5,4 @@ set -e
 cargo fmt --check
 RUSTFLAGS="-D warnings" cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
-cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state --test test_shutdown_cleanup
+cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state
