@@ -4,3 +4,4 @@ recordings/
 npm/platforms/
 settings.toml
 .agents/
+!.agents/skills/rust-pro/
