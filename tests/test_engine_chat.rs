@@ -2,13 +2,10 @@ mod common;
 
 use std::fs;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tiny_http::{Header, Response, Server};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::chzzk::models::LiveStreamInfo;
 use chzzk_load::chzzk::source::MockLiveStreamSource;
 use chzzk_load::config::{ChannelConfig, GeneralConfig, Settings};
@@ -57,37 +54,9 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         std::env::temp_dir().join(format!("test_eng_chat_cancel_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
     let mock_bin = get_mock_ffmpeg_bin();
     let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
-
-    let token_requested = Arc::new(AtomicBool::new(false));
-    let token_req_clone = token_requested.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            if request.url().contains("/v1/chats/access-token") {
-                token_req_clone.store(true, Ordering::SeqCst);
-                let mock_body = serde_json::json!({
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "accessToken": "mock_access_token_123"
-                    }
-                });
-                let response = Response::from_string(mock_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(response);
-            } else {
-                let response = Response::empty(404);
-                let _ = request.respond(response);
-            }
-        }
-    });
 
     let mut settings = Settings::default();
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
@@ -96,8 +65,8 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     settings.channels = vec![ChannelConfig::with_alias("chan_chat_test", "ChatStreamer")];
 
     let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk)
-            .with_game_base_url(format!("http://127.0.0.1:{port}"))
+        MockLiveStreamSource::new()
+            .with_chat_token("chat_ch_123", "mock_access_token_123")
             .with_chat_ws_url(ws_url),
     );
 
@@ -106,7 +75,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
 
     let orchestrator = EngineOrchestrator::with_cancel_token(
         settings,
-        chzzk,
+        chzzk.clone(),
         None,
         event_tx,
         cancel_token.clone(),
@@ -127,10 +96,10 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     orchestrator.spawn_recording_session("chan_chat_test".to_string(), info, upload_tx);
 
     let cancel_clone = cancel_token.clone();
-    let token_req_for_cancel = token_requested.clone();
+    let chzzk_for_cancel = chzzk.clone();
     tokio::spawn(async move {
         for _ in 0..100 {
-            if token_req_for_cancel.load(Ordering::SeqCst) {
+            if chzzk_for_cancel.chat_token_call_count("chat_ch_123") > 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -176,7 +145,7 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
         Some(&recorder),
     );
     assert_with_logs(
-        token_requested.load(Ordering::SeqCst),
+        chzzk.chat_token_call_count("chat_ch_123") > 0,
         "Expected chat access token to be requested",
         &mut event_rx,
         Some(&recorder),
@@ -191,49 +160,22 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
         std::env::temp_dir().join(format!("test_eng_chat_disabled_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
     let mock_bin = get_mock_ffmpeg_bin();
     let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
-
-    let token_requested = Arc::new(AtomicBool::new(false));
-    let token_req_clone = token_requested.clone();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            if request.url().contains("/v1/chats/access-token") {
-                token_req_clone.store(true, Ordering::SeqCst);
-                let mock_body = serde_json::json!({
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "accessToken": "mock_access_token_123"
-                    }
-                });
-                let response = Response::from_string(mock_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(response);
-            }
-        }
-    });
 
     let mut settings = Settings::default();
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = false; // Chat disabled!
     settings.channels = vec![ChannelConfig::with_alias("chan_no_chat", "NoChatStreamer")];
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_game_base_url(format!("http://127.0.0.1:{port}")),
-    );
+    let chzzk = Arc::new(MockLiveStreamSource::new());
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
 
     let orchestrator = EngineOrchestrator::with_cancel_token(
         settings,
-        chzzk,
+        chzzk.clone(),
         None,
         event_tx,
         cancel_token.clone(),
@@ -268,7 +210,7 @@ async fn test_engine_orchestrator_chat_disabled_does_not_request_token() {
     }
 
     assert_with_logs(
-        !token_requested.load(Ordering::SeqCst),
+        chzzk.chat_token_call_count("chat_ch_999") == 0,
         "Chat token must NOT be requested when record_chat is false",
         &mut event_rx,
         Some(&recorder),
@@ -283,38 +225,17 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
         std::env::temp_dir().join(format!("test_eng_chat_nobackend_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
     let mock_bin = get_mock_ffmpeg_bin();
     let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            if request.url().contains("/v1/chats/access-token") {
-                let mock_body = serde_json::json!({
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "accessToken": "mock_access_token_123"
-                    }
-                });
-                let response = Response::from_string(mock_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(response);
-            }
-        }
-    });
 
     let mut settings = Settings::default();
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = true;
 
     let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk)
-            .with_game_base_url(format!("http://127.0.0.1:{port}"))
+        MockLiveStreamSource::new()
+            .with_chat_token("chat_ch_local", "mock_access_token_123")
             .with_chat_ws_url(ws_url),
     );
 
@@ -407,30 +328,9 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         std::env::temp_dir().join(format!("test_eng_chat_backend_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let chzzk_server = Server::http("127.0.0.1:0").unwrap();
-    let chzzk_port = chzzk_server.server_addr().to_ip().unwrap().port();
-
     let (ws_url, _ws_handle) = spawn_mock_chat_ws_server().await;
     let mock_bin = get_mock_ffmpeg_bin();
     let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
-
-    std::thread::spawn(move || {
-        while let Ok(request) = chzzk_server.recv() {
-            if request.url().contains("/v1/chats/access-token") {
-                let mock_body = serde_json::json!({
-                    "code": 200,
-                    "message": null,
-                    "content": {
-                        "accessToken": "mock_access_token_123"
-                    }
-                });
-                let response = Response::from_string(mock_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(response);
-            }
-        }
-    });
 
     let mock_backend = Arc::new(MockUploadBackend::default());
 
@@ -439,8 +339,8 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     settings.general.record_chat = true;
 
     let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk)
-            .with_game_base_url(format!("http://127.0.0.1:{chzzk_port}"))
+        MockLiveStreamSource::new()
+            .with_chat_token("chat_ch_backend", "mock_access_token_123")
             .with_chat_ws_url(ws_url),
     );
 
@@ -588,9 +488,6 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         std::env::temp_dir().join(format!("test_eng_chat_inc_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let server = Server::http("127.0.0.1:0").unwrap();
-    let port = server.server_addr().to_ip().unwrap().port();
-
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let ws_url = format!("ws://{addr}");
@@ -634,24 +531,6 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
         }
     });
 
-    std::thread::spawn(move || {
-        while let Ok(request) = server.recv() {
-            if request.url().contains("/v1/chats/access-token") {
-                let mock_body = serde_json::json!({
-                    "code": 200,
-                    "message": null,
-                    "content": { "accessToken": "token_inc_test" }
-                });
-                let response = Response::from_string(mock_body.to_string()).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(response);
-            } else {
-                let _ = request.respond(Response::empty(404));
-            }
-        }
-    });
-
     let mock_bin = get_mock_ffmpeg_bin();
     let hls_url = "http://127.0.0.1:0/dummy.m3u8".to_string();
 
@@ -664,8 +543,8 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     settings.channels = vec![ChannelConfig::with_alias("chan_chat_inc", "IncStreamer")];
 
     let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk)
-            .with_game_base_url(format!("http://127.0.0.1:{port}"))
+        MockLiveStreamSource::new()
+            .with_chat_token("chat_ch_inc", "token_inc_test")
             .with_chat_ws_url(ws_url),
     );
 

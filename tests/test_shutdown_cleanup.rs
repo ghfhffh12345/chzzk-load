@@ -6,7 +6,6 @@ use tiny_http::{Header, Response, Server};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::chzzk::source::MockLiveStreamSource;
 use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::engine::EngineOrchestrator;
@@ -281,24 +280,7 @@ async fn test_real_ffmpeg_shutdown_cleanup() {
                 );
                 let _ = request.respond(response);
             } else {
-                let mock_body = format!(
-                    r#"{{
-                    "code": 200,
-                    "message": null,
-                    "content": {{
-                        "liveId": 99999,
-                        "status": "OPEN",
-                        "liveTitle": "Real FFmpeg Cleanup Stream",
-                        "channel": {{ "channelId": "chan_real_clean", "channelName": "StreamerReal" }},
-                        "livePlaybackJson": "{{\"media\":[{{\"mediaId\":\"HLS\",\"path\":\"http://127.0.0.1:{port}/stream.m3u8\",\"encodingTrack\":[]}}]}}",
-                        "adult": false
-                    }}
-                }}"#
-                );
-                let response = Response::from_string(mock_body).with_header(
-                    Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
-                );
-                let _ = request.respond(response);
+                let _ = request.respond(Response::empty(404));
             }
         }
     });
@@ -323,9 +305,15 @@ async fn test_real_ffmpeg_shutdown_cleanup() {
         ..Default::default()
     };
 
-    let chzzk = Arc::new(
-        ChzzkClient::new(&settings.chzzk).with_base_url(format!("http://127.0.0.1:{port}")),
+    let live_detail = make_open_detail(
+        "chan_real_clean",
+        "StreamerReal",
+        "Real FFmpeg Cleanup Stream",
+        99999,
+        &format!("http://127.0.0.1:{port}/stream.m3u8"),
     );
+    let chzzk =
+        Arc::new(MockLiveStreamSource::new().with_channel_state("chan_real_clean", live_detail));
     let rclone_config = chzzk_load::config::RcloneConfig {
         remote_path: remote_dir.to_string_lossy().replace('\\', "/"),
         upload_concurrency: 1,
@@ -462,6 +450,8 @@ async fn test_upload_file_and_delete_with_transient_file_lock() {
 #[tokio::test]
 #[ignore = "requires live Chzzk stream and gdrive:chzzk credentials"]
 async fn test_live_chzzk_shutdown_cleanup() {
+    use chzzk_load::chzzk::client::ChzzkClient;
+
     let temp_dir = std::env::temp_dir().join(format!("test_live_rec_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
     let remote_dir = std::env::temp_dir().join(format!("test_live_rem_{}", rand::random::<u32>()));

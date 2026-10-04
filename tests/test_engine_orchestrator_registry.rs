@@ -3,10 +3,9 @@ mod common;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::chzzk::models::{LiveDetail, LiveStreamInfo};
 use chzzk_load::chzzk::source::MockLiveStreamSource;
-use chzzk_load::config::{ChannelConfig, ChzzkConfig, GeneralConfig, Settings};
+use chzzk_load::config::{ChannelConfig, GeneralConfig, Settings};
 use chzzk_load::engine::{ChannelLifecycleState, EngineOrchestrator};
 use chzzk_load::tui::event::AppEvent;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
@@ -21,7 +20,7 @@ async fn test_orchestrator_typed_query_seam_idle() {
         }],
         ..Default::default()
     };
-    let chzzk = Arc::new(ChzzkClient::new(&ChzzkConfig::default()));
+    let chzzk = Arc::new(MockLiveStreamSource::new());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
 
     let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
@@ -93,7 +92,8 @@ async fn test_orchestrator_poll_delegates_to_evaluate_poll_and_starts_recording(
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx)
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy());
 
     orchestrator.poll_channels_once(&upload_tx).await;
 
@@ -162,7 +162,8 @@ async fn test_orchestrator_poll_metadata_change_updates_registry_and_persists() 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
-    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx)
+        .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy());
 
     // Poll 1: Starts recording
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -427,7 +428,10 @@ async fn test_orchestrator_graceful_shutdown_drains_registry_sessions() {
     let chzzk = Arc::new(source);
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
 
-    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::new(settings, chzzk, None, event_tx)
+            .with_ffmpeg_bin(get_mock_ffmpeg_bin().to_string_lossy()),
+    );
     let orch_clone = orchestrator.clone();
 
     let run_handle = tokio::spawn(async move {
@@ -495,7 +499,7 @@ async fn test_orchestrator_cleanup_empty_session_dirs_bounded() {
 #[tokio::test]
 async fn test_orchestrator_abort_all_terminates_registered_sessions_and_cancels_tokens() {
     let settings = Settings::default();
-    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
+    let chzzk = Arc::new(MockLiveStreamSource::new());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
     let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
 
@@ -528,7 +532,7 @@ async fn test_orchestrator_grace_period_timeout_escalation() {
         },
         ..Default::default()
     };
-    let chzzk = Arc::new(ChzzkClient::new(&settings.chzzk));
+    let chzzk = Arc::new(MockLiveStreamSource::new());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
     let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
 
