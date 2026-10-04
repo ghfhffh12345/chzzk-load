@@ -13,7 +13,6 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 pub mod cleanup;
-pub mod dispatcher;
 pub mod reconciliation;
 pub mod recording;
 pub mod registry;
@@ -23,7 +22,6 @@ pub use cleanup::{
     cleanup_empty_session_dirs, cleanup_empty_session_dirs_bounded,
     cleanup_empty_session_dirs_excluding, cleanup_session_dir_if_empty,
 };
-pub use dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
 pub use reconciliation::{ReconciliationReport, reconcile_orphaned_sessions};
 pub use recording::{RecordingSession, RecordingSessionParams};
 pub use registry::{
@@ -218,51 +216,6 @@ impl EngineOrchestrator {
 
     pub async fn cleanup_session_dir_if_empty(session_dir: &Path) -> std::io::Result<bool> {
         cleanup_session_dir_if_empty(session_dir).await
-    }
-
-    pub async fn process_sealed_chunk(
-        chunk_path: &Path,
-        remote_dir: &str,
-        channel_id: &str,
-        streamer_name: &str,
-        upload_tx: &Sender<UploadTask>,
-        event_tx: &Sender<AppEvent>,
-        backend_active: bool,
-    ) {
-        dispatcher::process_sealed_chunk(
-            chunk_path,
-            remote_dir,
-            channel_id,
-            streamer_name,
-            upload_tx,
-            event_tx,
-            backend_active,
-        )
-        .await;
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn seal_and_enqueue_chunks(
-        watcher: &mut crate::recorder::watcher::SegmentWatcher,
-        remote_dir: &str,
-        channel_id: &str,
-        streamer_name: &str,
-        upload_tx: &Sender<UploadTask>,
-        event_tx: &Sender<AppEvent>,
-        backend_active: bool,
-        is_finished: bool,
-    ) {
-        dispatcher::seal_and_enqueue_chunks(
-            watcher,
-            remote_dir,
-            channel_id,
-            streamer_name,
-            upload_tx,
-            event_tx,
-            backend_active,
-            is_finished,
-        )
-        .await;
     }
 
     pub fn spawn_recording_session(
@@ -838,52 +791,6 @@ pub mod tests {
         consumer_handle.await.expect("join");
         // Without backend, file is not deleted by consumer (remains local)
         assert!(chunk_file.exists());
-        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_process_sealed_chunk_with_backend() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("chzzk_engine_test_{}", rand::random::<u32>()));
-        tokio::fs::create_dir_all(&temp_dir)
-            .await
-            .expect("create tempdir");
-        let chunk_file = temp_dir.join("chunk_0001.ts");
-        tokio::fs::write(&chunk_file, b"12345678")
-            .await
-            .expect("write");
-
-        let (upload_tx, mut upload_rx) = tokio::sync::mpsc::channel(10);
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(10);
-
-        EngineOrchestrator::process_sealed_chunk(
-            &chunk_file,
-            "remote_session_dir",
-            "ch1",
-            "Streamer",
-            &upload_tx,
-            &event_tx,
-            true,
-        )
-        .await;
-
-        let task = upload_rx.recv().await.expect("task received");
-        assert_eq!(task.channel_id, "ch1");
-        assert_eq!(task.remote_dir, "remote_session_dir");
-        assert_eq!(task.session_folder_id, "remote_session_dir");
-        assert_eq!(task.chunk_name, "chunk_0001.ts");
-
-        let sealed_event = event_rx.recv().await.expect("event received");
-        match sealed_event {
-            AppEvent::ChunkSealed {
-                chunk_name,
-                size_bytes,
-            } => {
-                assert_eq!(chunk_name, "chunk_0001.ts");
-                assert_eq!(size_bytes, 8);
-            }
-            other => panic!("Unexpected event: {other:?}"),
-        }
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }
