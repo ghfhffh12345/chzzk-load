@@ -45,6 +45,10 @@ pub fn get_mock_ffmpeg_bin() -> &'static Path {
 use std::io::{BufRead, Write};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "-version" || a == "--version") {
+        println!("ffmpeg version 6.0-mock");
+        std::process::exit(0);
+    }
     let is_hang = args.iter().any(|a| a.contains("hang"));
     let is_key_error = args.iter().any(|a| a.contains("key_error"));
     let is_logs_and_exit = args.iter().any(|a| a.contains("logs_and_exit"));
@@ -86,6 +90,13 @@ fn main() {
             .status()
             .expect("Failed to compile mock_ffmpeg");
         assert!(status.success(), "mock_ffmpeg compilation failed");
+
+        // Automatically configure the environment variable so all test harnesses and
+        // orchestrator sessions default to this mock binary hermetically.
+        unsafe {
+            std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", &bin_path);
+        }
+
         bin_path
     })
 }

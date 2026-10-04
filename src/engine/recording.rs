@@ -258,12 +258,14 @@ impl RecordingSession {
             let output_pattern = session_dir.join("chunk_%04d.ts");
             let chunk_dur = settings.general.chunk_duration_seconds;
             let cookie = chzzk.cookie_header();
+            let env_ffmpeg_bin = std::env::var("CHZZK_LOAD_FFMPEG_BIN").ok();
+            let effective_ffmpeg_bin = ffmpeg_bin.as_deref().or(env_ffmpeg_bin.as_deref());
             let mut ffmpeg_session = match FfmpegSession::spawn(
                 &info.hls_url,
                 &output_pattern,
                 chunk_dur,
                 cookie,
-                ffmpeg_bin.as_deref(),
+                effective_ffmpeg_bin,
             ) {
                 Ok(session) => {
                     let _ = event_tx

@@ -1013,3 +1013,53 @@ async fn test_orchestrator_polling_cooldown_evaluation_with_fake_source() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_orchestrator_inherits_mock_ffmpeg_bin_from_environment_without_explicit_builder_call()
+{
+    let mock_bin = get_mock_ffmpeg_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_hermetic_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_hermetic".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let live_detail = LiveDetail::Open(LiveStreamInfo {
+        channel_id: "chan_hermetic".to_string(),
+        live_id: Some(99901),
+        streamer_name: "HermeticStreamer".to_string(),
+        title: "Hermetic Stream".to_string(),
+        hls_url: "https://mock.stream/live.m3u8".to_string(),
+        chat_channel_id: None,
+        metadata: Default::default(),
+    });
+
+    let mock =
+        Arc::new(MockLiveStreamSource::new().with_channel_state("chan_hermetic", live_detail));
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(100);
+
+    // Explicitly omit .with_ffmpeg_bin(...) to verify environment fallback
+    let orchestrator = EngineOrchestrator::new(settings, mock.clone(), None, event_tx);
+    assert_eq!(
+        orchestrator.ffmpeg_bin(),
+        Some(mock_bin.to_string_lossy().as_ref()),
+        "Orchestrator must automatically inherit CHZZK_LOAD_FFMPEG_BIN from environment"
+    );
+
+    orchestrator.poll_channels_once(&upload_tx).await;
+    assert!(orchestrator.is_recording("chan_hermetic"));
+
+    orchestrator.cancel();
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

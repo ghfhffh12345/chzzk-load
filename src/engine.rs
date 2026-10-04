@@ -72,7 +72,7 @@ impl EngineOrchestrator {
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             upload_handle: Arc::new(std::sync::Mutex::new(None)),
-            ffmpeg_bin: None,
+            ffmpeg_bin: std::env::var("CHZZK_LOAD_FFMPEG_BIN").ok(),
         }
     }
 
@@ -126,6 +126,10 @@ impl EngineOrchestrator {
     pub fn with_ffmpeg_bin(mut self, bin: impl Into<String>) -> Self {
         self.ffmpeg_bin = Some(bin.into());
         self
+    }
+
+    pub fn ffmpeg_bin(&self) -> Option<&str> {
+        self.ffmpeg_bin.as_deref()
     }
 
     pub fn cancel(&self) {
