@@ -3,5 +3,7 @@ recordings/
 .superpowers/
 npm/platforms/
 settings.toml
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
 !.agents/skills/rust-pro/
