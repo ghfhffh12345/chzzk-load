@@ -9,7 +9,9 @@ use tokio_util::sync::CancellationToken;
 use chzzk_load::chzzk::models::LiveStreamInfo;
 use chzzk_load::chzzk::source::MockLiveStreamSource;
 use chzzk_load::config::{ChannelConfig, GeneralConfig, Settings};
-use chzzk_load::engine::{ChannelLifecycleRegistry, EngineOrchestrator, RecordingSession};
+use chzzk_load::engine::{
+    ChannelLifecycleRegistry, EngineOrchestrator, RecordingSession, RecordingSessionParams,
+};
 use chzzk_load::tui::event::AppEvent;
 use chzzk_load::uploader::{MockUploadBackend, UploadTask};
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
@@ -674,18 +676,20 @@ async fn test_recording_session_resolves_chat_token_and_ws_url_from_source() {
         metadata: Default::default(),
     };
 
-    let session_handle = RecordingSession::spawn(
-        "chan_chat".to_string(),
+    let params = RecordingSessionParams {
+        channel_id: "chan_chat".to_string(),
         info,
         upload_tx,
         settings,
-        None,
-        mock.clone(),
+        backend: None,
+        chzzk: mock.clone(),
         event_tx,
         registry,
-        cancel_token.clone(),
-        Some(get_mock_ffmpeg_bin().to_string_lossy().to_string()),
-    );
+        cancel_token: cancel_token.clone(),
+        ffmpeg_bin: Some(get_mock_ffmpeg_bin().to_string_lossy().to_string()),
+    };
+
+    let session_handle = RecordingSession::spawn(params);
 
     // Wait for chat token resolution log event
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);

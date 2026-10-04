@@ -294,18 +294,19 @@ impl EngineOrchestrator {
                 .start_recording(&channel_id, session_state, session_cancel);
         }
 
-        let handle = RecordingSession::spawn(
+        let params = RecordingSessionParams {
             channel_id,
             info,
             upload_tx,
-            self.settings.clone(),
-            self.backend.clone(),
-            self.chzzk.clone(),
-            self.event_tx.clone(),
-            self.registry.clone(),
-            self.cancel_token.clone(),
-            self.ffmpeg_bin.clone(),
-        );
+            settings: self.settings.clone(),
+            backend: self.backend.clone(),
+            chzzk: self.chzzk.clone(),
+            event_tx: self.event_tx.clone(),
+            registry: self.registry.clone(),
+            cancel_token: self.cancel_token.clone(),
+            ffmpeg_bin: self.ffmpeg_bin.clone(),
+        };
+        let handle = RecordingSession::spawn(params);
 
         if let Ok(mut guard) = self.session_handles.lock() {
             guard.retain(|h| !h.is_finished());

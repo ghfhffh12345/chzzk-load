@@ -10,7 +10,6 @@ use crate::chzzk::chat::ChzzkChatClient;
 use crate::chzzk::models::LiveStreamInfo;
 use crate::chzzk::source::LiveStreamSource;
 use crate::config::Settings;
-use crate::engine::dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
 use crate::engine::registry::{ChannelLifecycleRegistry, RestrictionReason};
 use crate::engine::session::ActiveSessionState;
 use crate::recorder::ffmpeg::{FfmpegEvent, FfmpegExit, FfmpegSession};
@@ -35,7 +34,6 @@ pub struct RecordingSessionParams {
 
 /// Internal helper capturing ambient session context to dispatch sealed chunks
 /// to the upload queue and emit telemetry events.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct SessionChunkDispatcher {
     pub(crate) session_folder: String,
@@ -46,7 +44,6 @@ pub(crate) struct SessionChunkDispatcher {
     pub(crate) backend_active: bool,
 }
 
-#[allow(dead_code)]
 impl SessionChunkDispatcher {
     pub(crate) fn new(
         session_folder: String,
@@ -139,20 +136,21 @@ impl SessionChunkDispatcher {
 pub struct RecordingSession;
 
 impl RecordingSession {
-    #[allow(clippy::too_many_arguments)]
-    pub fn spawn(
-        channel_id: String,
-        info: LiveStreamInfo,
-        upload_tx: Sender<UploadTask>,
-        settings: Settings,
-        backend_opt: Option<Arc<dyn UploadBackend>>,
-        chzzk: Arc<dyn LiveStreamSource>,
-        event_tx: Sender<AppEvent>,
-        registry: ChannelLifecycleRegistry,
-        cancel_token: CancellationToken,
-        ffmpeg_bin: Option<String>,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn spawn(params: RecordingSessionParams) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            let RecordingSessionParams {
+                channel_id,
+                info,
+                upload_tx,
+                settings,
+                backend: backend_opt,
+                chzzk,
+                event_tx,
+                registry,
+                cancel_token,
+                ffmpeg_bin,
+            } = params;
+
             let _ = event_tx
                 .send(AppEvent::RecordingStarted {
                     channel_id: channel_id.clone(),
@@ -195,6 +193,15 @@ impl RecordingSession {
                     token,
                 )
             };
+
+            let dispatcher = SessionChunkDispatcher::new(
+                session_folder_name.clone(),
+                channel_id.clone(),
+                info.streamer_name.clone(),
+                upload_tx.clone(),
+                event_tx.clone(),
+                backend_opt.is_some(),
+            );
 
             let recordings_base = resolve_path(Path::new(&settings.general.recordings_dir));
             let session_dir = recordings_base.join(&session_folder_name);
@@ -253,25 +260,11 @@ impl RecordingSession {
 
             let (chat_sealed_tx, mut chat_sealed_rx) = tokio::sync::mpsc::channel::<PathBuf>(32);
             let chat_forward_handle = {
-                let upload_tx = upload_tx.clone();
-                let event_tx = event_tx.clone();
-                let channel_id = channel_id.clone();
-                let session_folder = session_folder_name.clone();
-                let streamer = info.streamer_name.clone();
-                let backend_active = backend_opt.is_some();
+                let dispatcher = dispatcher.clone();
 
                 tokio::spawn(async move {
                     while let Some(chat_path) = chat_sealed_rx.recv().await {
-                        process_sealed_chunk(
-                            &chat_path,
-                            &session_folder,
-                            &channel_id,
-                            &streamer,
-                            &upload_tx,
-                            &event_tx,
-                            backend_active,
-                        )
-                        .await;
+                        dispatcher.process_sealed_chunk(&chat_path).await;
                     }
                 })
             };
@@ -468,17 +461,7 @@ impl RecordingSession {
                             }
                         }
 
-                        seal_and_enqueue_chunks(
-                            &mut watcher,
-                            &session_folder_name,
-                            &channel_id,
-                            &info.streamer_name,
-                            &upload_tx,
-                            &event_tx,
-                            backend_opt.is_some(),
-                            false,
-                        )
-                        .await;
+                        dispatcher.seal_and_enqueue(&mut watcher, false).await;
                     }
                 }
             }
@@ -551,17 +534,7 @@ impl RecordingSession {
             }
 
             // Collect lingering chunks on stream conclusion, cancellation, or low disk space
-            seal_and_enqueue_chunks(
-                &mut watcher,
-                &session_folder_name,
-                &channel_id,
-                &info.streamer_name,
-                &upload_tx,
-                &event_tx,
-                backend_opt.is_some(),
-                true,
-            )
-            .await;
+            dispatcher.seal_and_enqueue(&mut watcher, true).await;
 
             session_cancel.cancel();
             let metadata_jsonl = registry
@@ -899,5 +872,66 @@ mod tests {
         assert_eq!(params.info.live_id, Some(12345));
         assert_eq!(params.ffmpeg_bin.as_deref(), Some("custom-ffmpeg"));
         assert!(params.backend.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_recording_session_spawn_with_params() {
+        use crate::chzzk::models_metadata::StreamMetadataState;
+        use crate::chzzk::source::MockLiveStreamSource;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_rs_spawn_{}", rand::random::<u32>()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let (upload_tx, _upload_rx) = mpsc::channel(1);
+        let (event_tx, _event_rx) = mpsc::channel(20);
+        let registry = ChannelLifecycleRegistry::new();
+        let cancel_token = CancellationToken::new();
+        let mut settings = Settings::default();
+        settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
+        let chzzk = Arc::new(MockLiveStreamSource::new());
+
+        let info = LiveStreamInfo {
+            channel_id: "test_chan_spawn".to_string(),
+            live_id: Some(54321),
+            streamer_name: "SpawnStreamer".to_string(),
+            title: "SpawnTitle".to_string(),
+            hls_url: "http://127.0.0.1:0/dummy.m3u8".to_string(),
+            chat_channel_id: None,
+            metadata: StreamMetadataState::default(),
+        };
+
+        let params = RecordingSessionParams {
+            channel_id: "test_chan_spawn".to_string(),
+            info,
+            upload_tx,
+            settings,
+            backend: None,
+            chzzk,
+            event_tx,
+            registry: registry.clone(),
+            cancel_token: cancel_token.clone(),
+            ffmpeg_bin: Some("nonexistent_ffmpeg_bin_for_test".to_string()),
+        };
+
+        let session_state = crate::engine::session::ActiveSessionState::new(
+            "2026-10-04_120000".to_string(),
+            "SpawnStreamer".to_string(),
+            None,
+            StreamMetadataState::default(),
+        );
+        registry.start_recording("test_chan_spawn", session_state, cancel_token.child_token());
+        assert!(registry.is_recording("test_chan_spawn"));
+
+        let handle = RecordingSession::spawn(params);
+        let _ = handle.await;
+
+        assert_eq!(
+            registry.channel_state("test_chan_spawn").kind(),
+            crate::engine::registry::ChannelLifecycleKind::Idle
+        );
+        assert!(!registry.is_recording("test_chan_spawn"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
