@@ -171,8 +171,14 @@ async fn test_dlq_non_blocking_primary_queue_advances() {
         ..Default::default()
     };
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     // Send chunk_0000.ts and chunk_0001.ts for the same channel.
     upload_tx.send(task0).await.unwrap();
@@ -256,8 +262,14 @@ async fn test_dlq_retries_and_succeeds() {
         ..Default::default()
     };
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     upload_tx.send(task0).await.unwrap();
     drop(upload_tx);
@@ -320,8 +332,14 @@ async fn test_dlq_infinite_retry_does_not_drop_tasks() {
         ..Default::default()
     };
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     upload_tx.send(task_fail).await.unwrap();
     drop(upload_tx);
@@ -375,8 +393,14 @@ async fn test_dlq_backoff_capped_at_maximum() {
         ..Default::default()
     };
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     upload_tx.send(task).await.unwrap();
     drop(upload_tx);
@@ -437,8 +461,14 @@ async fn test_circuit_breaker_trips_on_consecutive_failures() {
         ..Default::default()
     };
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     // Send 5 tasks across 5 distinct channels so 5 consecutive failures occur.
     for i in 0..5 {
@@ -512,8 +542,14 @@ async fn test_dlq_capacity_eviction_drops_oldest_task() {
         ..Default::default()
     };
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     // Send 3 tasks for the same channel "ch_test"
     upload_tx.send(task0).await.unwrap();
@@ -592,8 +628,14 @@ async fn test_dlq_disk_aware_eviction_deletes_ts_and_jsonl_when_disk_low() {
     }
     .with_free_disk_gb(0.5);
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     upload_tx.send(task_ts).await.unwrap();
     upload_tx.send(task_chat).await.unwrap();
@@ -665,8 +707,14 @@ async fn test_dlq_disk_aware_eviction_globally_evicts_oldest_first() {
         if c == 0 { 0.5 } else { 5.0 }
     });
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     upload_tx.send(task0_ts).await.unwrap();
     upload_tx.send(task1_ts).await.unwrap();

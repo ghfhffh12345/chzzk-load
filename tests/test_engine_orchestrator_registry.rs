@@ -868,7 +868,7 @@ async fn test_orchestrator_polling_sequential_transitions_with_fake_source() {
         ],
     );
 
-    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);
 
     let orchestrator = EngineOrchestrator::new(settings, mock.clone(), None, event_tx)
@@ -910,6 +910,15 @@ async fn test_orchestrator_polling_sequential_transitions_with_fake_source() {
     assert!(orchestrator.is_restricted("chan_seq"));
     assert!(!orchestrator.is_recording("chan_seq"));
     assert_eq!(mock.call_count("chan_seq"), 4);
+
+    // Await RecordingEnded event confirming background session task has finished teardown
+    while let Ok(Some(ev)) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), event_rx.recv()).await
+    {
+        if matches!(ev, AppEvent::RecordingEnded { .. }) {
+            break;
+        }
+    }
 
     // Poll 5: Close -> Transitions to Idle
     orchestrator.poll_channels_once(&upload_tx).await;

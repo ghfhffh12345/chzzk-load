@@ -418,6 +418,7 @@ async fn test_reconciliation_dispatches_to_upload_worker_and_recovers_via_dlq() 
         upload_rx,
         1,
         dlq_config,
+        None,
     );
 
     let settings = Settings {

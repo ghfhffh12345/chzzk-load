@@ -243,8 +243,14 @@ async fn test_real_rclone_dlq_infinite_retry_eventually_succeeds() {
         ..Default::default()
     };
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     upload_tx.send(task).await.unwrap();
     drop(upload_tx);
@@ -370,8 +376,14 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
         if count == 0 { 0.5 } else { 10.0 }
     });
 
-    let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend.clone()), event_tx, upload_rx, 1, dlq_config);
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
 
     // Enqueue both video and coupled chat tasks for both chunks
     upload_tx.send(task0_ts).await.unwrap();
@@ -515,7 +527,7 @@ async fn test_real_rclone_subprocess_failure_enters_dlq() {
     };
 
     let worker_handle =
-        UploadWorker::spawn_with_options(Some(backend), event_tx, upload_rx, 1, dlq_config);
+        UploadWorker::spawn_with_options(Some(backend), event_tx, upload_rx, 1, dlq_config, None);
 
     upload_tx.send(task).await.unwrap();
 

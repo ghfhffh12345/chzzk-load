@@ -569,6 +569,7 @@ impl EngineOrchestrator {
             upload_rx,
             concurrency,
             dlq_config,
+            None,
         );
         if let Ok(mut guard) = self.upload_handle.lock() {
             *guard = Some(upload_handle);

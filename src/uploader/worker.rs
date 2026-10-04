@@ -294,16 +294,18 @@ impl UploadWorker {
             upload_rx,
             concurrency,
             DlqConfig::default(),
+            None,
         )
     }
 
-    /// Spawns an upload worker task with full options including concurrency and DLQ config.
+    /// Spawns an upload worker task with full options including concurrency, DLQ config, and optional drain notification.
     pub fn spawn_with_options(
         backend_opt: Option<Arc<dyn UploadBackend>>,
         event_tx: Sender<AppEvent>,
         mut upload_rx: Receiver<UploadTask>,
         concurrency: usize,
         dlq_config: DlqConfig,
+        drain_notify: Option<Arc<tokio::sync::Notify>>,
     ) -> tokio::task::JoinHandle<()> {
         let concurrency = concurrency.max(1);
         tokio::spawn(async move {
@@ -415,6 +417,7 @@ impl UploadWorker {
                  kind: TaskKind,
                  backend_opt: Option<Arc<dyn UploadBackend>>,
                  event_tx: Sender<AppEvent>,
+                 drain_notify: Option<Arc<tokio::sync::Notify>>,
                  join_set: &mut tokio::task::JoinSet<WorkerTaskOutcome>| {
                     let task_clone = task.clone();
                     let kind_clone = kind.clone();
@@ -422,6 +425,7 @@ impl UploadWorker {
                     let cid_panic = task.channel_id.clone();
                     let name_panic = task.chunk_name.clone();
                     let streamer_panic = task.streamer_name.clone();
+                    let drain_notify_task = drain_notify.clone();
 
                     join_set.spawn(async move {
                     let unwind_res = std::panic::AssertUnwindSafe(async {
@@ -469,34 +473,8 @@ impl UploadWorker {
                                         ))))
                                         .await;
 
-                                    if let Some(parent) = task.chunk_path.parent() {
-                                        let is_session_dir = parent
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .map(|n| {
-                                                n == task.remote_dir
-                                                    || n == task.session_folder_id
-                                                    || n.starts_with(&format!(
-                                                        "{}_",
-                                                        task.channel_id
-                                                    ))
-                                            })
-                                            .unwrap_or(false);
-
-                                        if is_session_dir
-                                            && let Ok(true) =
-                                                crate::engine::cleanup::cleanup_session_dir_if_empty(
-                                                    parent,
-                                                )
-                                                .await
-                                        {
-                                            let _ = event_tx
-                                                .send(AppEvent::Log(LogEntry::clean(format!(
-                                                    "[{target}] Cleaned up empty session folder '{}'",
-                                                    parent.display()
-                                                ))))
-                                                .await;
-                                        }
+                                    if let Some(ref notify) = drain_notify_task {
+                                        notify.notify_one();
                                     }
 
                                     Ok(reclaimed)
@@ -648,6 +626,7 @@ impl UploadWorker {
                                     TaskKind::Primary,
                                     backend_opt.clone(),
                                     event_tx.clone(),
+                                    drain_notify.clone(),
                                     &mut join_set,
                                 );
                             }
@@ -682,6 +661,7 @@ impl UploadWorker {
                                         },
                                         backend_opt.clone(),
                                         event_tx.clone(),
+                                        drain_notify.clone(),
                                         &mut join_set,
                                     );
                                 }
@@ -916,10 +896,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_upload_worker_cleans_empty_session_dir_with_metadata_jsonl() {
+    async fn test_upload_worker_deletes_chunk_and_signals_drain_notify_without_removing_folder() {
         let mock_backend = Arc::new(MockUploadBackend::new());
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
         let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
+        let drain_notify = Arc::new(tokio::sync::Notify::new());
 
         let temp_dir =
             std::env::temp_dir().join(format!("chzzk_worker_clean_{}", rand::random::<u32>()));
@@ -934,7 +915,16 @@ mod tests {
             .await
             .unwrap();
 
-        let worker_handle = UploadWorker::spawn(Some(mock_backend.clone()), event_tx, upload_rx);
+        let notified = drain_notify.notified();
+
+        let worker_handle = UploadWorker::spawn_with_options(
+            Some(mock_backend.clone()),
+            event_tx,
+            upload_rx,
+            1,
+            DlqConfig::default(),
+            Some(drain_notify.clone()),
+        );
 
         upload_tx
             .send(UploadTask {
@@ -948,12 +938,28 @@ mod tests {
             .await
             .unwrap();
 
+        // Must receive drain notification upon chunk upload and local file deletion
+        tokio::time::timeout(Duration::from_secs(1), notified)
+            .await
+            .expect("drain_notify must be signaled upon successful upload and chunk deletion");
+
         drop(upload_tx);
         worker_handle.await.unwrap();
 
-        assert!(!chunk_path.exists());
-        assert!(!meta_path.exists(), "metadata.jsonl should be removed");
-        assert!(!session_dir.exists(), "session_dir should be removed");
+        // Chunk file must be deleted by upload confirmation
+        assert!(
+            !chunk_path.exists(),
+            "chunk file must be deleted after upload"
+        );
+        // Folder and metadata must NOT be removed by upload worker
+        assert!(
+            meta_path.exists(),
+            "metadata.jsonl must NOT be removed by upload worker"
+        );
+        assert!(
+            session_dir.exists(),
+            "session_dir must NOT be removed by upload worker"
+        );
 
         let mut saw_clean_log = false;
         while let Ok(ev) = event_rx.try_recv() {
@@ -963,7 +969,10 @@ mod tests {
                 saw_clean_log = true;
             }
         }
-        assert!(saw_clean_log);
+        assert!(
+            !saw_clean_log,
+            "UploadWorker must not emit folder cleanup logs"
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
@@ -1014,6 +1023,7 @@ mod tests {
             upload_rx,
             1,
             fast_dlq,
+            None,
         );
 
         upload_tx

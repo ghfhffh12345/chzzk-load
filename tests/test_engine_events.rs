@@ -2642,9 +2642,26 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+    let drain_notify = Arc::new(tokio::sync::Notify::new());
 
-    let _consumer_handle =
-        EngineOrchestrator::spawn_upload_consumer(Some(mock_backend.clone()), event_tx, upload_rx);
+    let custodian = chzzk_load::engine::SessionCustodian::new(event_tx.clone());
+    custodian.register_draining(&session_dir, channel_id, "Streamer Clean");
+
+    let _consumer_handle = chzzk_load::uploader::UploadWorker::spawn_with_options(
+        Some(mock_backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        chzzk_load::uploader::DlqConfig::default(),
+        Some(drain_notify.clone()),
+    );
+
+    let custodian_clone = custodian.clone();
+    let notify_clone = drain_notify.clone();
+    let purge_task = tokio::spawn(async move {
+        notify_clone.notified().await;
+        custodian_clone.try_purge_drained().await;
+    });
 
     upload_tx
         .send(UploadTask {
@@ -2669,6 +2686,8 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
             break;
         }
     }
+
+    let _ = purge_task.await;
 
     assert!(
         !chunk_path.exists(),
