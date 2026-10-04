@@ -13,6 +13,7 @@ use chzzk_load::engine::{ChannelLifecycleRegistry, EngineOrchestrator, Recording
 use chzzk_load::tui::event::AppEvent;
 use chzzk_load::uploader::{MockUploadBackend, UploadTask};
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
+use common::mock_source::make_mock_chat_source;
 use common::observability::{TestLogRecorder, assert_with_logs, expect_with_logs};
 
 async fn spawn_mock_chat_ws_server() -> (String, tokio::task::JoinHandle<()>) {
@@ -64,11 +65,11 @@ async fn test_engine_orchestrator_chat_lifecycle_with_cancel() {
     settings.general.chat_flush_interval_seconds = 1;
     settings.channels = vec![ChannelConfig::with_alias("chan_chat_test", "ChatStreamer")];
 
-    let chzzk = Arc::new(
-        MockLiveStreamSource::new()
-            .with_chat_token("chat_ch_123", "mock_access_token_123")
-            .with_chat_ws_url(ws_url),
-    );
+    let chzzk = Arc::new(make_mock_chat_source(
+        "chat_ch_123",
+        "mock_access_token_123",
+        &ws_url,
+    ));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -233,11 +234,11 @@ async fn test_engine_orchestrator_chat_preserves_local_file_when_backend_disable
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = true;
 
-    let chzzk = Arc::new(
-        MockLiveStreamSource::new()
-            .with_chat_token("chat_ch_local", "mock_access_token_123")
-            .with_chat_ws_url(ws_url),
-    );
+    let chzzk = Arc::new(make_mock_chat_source(
+        "chat_ch_local",
+        "mock_access_token_123",
+        &ws_url,
+    ));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -338,11 +339,11 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
     settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
     settings.general.record_chat = true;
 
-    let chzzk = Arc::new(
-        MockLiveStreamSource::new()
-            .with_chat_token("chat_ch_backend", "mock_access_token_123")
-            .with_chat_ws_url(ws_url),
-    );
+    let chzzk = Arc::new(make_mock_chat_source(
+        "chat_ch_backend",
+        "mock_access_token_123",
+        &ws_url,
+    ));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -542,11 +543,11 @@ async fn test_engine_orchestrator_chat_incremental_upload_and_delete() {
     settings.general.chat_flush_interval_seconds = 1;
     settings.channels = vec![ChannelConfig::with_alias("chan_chat_inc", "IncStreamer")];
 
-    let chzzk = Arc::new(
-        MockLiveStreamSource::new()
-            .with_chat_token("chat_ch_inc", "token_inc_test")
-            .with_chat_ws_url(ws_url),
-    );
+    let chzzk = Arc::new(make_mock_chat_source(
+        "chat_ch_inc",
+        "token_inc_test",
+        &ws_url,
+    ));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let cancel_token = CancellationToken::new();
@@ -652,11 +653,11 @@ async fn test_recording_session_resolves_chat_token_and_ws_url_from_source() {
         ..Default::default()
     };
 
-    let mock = Arc::new(
-        MockLiveStreamSource::new()
-            .with_chat_token("chat_chan_chat", "mock_secret_token_xyz")
-            .with_chat_ws_url("wss://custom-ws.example.com"),
-    );
+    let mock = Arc::new(make_mock_chat_source(
+        "chat_chan_chat",
+        "mock_secret_token_xyz",
+        "wss://custom-ws.example.com",
+    ));
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
     let (upload_tx, _upload_rx) = mpsc::channel(100);

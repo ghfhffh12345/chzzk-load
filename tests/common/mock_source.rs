@@ -49,3 +49,13 @@ pub fn make_restricted_detail(
         adult,
     }
 }
+
+pub fn make_mock_chat_source(
+    channel_id: &str,
+    chat_token: &str,
+    chat_ws_url: &str,
+) -> chzzk_load::chzzk::source::MockLiveStreamSource {
+    chzzk_load::chzzk::source::MockLiveStreamSource::new()
+        .with_chat_token(channel_id, chat_token)
+        .with_chat_ws_url(chat_ws_url)
+}
