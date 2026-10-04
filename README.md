@@ -21,11 +21,11 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 - 🌐 **Direct CDN Stream Extraction (P2P/Grid Bypass)**: Automatically decodes base64-encoded `cdn_url` parameters from Chzzk `p2pPath` playlists, pulling direct 1080p/720p CDN HLS streams without requiring P2P or grid software.
 - 💬 **Real-Time Live Chat Recording (`chat_%04d.jsonl`)**: Simultaneously captures live chat via WebSocket into structured JSON Lines format segmented into time-aligned chunks, preserving timestamps, user nicknames, badges, donations/cheeses, and message text.
 - 💽 **Flash-Friendly Batched I/O (SBC Optimized)**: Minimizes write cycles to protect microSD card and flash storage longevity on Single Board Computers (Raspberry Pi, ARM64) using in-memory byte buffering with dual-trigger flushing (500 messages / 64 KB capacity, or periodic timer interval).
-- 📊 **Stream Metadata Event Tracking (`metadata.jsonl`)**: Tracks essential broadcast state transitions (title, category, tags, access tier, and playback/chat policy flags) using a lean JSON Lines snapshot format (v2) with millisecond-accurate video synchronization, uploaded to cloud storage in real time.
-- 💾 **Strictly Bounded Disk Footprint & Disk Space Guarding**: Only 1–2 video segments and at most 1 chat chunk reside on disk simultaneously per active stream. Chunks are permanently deleted immediately upon verified cloud upload. An active cross-platform circuit breaker (`min_free_disk_gb`) gracefully pauses recordings and actively evicts the oldest failed chunks in the Dead-Letter Queue (DLQ) if disk space falls below safe limits.
+- 📊 **Stream Metadata Event Tracking (`metadata.jsonl`)**: Tracks essential broadcast state transitions (title, category, tags, access tier, and playback/chat policy flags) using a lean JSON Lines snapshot format (v2) with millisecond-accurate video synchronization, synchronized in real time via the unified non-blocking upload pipeline.
+- 💾 **Strictly Bounded Disk Footprint & Disk Space Guarding**: Only 1–2 video segments and at most 1 chat chunk reside on disk simultaneously per active stream. Chunks are permanently deleted immediately upon verified cloud upload. An active cross-platform circuit breaker (`min_free_disk_gb`) gracefully pauses recordings and actively evicts the oldest failed chunks in the Dead-Letter Queue (DLQ) while strictly safeguarding metadata timelines if disk space falls below safe limits.
 - 🛡️ **N+1 Segment Boundary Safety**: Explicit numeric sequence parsing (`chunk_%04d.ts`) ensures chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
-- 📬 **Non-Blocking Dead-Letter Queue (DLQ)**: Upload failures never block subsequent chunks. Failed segments transfer to a background DLQ with exponential backoff (initial 2s, capped at 5m, infinite retries, capped at 20 tasks/channel in RAM), maintaining uplink progress and disk reclamation.
-- 🔄 **Startup Crash Reconciliation & Tail Chunk Quarantine**: Reconciles orphaned session folders from prior crashes or system reboots, validating contiguous sealed chunks and re-injecting them into the Dead-Letter Queue (DLQ) for upload while safely quarantining unfinalized tail segments (`.quarantine`).
+- 📬 **Non-Blocking Dead-Letter Queue (DLQ)**: Upload failures never block subsequent chunks or metadata snapshots. Failed tasks transfer to a background DLQ with exponential backoff (initial 2s, capped at 5m, infinite retries, capped at 20 tasks/channel in RAM), maintaining uplink progress and disk reclamation while preserving stream metadata.
+- 🔄 **Startup Crash Reconciliation & Tail Chunk Quarantine**: Reconciles orphaned session folders from prior crashes or system reboots, validating contiguous sealed chunks and lingering `metadata.jsonl` files, re-injecting them into the Dead-Letter Queue (DLQ) for cloud upload while safely quarantining unfinalized tail segments (`.quarantine`).
 - 🤖 **Headless Console Mode (`--headless` / `--no-tui`)**: Auto-detects non-TTY environments (or manual flags) to bypass TUI raw mode, streaming colorized logs to stdout for systemd services and Docker containers.
 - ☁️ **Universal Cloud Storage Sync via Rclone**: Seamless cloud synchronization powered by [rclone](https://rclone.org/), supporting 70+ storage providers including Google Drive, OneDrive, Amazon S3, Dropbox, WebDAV, SFTP, and local paths. Runs in **local-only recording mode** when cloud sync is disabled (`remote_path: ""`).
 - 🔀 **Intra-Channel FIFO Serialization & Multi-Stream Concurrency**: Guarantees segments belonging to the same stream upload strictly in sequential order while uploading across different channels concurrently (up to `upload_concurrency`, default: 3).
@@ -246,7 +246,7 @@ Live chat messages captured via WebSocket are serialized as structured JSON Line
 
 ### 2. Stream Metadata & Timeline Format (`metadata.jsonl`)
 
-`metadata.jsonl` tracks essential broadcast state transitions across the lifetime of the stream with millisecond-accurate video timeline synchronization (`stream_offset_ms`) using a lean JSON Lines snapshot schema (v2). It is dual-written locally and updated in real time on cloud storage via `rclone rcat`.
+`metadata.jsonl` tracks essential broadcast state transitions across the lifetime of the stream with millisecond-accurate video timeline synchronization (`stream_offset_ms`) using a lean JSON Lines snapshot schema (v2). It is appended locally and synchronized to cloud storage in real time via the unified upload pipeline (`rclone copyto`). Live snapshots are retained locally during active capture (`delete_on_success: false`), while the final concluding snapshot triggers automatic local deletion (`delete_on_success: true`) once uploaded, ensuring complete cloud synchronization and strict directory emptiness.
 
 #### Event Types
 
@@ -265,6 +265,9 @@ Live chat messages captured via WebSocket are serialized as structured JSON Line
 
 > [!NOTE]
 > In schema version 2, redundant local timestamps (`time_local`) and delta diff objects (`changes`) are omitted in favor of unified, full lean snapshots (`state`).
+
+> [!NOTE]
+> **Unified Upload Pipeline & DLQ Protection**: Metadata snapshots are uploaded through the primary upload queue and Dead-Letter Queue (DLQ) using `rclone copyto ... --progress`, sharing global cross-channel concurrency bounds (`upload_concurrency`). In the event of network disruption or low disk space, metadata uploads retry with exponential backoff and are strictly immune from DLQ eviction, ensuring broadcast history is never lost.
 
 #### State Snapshot Schema (`state`)
 
@@ -335,7 +338,7 @@ Live chat messages captured via WebSocket are serialized as structured JSON Line
 
 ## Cloud Storage Setup (rclone)
 
-If `remote_path` is left empty (`""`), `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files and `chat_%04d.jsonl` chunks in `recordings_dir`.
+If `remote_path` is left empty (`""`), `chzzk-load` automatically runs in **local-only recording mode** and preserves `.ts` files, `chat_%04d.jsonl` chunks, and `metadata.jsonl` in `recordings_dir`.
 
 To enable automatic cloud storage upload:
 1. Install [rclone](https://rclone.org/downloads/) on your system:

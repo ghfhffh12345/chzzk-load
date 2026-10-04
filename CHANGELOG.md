@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-10-04
+
+### Added
+- **Unified Upload Pipeline & Task Retention Policy (`UploadTask`)**: Introduced explicit `delete_on_success: bool` retention policies to `UploadTask` alongside typed constructors (`UploadTask::chunk`, `UploadTask::metadata`). Video chunks and chat archives unlink locally upon confirmed upload (`delete_on_success: true`), intermediate live metadata snapshots persist locally across updates (`delete_on_success: false`), and concluding stream teardown metadata triggers clean final deletion (`delete_on_success: true`) (#44, ADR 0007).
+- **Worker-Driven File Deletion & Windows Lock Resilience**: Centralized all local file unlinking exclusively into `UploadWorker` upon successful remote upload confirmation, decoupling storage backends from local path mutations. Unlinking features bounded exponential backoff retries (20ms to 200ms, max 10 attempts) to absorb transient Windows sharing violations (OS error 32, access denied 5) and asynchronous unlink latency (OS error 145) (#44, ADR 0007).
+- **DLQ Disk-Pressure Eviction Immunity for Metadata**: In `UploadWorker::evict_oldest_chunk_pair_if_disk_pressure`, tasks representing `metadata.jsonl` and tasks with `delete_on_success: false` are strictly shielded from eviction. Under low disk pressure, large video and chat chunks are dropped to reclaim gigabytes of disk space while strictly preserving lightweight stream classification and title timelines (#44, ADR 0007).
+- **Startup Crash Reconciliation for Metadata**: In `ReconciliationCoordinator`, orphaned recording sessions containing `metadata.jsonl` now enqueue the metadata file as an upload task (`delete_on_success: true`) following any orphaned video segments, ensuring stream state is synchronized to the cloud before session directory removal (#46, ADR 0007).
+- **Strict Directory Emptiness Invariant**: Replaced heuristic file-name sniffing (`has_metadata`) in `cleanup_session_dir_if_empty` and `SessionCustodian` with a strict emptiness invariant (`read_dir().count() == 0`). Concluded session folders are purged only when all files have been confirmed uploaded and unlinked by `UploadWorker` (#44, ADR 0007).
+
+### Changed
+- **Eliminated `rclone rcat` Text Streaming**: Streamlined `UploadBackend` to a single transport contract (`upload_file`), replacing ad-hoc `upload_text` and `rclone rcat` child processes with standard `rclone copyto ... --progress` executions governed by the primary queue, cross-channel concurrency limits, and DLQ retry semantics (#45, ADR 0007).
+- **Non-Blocking Metadata Engine Ingress**: In `EngineOrchestrator` poll loop and `RecordingSession`, metadata state changes append to local disk and non-blockingly enqueue upload tasks to `upload_tx` without spawning child processes or stalling the engine poll loop (#46, ADR 0007).
+- **Differentiated Telemetry Logging**: Upload telemetry now distinguishes retained metadata syncs (`[{streamer}] Uploaded metadata.jsonl (synced)`) from unlinked chunk files (`[{streamer}] Uploaded & deleted {chunk_name} (reclaimed {mb:.1} MB)`) (#44, ADR 0007).
+
+### Removed
+- **`UploadBackend::upload_text` & Pipe Scaffolding**: Purged `upload_text` from `UploadBackend`, `RcloneBackend`, and `MockUploadBackend`, along with stdin pipe streaming child process handling (#45, ADR 0007).
+- **File-Name Sniffing in Directory Cleanup**: Purged `has_metadata` heuristic directory inspection flags from `src/engine/cleanup.rs` and `src/engine/custodian.rs` (#44, ADR 0007).
+
 ## [1.0.0-rc.4] - 2026-10-04
 
 ### Added
