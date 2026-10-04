@@ -493,14 +493,14 @@ async fn test_engine_orchestrator_upload_consumer() {
 
     // Submit upload task
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_test".to_string(),
-            session_folder_id: "folder_abc".to_string(),
-            remote_dir: "folder_abc".to_string(),
-            chunk_path: chunk_path.clone(),
-            chunk_name: "chunk_0000.ts".to_string(),
-            streamer_name: "Streamer 1".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_test",
+            "folder_abc",
+            "folder_abc",
+            chunk_path.clone(),
+            "chunk_0000.ts",
+            "Streamer 1",
+        ))
         .await
         .unwrap();
 
@@ -586,14 +586,14 @@ async fn test_engine_orchestrator_upload_consumer_handles_failure() {
 
     // Submit upload task
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_fail".to_string(),
-            session_folder_id: "folder_xyz".to_string(),
-            remote_dir: "folder_xyz".to_string(),
-            chunk_path: chunk_path.clone(),
-            chunk_name: "chunk_fail.ts".to_string(),
-            streamer_name: "StreamerFail".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_fail",
+            "folder_xyz",
+            "folder_xyz",
+            chunk_path.clone(),
+            "chunk_fail.ts",
+            "StreamerFail",
+        ))
         .await
         .unwrap();
 
@@ -849,26 +849,26 @@ async fn test_engine_orchestrator_concurrent_uploads() {
     fs::write(&chunk_path2, b"chan2_video_data").unwrap();
 
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_1".to_string(),
-            session_folder_id: "folder_1".to_string(),
-            remote_dir: "folder_1".to_string(),
-            chunk_path: chunk_path1.clone(),
-            chunk_name: "chunk_chan1.ts".to_string(),
-            streamer_name: "Streamer 1".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_1",
+            "folder_1",
+            "folder_1",
+            chunk_path1.clone(),
+            "chunk_chan1.ts",
+            "Streamer 1",
+        ))
         .await
         .unwrap();
 
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_2".to_string(),
-            session_folder_id: "folder_2".to_string(),
-            remote_dir: "folder_2".to_string(),
-            chunk_path: chunk_path2.clone(),
-            chunk_name: "chunk_chan2.ts".to_string(),
-            streamer_name: "Streamer 2".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_2",
+            "folder_2",
+            "folder_2",
+            chunk_path2.clone(),
+            "chunk_chan2.ts",
+            "Streamer 2",
+        ))
         .await
         .unwrap();
 
@@ -1662,26 +1662,26 @@ async fn test_engine_orchestrator_serializes_uploads_per_channel() {
     fs::write(&chunk_path2, b"chunk1_video_data").unwrap();
 
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_same".to_string(),
-            session_folder_id: "folder_same".to_string(),
-            remote_dir: "folder_same".to_string(),
-            chunk_path: chunk_path1.clone(),
-            chunk_name: "chunk_0000.ts".to_string(),
-            streamer_name: "SameStreamer".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_same",
+            "folder_same",
+            "folder_same",
+            chunk_path1.clone(),
+            "chunk_0000.ts",
+            "SameStreamer",
+        ))
         .await
         .unwrap();
 
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_same".to_string(),
-            session_folder_id: "folder_same".to_string(),
-            remote_dir: "folder_same".to_string(),
-            chunk_path: chunk_path2.clone(),
-            chunk_name: "chunk_0001.ts".to_string(),
-            streamer_name: "SameStreamer".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_same",
+            "folder_same",
+            "folder_same",
+            chunk_path2.clone(),
+            "chunk_0001.ts",
+            "SameStreamer",
+        ))
         .await
         .unwrap();
 
@@ -2638,14 +2638,14 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
     });
 
     upload_tx
-        .send(UploadTask {
-            channel_id: channel_id.to_string(),
-            session_folder_id: "folder_clean_123".to_string(),
-            remote_dir: "folder_clean_123".to_string(),
-            chunk_path: chunk_path.clone(),
-            chunk_name: "chunk_0000.ts".to_string(),
-            streamer_name: "Streamer Clean".to_string(),
-        })
+        .send(UploadTask::chunk(
+            channel_id,
+            "folder_clean_123",
+            "folder_clean_123",
+            chunk_path.clone(),
+            "chunk_0000.ts",
+            "Streamer Clean",
+        ))
         .await
         .unwrap();
 
@@ -3039,24 +3039,24 @@ fn test_broadcast_identifier_resolution() {
     assert_eq!(broadcast_identifier("", "chan_123"), "chan_123");
     assert_eq!(broadcast_identifier("   ", "chan_123"), "chan_123");
 
-    let task1 = UploadTask {
-        channel_id: "chan_1".to_string(),
-        session_folder_id: "s1".to_string(),
-        remote_dir: "s1".to_string(),
-        chunk_path: PathBuf::from("chunk_0000.ts"),
-        chunk_name: "chunk_0000.ts".to_string(),
-        streamer_name: "StreamerOne".to_string(),
-    };
+    let task1 = UploadTask::chunk(
+        "chan_1",
+        "s1",
+        "s1",
+        PathBuf::from("chunk_0000.ts"),
+        "chunk_0000.ts",
+        "StreamerOne",
+    );
     assert_eq!(task1.broadcast_identifier(), "StreamerOne");
 
-    let task2 = UploadTask {
-        channel_id: "chan_2".to_string(),
-        session_folder_id: "s2".to_string(),
-        remote_dir: "s2".to_string(),
-        chunk_path: PathBuf::from("chunk_0000.ts"),
-        chunk_name: "chunk_0000.ts".to_string(),
-        streamer_name: "   ".to_string(),
-    };
+    let task2 = UploadTask::chunk(
+        "chan_2",
+        "s2",
+        "s2",
+        PathBuf::from("chunk_0000.ts"),
+        "chunk_0000.ts",
+        "   ",
+    );
     assert_eq!(task2.broadcast_identifier(), "chan_2");
 }
 
@@ -3088,40 +3088,40 @@ async fn test_upload_consumer_logs_broadcast_identifier_on_success_and_failure()
 
     // Send video chunk task with streamer_name
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_streamer_1".to_string(),
-            session_folder_id: "session_1".to_string(),
-            remote_dir: "session_1".to_string(),
-            chunk_path: chunk_path.clone(),
-            chunk_name: "chunk_0001.ts".to_string(),
-            streamer_name: "StreamerOne".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_streamer_1",
+            "session_1",
+            "session_1",
+            chunk_path.clone(),
+            "chunk_0001.ts",
+            "StreamerOne",
+        ))
         .await
         .unwrap();
 
     // Send chat chunk task with streamer_name
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_streamer_1".to_string(),
-            session_folder_id: "session_1".to_string(),
-            remote_dir: "session_1".to_string(),
-            chunk_path: chat_path.clone(),
-            chunk_name: "chat_0001.jsonl".to_string(),
-            streamer_name: "StreamerOne".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_streamer_1",
+            "session_1",
+            "session_1",
+            chat_path.clone(),
+            "chat_0001.jsonl",
+            "StreamerOne",
+        ))
         .await
         .unwrap();
 
     // Send video chunk task with whitespace streamer_name (should fallback to channel_id)
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_fallback_id".to_string(),
-            session_folder_id: "session_2".to_string(),
-            remote_dir: "session_2".to_string(),
-            chunk_path: chunk_path_fallback.clone(),
-            chunk_name: "chunk_0002.ts".to_string(),
-            streamer_name: "   ".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_fallback_id",
+            "session_2",
+            "session_2",
+            chunk_path_fallback.clone(),
+            "chunk_0002.ts",
+            "   ",
+        ))
         .await
         .unwrap();
 

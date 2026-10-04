@@ -418,14 +418,14 @@ async fn test_engine_orchestrator_chat_uploads_and_deletes_when_backend_enabled(
         .to_string_lossy()
         .to_string();
     upload_tx
-        .send(UploadTask {
-            channel_id: "chan_backend_chat".to_string(),
-            session_folder_id: session_folder.clone(),
-            remote_dir: session_folder,
-            chunk_path: chat_file_path.clone(),
-            chunk_name: "chat_0000.jsonl".to_string(),
-            streamer_name: "BackendChatStreamer".to_string(),
-        })
+        .send(UploadTask::chunk(
+            "chan_backend_chat",
+            session_folder.clone(),
+            session_folder,
+            chat_file_path.clone(),
+            "chat_0000.jsonl",
+            "BackendChatStreamer",
+        ))
         .await
         .unwrap();
 

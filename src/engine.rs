@@ -755,14 +755,14 @@ pub mod tests {
             upload_rx,
         );
 
-        let task = UploadTask {
-            channel_id: "test_channel".to_string(),
-            session_folder_id: "[2026-09-29_120000] Streamer - Title".to_string(),
-            remote_dir: "[2026-09-29_120000] Streamer - Title".to_string(),
-            chunk_path: chunk_file.clone(),
-            chunk_name: "chunk_0000.ts".to_string(),
-            streamer_name: "Streamer".to_string(),
-        };
+        let task = UploadTask::chunk(
+            "test_channel",
+            "[2026-09-29_120000] Streamer - Title",
+            "[2026-09-29_120000] Streamer - Title",
+            chunk_file.clone(),
+            "chunk_0000.ts",
+            "Streamer",
+        );
 
         upload_tx.send(task).await.expect("send task");
         drop(upload_tx);
@@ -811,14 +811,14 @@ pub mod tests {
 
         let consumer_handle = EngineOrchestrator::spawn_upload_consumer(None, event_tx, upload_rx);
 
-        let task = UploadTask {
-            channel_id: "ch1".to_string(),
-            session_folder_id: "folder".to_string(),
-            remote_dir: "folder".to_string(),
-            chunk_path: chunk_file.clone(),
-            chunk_name: "chunk_0000.ts".to_string(),
-            streamer_name: "Streamer".to_string(),
-        };
+        let task = UploadTask::chunk(
+            "ch1",
+            "folder",
+            "folder",
+            chunk_file.clone(),
+            "chunk_0000.ts",
+            "Streamer",
+        );
 
         upload_tx.send(task).await.expect("send");
         drop(upload_tx);

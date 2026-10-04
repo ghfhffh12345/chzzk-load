@@ -74,7 +74,7 @@ impl FlexibleMockBackend {
 }
 
 impl UploadBackend for FlexibleMockBackend {
-    fn upload_file_and_delete<'a>(
+    fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,
         remote_dir: &'a str,
@@ -101,7 +101,6 @@ impl UploadBackend for FlexibleMockBackend {
             let len = if local_path.exists() {
                 let bytes = std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
                 on_progress(bytes, bytes, 10.0);
-                let _ = std::fs::remove_file(local_path);
                 bytes
             } else {
                 1024
@@ -112,6 +111,23 @@ impl UploadBackend for FlexibleMockBackend {
                 .unwrap()
                 .push((local_path.to_path_buf(), remote_dir.to_string()));
 
+            Ok(len)
+        })
+    }
+
+    fn upload_file_and_delete<'a>(
+        &'a self,
+        local_path: &'a Path,
+        remote_dir: &'a str,
+        on_progress: ProgressCallback,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(async move {
+            let len = self
+                .upload_file(local_path, remote_dir, on_progress)
+                .await?;
+            if local_path.exists() {
+                let _ = std::fs::remove_file(local_path);
+            }
             Ok(len)
         })
     }
@@ -139,14 +155,14 @@ impl UploadBackend for FlexibleMockBackend {
 fn create_chunk_file(dir: &Path, file_name: &str, content: &[u8]) -> (UploadTask, PathBuf) {
     let path = dir.join(file_name);
     std::fs::write(&path, content).expect("failed to write test chunk");
-    let task = UploadTask {
-        channel_id: "ch_test".to_string(),
-        session_folder_id: "session_test".to_string(),
-        remote_dir: "session_test".to_string(),
-        chunk_path: path.clone(),
-        chunk_name: file_name.to_string(),
-        streamer_name: "TestStreamer".to_string(),
-    };
+    let task = UploadTask::chunk(
+        "ch_test",
+        "session_test",
+        "session_test",
+        path.clone(),
+        file_name,
+        "TestStreamer",
+    );
     (task, path)
 }
 
@@ -477,14 +493,14 @@ async fn test_circuit_breaker_trips_on_consecutive_failures() {
         std::fs::write(&chunk_path, b"test-data").unwrap();
 
         upload_tx
-            .send(UploadTask {
-                channel_id: format!("ch_{i}"),
-                session_folder_id: format!("session_{i}"),
-                remote_dir: format!("remote_{i}"),
+            .send(UploadTask::chunk(
+                format!("ch_{i}"),
+                format!("session_{i}"),
+                format!("remote_{i}"),
                 chunk_path,
                 chunk_name,
-                streamer_name: format!("Streamer_{i}"),
-            })
+                format!("Streamer_{i}"),
+            ))
             .await
             .unwrap();
     }
@@ -761,5 +777,237 @@ async fn test_dlq_disk_aware_eviction_globally_evicts_oldest_first() {
     assert!(
         saw_chunk1_retry_success,
         "Chunk 1 must successfully retry after disk space recovers, not be falsely evicted"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_worker_metadata_snapshot_retention_leaves_file_intact_and_logs_synced() {
+    let temp_guard = TempDirGuard::new("test_worker_retention");
+    let meta_path = temp_guard.path().join("metadata.jsonl");
+    std::fs::write(&meta_path, b"{\"event\":\"INITIAL_STATE\"}\n").unwrap();
+
+    let backend = Arc::new(FlexibleMockBackend::new(|_, _| false));
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AppEvent>(50);
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<UploadTask>(10);
+
+    let worker_handle = UploadWorker::spawn(Some(backend.clone()), event_tx, upload_rx);
+
+    let task = UploadTask::metadata(
+        "chan_ret",
+        "session_ret",
+        "session_ret",
+        meta_path.clone(),
+        "StreamerRet",
+        false, // delete_on_success = false (retention)
+    );
+
+    upload_tx.send(task).await.unwrap();
+    drop(upload_tx);
+    worker_handle.await.unwrap();
+
+    // Verify local file is intact
+    assert!(
+        meta_path.exists(),
+        "metadata.jsonl must remain on disk when delete_on_success is false"
+    );
+
+    // Verify backend received the upload
+    assert!(backend.is_uploaded(&meta_path));
+
+    // Verify telemetry logs and events
+    let mut saw_synced_log = false;
+    let mut saw_upload_completed = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        match ev {
+            AppEvent::Log(entry) => {
+                if entry
+                    .message
+                    .contains("[StreamerRet] Uploaded metadata.jsonl (synced)")
+                {
+                    saw_synced_log = true;
+                }
+            }
+            AppEvent::UploadCompleted {
+                channel_id,
+                chunk_name,
+                reclaimed_bytes,
+            } => {
+                assert_eq!(channel_id, "chan_ret");
+                assert_eq!(chunk_name, "metadata.jsonl");
+                assert_eq!(
+                    reclaimed_bytes, 0,
+                    "reclaimed_bytes must be 0 for retained files"
+                );
+                saw_upload_completed = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_synced_log,
+        "Must emit '[StreamerRet] Uploaded metadata.jsonl (synced)'"
+    );
+    assert!(
+        saw_upload_completed,
+        "Must emit UploadCompleted with 0 reclaimed bytes"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_worker_chunk_deletion_unlinks_file_and_logs_reclaimed() {
+    let temp_guard = TempDirGuard::new("test_worker_deletion");
+    let chunk_path = temp_guard.path().join("chunk_0001.ts");
+    let data = vec![0u8; 1024 * 1024]; // 1 MB
+    std::fs::write(&chunk_path, &data).unwrap();
+
+    let backend = Arc::new(FlexibleMockBackend::new(|_, _| false));
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<AppEvent>(50);
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel::<UploadTask>(10);
+
+    let worker_handle = UploadWorker::spawn(Some(backend.clone()), event_tx, upload_rx);
+
+    let task = UploadTask::chunk(
+        "chan_del",
+        "session_del",
+        "session_del",
+        chunk_path.clone(),
+        "chunk_0001.ts",
+        "StreamerDel",
+    );
+
+    upload_tx.send(task).await.unwrap();
+    drop(upload_tx);
+    worker_handle.await.unwrap();
+
+    // Verify local file was unlinked
+    assert!(
+        !chunk_path.exists(),
+        "chunk file must be unlinked when delete_on_success is true"
+    );
+
+    // Verify backend received the upload
+    assert!(backend.is_uploaded(&chunk_path));
+
+    // Verify telemetry logs and events
+    let mut saw_reclaimed_log = false;
+    let mut saw_upload_completed = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        match ev {
+            AppEvent::Log(entry) => {
+                if entry
+                    .message
+                    .contains("[StreamerDel] Uploaded & deleted chunk_0001.ts (reclaimed 1.0 MB)")
+                {
+                    saw_reclaimed_log = true;
+                }
+            }
+            AppEvent::UploadCompleted {
+                channel_id,
+                chunk_name,
+                reclaimed_bytes,
+            } => {
+                assert_eq!(channel_id, "chan_del");
+                assert_eq!(chunk_name, "chunk_0001.ts");
+                assert_eq!(reclaimed_bytes, 1024 * 1024);
+                saw_upload_completed = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_reclaimed_log,
+        "Must emit '[StreamerDel] Uploaded & deleted chunk_0001.ts (reclaimed 1.0 MB)'"
+    );
+    assert!(
+        saw_upload_completed,
+        "Must emit UploadCompleted with reclaimed bytes"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_dlq_disk_aware_eviction_strictly_preserves_metadata_tasks() {
+    let temp_guard = TempDirGuard::new("test_dlq_meta_immunity");
+    let meta_path = temp_guard.path().join("metadata.jsonl");
+    std::fs::write(&meta_path, b"{\"event\":\"INITIAL_STATE\"}\n").unwrap();
+
+    let (task_ts, path_ts) = create_chunk_file(temp_guard.path(), "chunk_0001.ts", b"video-0001");
+    let task_meta = UploadTask::metadata(
+        "ch_meta",
+        "session_meta",
+        "session_meta",
+        meta_path.clone(),
+        "StreamerMeta",
+        false,
+    );
+
+    // Fail attempt 1 so tasks enter DLQ. On retry (attempt 2), allow metadata.jsonl to succeed.
+    let backend = Arc::new(FlexibleMockBackend::new(|path, attempt| {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        !(name == "metadata.jsonl" && attempt >= 2)
+    }));
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
+
+    // Critically low disk: 0.5 GB < 2.0 GB
+    let dlq_config = DlqConfig {
+        initial_delay: Duration::from_millis(10),
+        min_free_disk_gb: 2.0,
+        ..Default::default()
+    }
+    .with_free_disk_gb(0.5);
+
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend.clone()),
+        event_tx,
+        upload_rx,
+        1,
+        dlq_config,
+        None,
+    );
+
+    // Send metadata task first (older), then chunk task
+    upload_tx.send(task_meta).await.unwrap();
+    upload_tx.send(task_ts).await.unwrap();
+
+    drop(upload_tx);
+    worker_handle.await.unwrap();
+
+    // Chunk should be evicted due to disk pressure
+    assert!(
+        !path_ts.exists(),
+        "chunk_0001.ts should be evicted under low disk pressure"
+    );
+
+    // metadata.jsonl MUST NOT be evicted or deleted despite low disk pressure and being older
+    assert!(
+        meta_path.exists(),
+        "metadata.jsonl must strictly be immune from DLQ disk eviction"
+    );
+
+    let mut saw_chunk_eviction = false;
+    let mut saw_meta_eviction = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = ev {
+            if entry.message.contains("[DLQ] Disk space critically low") {
+                if entry.message.contains("chunk_0001.ts") {
+                    saw_chunk_eviction = true;
+                }
+                if entry.message.contains("metadata.jsonl") {
+                    saw_meta_eviction = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        saw_chunk_eviction,
+        "chunk_0001.ts eviction log must be emitted"
+    );
+    assert!(
+        !saw_meta_eviction,
+        "metadata.jsonl must NEVER be logged as evicted"
     );
 }

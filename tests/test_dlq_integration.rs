@@ -62,14 +62,14 @@ fn create_local_rclone_backend(remote_dir: &Path) -> RcloneBackend {
 
 /// Helper to create a standard `UploadTask` for testing.
 fn make_test_task(session_id: &str, chunk_path: PathBuf, chunk_name: &str) -> UploadTask {
-    UploadTask {
-        channel_id: "ch_stream1".to_string(),
-        session_folder_id: session_id.to_string(),
-        remote_dir: session_id.to_string(),
+    UploadTask::chunk(
+        "ch_stream1",
+        session_id,
+        session_id,
         chunk_path,
-        chunk_name: chunk_name.to_string(),
-        streamer_name: "StreamerA".to_string(),
-    }
+        chunk_name,
+        "StreamerA",
+    )
 }
 
 type FailPredicate = Arc<dyn Fn(&Path, usize) -> bool + Send + Sync>;

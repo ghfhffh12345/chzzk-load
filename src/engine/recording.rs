@@ -89,14 +89,14 @@ impl SessionChunkDispatcher {
             if self.backend_active {
                 let send_res = self
                     .upload_tx
-                    .send(UploadTask {
-                        channel_id: self.channel_id.clone(),
-                        session_folder_id: self.session_folder.clone(),
-                        remote_dir: self.session_folder.clone(),
-                        chunk_path: chunk_path.to_path_buf(),
-                        chunk_name: chunk_name.to_string(),
-                        streamer_name: self.streamer_name.clone(),
-                    })
+                    .send(UploadTask::chunk(
+                        self.channel_id.clone(),
+                        self.session_folder.clone(),
+                        self.session_folder.clone(),
+                        chunk_path.to_path_buf(),
+                        chunk_name.to_string(),
+                        self.streamer_name.clone(),
+                    ))
                     .await;
 
                 if send_res.is_ok() {

@@ -10,6 +10,17 @@ pub type ProgressCallback = Box<dyn Fn(u64, u64, f64) + Send + Sync + 'static>;
 
 /// Trait defining the cloud storage upload operations.
 pub trait UploadBackend: Send + Sync {
+    /// Uploads a file at `local_path` to `remote_dir` and reports progress.
+    /// Does not delete the local file.
+    fn upload_file<'a>(
+        &'a self,
+        local_path: &'a Path,
+        remote_dir: &'a str,
+        on_progress: ProgressCallback,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        self.upload_file_and_delete(local_path, remote_dir, on_progress)
+    }
+
     /// Uploads a file at `local_path` to `remote_dir`, reports progress,
     /// and deletes the local file upon confirmed completion.
     fn upload_file_and_delete<'a>(
@@ -46,7 +57,7 @@ impl MockUploadBackend {
 }
 
 impl UploadBackend for MockUploadBackend {
-    fn upload_file_and_delete<'a>(
+    fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,
         remote_dir: &'a str,
@@ -63,7 +74,21 @@ impl UploadBackend for MockUploadBackend {
                 .await
                 .push((local_path.to_path_buf(), remote_dir.to_string()));
             on_progress(len, len, 10.0);
-            tokio::fs::remove_file(local_path).await?;
+            Ok(len)
+        })
+    }
+
+    fn upload_file_and_delete<'a>(
+        &'a self,
+        local_path: &'a Path,
+        remote_dir: &'a str,
+        on_progress: ProgressCallback,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(async move {
+            let len = self
+                .upload_file(local_path, remote_dir, on_progress)
+                .await?;
+            crate::uploader::unlink_local_file_with_retry(local_path).await?;
             Ok(len)
         })
     }

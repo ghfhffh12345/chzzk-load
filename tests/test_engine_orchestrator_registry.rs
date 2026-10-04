@@ -1049,11 +1049,6 @@ async fn test_orchestrator_drain_notify_triggers_custodian_purge_in_select_loop(
 
     let session_dir = temp_dir.join("2026-10-04_120000 StreamerDrain - Drain Stream");
     let _ = std::fs::create_dir_all(&session_dir);
-    // Write metadata.jsonl so it represents a concluded session that is eligible for purge
-    let _ = std::fs::write(
-        session_dir.join("metadata.jsonl"),
-        b"{\"title\":\"test\"}\n",
-    );
 
     let settings = Settings {
         general: GeneralConfig {
@@ -1117,10 +1112,6 @@ async fn test_orchestrator_shutdown_purges_custodian_draining_directories() {
 
     let session_dir = temp_dir.join("2026-10-04_120000 StreamerShut - Shut Stream");
     let _ = std::fs::create_dir_all(&session_dir);
-    let _ = std::fs::write(
-        session_dir.join("metadata.jsonl"),
-        b"{\"title\":\"shut\"}\n",
-    );
 
     let settings = Settings {
         general: GeneralConfig {

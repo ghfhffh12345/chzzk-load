@@ -205,6 +205,11 @@ async fn enforce_dlq_disk_eviction(
 
     for (channel_id, queue) in dlq_queues.iter() {
         for dlq_task in queue {
+            // Broadcast metadata and retained tasks are strictly immune from DLQ disk pressure eviction.
+            if dlq_task.task.is_metadata() || !dlq_task.task.delete_on_success {
+                continue;
+            }
+
             let file_time = std::fs::metadata(&dlq_task.task.chunk_path)
                 .and_then(|m| m.modified().or_else(|_| m.created()))
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
@@ -265,6 +270,44 @@ async fn enforce_dlq_disk_eviction(
         "[DLQ] Disk space critically low ({:.2} GB < {:.2} GB). Evicted oldest chunk {} and coupled chat log.",
         free_space, dlq_config.min_free_disk_gb, ts_name
     ))));
+}
+
+/// Unlinks a local file upon successful upload with bounded exponential backoff retries
+/// handling transient Windows sharing violations (32), access denied (5), and permission errors,
+/// treating NotFound as success.
+pub async fn unlink_local_file_with_retry(path: &Path) -> std::io::Result<()> {
+    let mut remove_res = tokio::fs::remove_file(path).await;
+    let mut attempts: usize = 0;
+    while let Err(ref e) = remove_res {
+        if attempts >= 10 || e.kind() == std::io::ErrorKind::NotFound {
+            break;
+        }
+        let raw_os = e.raw_os_error();
+        let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
+            || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+            || e.kind() == std::io::ErrorKind::PermissionDenied;
+
+        if is_transient_lock {
+            attempts += 1;
+            let backoff_ms = std::cmp::min(
+                20u64.saturating_mul(
+                    1u64.checked_shl(attempts.saturating_sub(1) as u32)
+                        .unwrap_or(u64::MAX),
+                ),
+                200,
+            );
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            remove_res = tokio::fs::remove_file(path).await;
+        } else {
+            break;
+        }
+    }
+
+    match remove_res {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Background upload worker managing per-channel FIFO serialization,
@@ -448,7 +491,7 @@ impl UploadWorker {
                                 });
 
                             let upload_res = backend
-                                .upload_file_and_delete(
+                                .upload_file(
                                     &task.chunk_path,
                                     &task.remote_dir,
                                     progress_cb,
@@ -457,27 +500,56 @@ impl UploadWorker {
 
                             let target = broadcast_identifier(&task.streamer_name, &task.channel_id);
                             match upload_res {
-                                Ok(reclaimed) => {
+                                Ok(file_size) => {
+                                    let (reclaimed_bytes, log_msg) = if task.delete_on_success {
+                                        if let Err(e) = unlink_local_file_with_retry(&task.chunk_path).await {
+                                            let err_msg = format!("failed to remove local file after upload: {e}");
+                                            let _ = event_tx
+                                                .send(AppEvent::UploadFailed {
+                                                    channel_id: task.channel_id.clone(),
+                                                    chunk_name: task.chunk_name.clone(),
+                                                })
+                                                .await;
+                                            let _ = event_tx
+                                                .send(AppEvent::Log(LogEntry::error(format!(
+                                                    "[{target}] Upload failed for {}: {err_msg}",
+                                                    task.chunk_name
+                                                ))))
+                                                .await;
+                                            return Err(err_msg);
+                                        }
+
+                                        (
+                                            file_size,
+                                            format!(
+                                                "[{target}] Uploaded & deleted {} (reclaimed {:.1} MB)",
+                                                task.chunk_name,
+                                                file_size as f64 / 1_048_576.0
+                                            ),
+                                        )
+                                    } else {
+                                        (
+                                            0,
+                                            format!("[{target}] Uploaded {} (synced)", task.chunk_name),
+                                        )
+                                    };
+
                                     let _ = event_tx
                                         .send(AppEvent::UploadCompleted {
                                             channel_id: task.channel_id.clone(),
                                             chunk_name: task.chunk_name.clone(),
-                                            reclaimed_bytes: reclaimed,
+                                            reclaimed_bytes,
                                         })
                                         .await;
                                     let _ = event_tx
-                                        .send(AppEvent::Log(LogEntry::clean(format!(
-                                            "[{target}] Uploaded & deleted {} (reclaimed {:.1} MB)",
-                                            task.chunk_name,
-                                            reclaimed as f64 / 1_048_576.0
-                                        ))))
+                                        .send(AppEvent::Log(LogEntry::clean(log_msg)))
                                         .await;
 
                                     if let Some(ref notify) = drain_notify_task {
                                         notify.notify_one();
                                     }
 
-                                    Ok(reclaimed)
+                                    Ok(file_size)
                                 }
                                 Err(e) => {
                                     let err_msg = e.to_string();
@@ -769,7 +841,7 @@ mod tests {
     }
 
     impl UploadBackend for MockUploadBackend {
-        fn upload_file_and_delete<'a>(
+        fn upload_file<'a>(
             &'a self,
             local_path: &'a Path,
             remote_dir: &'a str,
@@ -782,7 +854,6 @@ mod tests {
                 let bytes = if local_path.exists() {
                     let len = std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
                     on_progress(len, len, 10.0);
-                    let _ = std::fs::remove_file(local_path);
                     len
                 } else {
                     1024
@@ -791,6 +862,23 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((local_path.to_path_buf(), remote_dir.to_string()));
+                Ok(bytes)
+            })
+        }
+
+        fn upload_file_and_delete<'a>(
+            &'a self,
+            local_path: &'a Path,
+            remote_dir: &'a str,
+            on_progress: ProgressCallback,
+        ) -> crate::uploader::backend::BoxFuture<'a, anyhow::Result<u64>> {
+            Box::pin(async move {
+                let bytes = self
+                    .upload_file(local_path, remote_dir, on_progress)
+                    .await?;
+                if local_path.exists() {
+                    let _ = std::fs::remove_file(local_path);
+                }
                 Ok(bytes)
             })
         }
@@ -829,14 +917,14 @@ mod tests {
         let worker_handle = UploadWorker::spawn(Some(mock_backend.clone()), event_tx, upload_rx);
 
         upload_tx
-            .send(UploadTask {
-                channel_id: "ch1".to_string(),
-                session_folder_id: "session1".to_string(),
-                remote_dir: "session1".to_string(),
-                chunk_path: chunk1_path.clone(),
-                chunk_name: "chunk_0000.ts".to_string(),
-                streamer_name: "Streamer1".to_string(),
-            })
+            .send(UploadTask::chunk(
+                "ch1",
+                "session1",
+                "session1",
+                chunk1_path.clone(),
+                "chunk_0000.ts",
+                "Streamer1",
+            ))
             .await
             .unwrap();
 
@@ -878,14 +966,14 @@ mod tests {
         let worker_handle = UploadWorker::spawn(None, event_tx, upload_rx);
 
         upload_tx
-            .send(UploadTask {
-                channel_id: "ch1".to_string(),
-                session_folder_id: "session1".to_string(),
-                remote_dir: "session1".to_string(),
-                chunk_path: std::path::PathBuf::from("nonexistent.ts"),
-                chunk_name: "nonexistent.ts".to_string(),
-                streamer_name: "Streamer1".to_string(),
-            })
+            .send(UploadTask::chunk(
+                "ch1",
+                "session1",
+                "session1",
+                std::path::PathBuf::from("nonexistent.ts"),
+                "nonexistent.ts",
+                "Streamer1",
+            ))
             .await
             .unwrap();
 
@@ -927,14 +1015,14 @@ mod tests {
         );
 
         upload_tx
-            .send(UploadTask {
-                channel_id: "ch_clean".to_string(),
-                session_folder_id: "session_clean_test".to_string(),
-                remote_dir: "session_clean_test".to_string(),
-                chunk_path: chunk_path.clone(),
-                chunk_name: "chunk_0000.ts".to_string(),
-                streamer_name: "StreamerClean".to_string(),
-            })
+            .send(UploadTask::chunk(
+                "ch_clean",
+                "session_clean_test",
+                "session_clean_test",
+                chunk_path.clone(),
+                "chunk_0000.ts",
+                "StreamerClean",
+            ))
             .await
             .unwrap();
 
@@ -1027,14 +1115,14 @@ mod tests {
         );
 
         upload_tx
-            .send(UploadTask {
-                channel_id: "ch_panic".to_string(),
-                session_folder_id: "session_panic".to_string(),
-                remote_dir: "session_panic".to_string(),
-                chunk_path: std::path::PathBuf::from("chunk_panic.ts"),
-                chunk_name: "chunk_panic.ts".to_string(),
-                streamer_name: "StreamerPanic".to_string(),
-            })
+            .send(UploadTask::chunk(
+                "ch_panic",
+                "session_panic",
+                "session_panic",
+                std::path::PathBuf::from("chunk_panic.ts"),
+                "chunk_panic.ts",
+                "StreamerPanic",
+            ))
             .await
             .unwrap();
 

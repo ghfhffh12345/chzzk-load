@@ -68,14 +68,14 @@ fn build_upload_task(
     streamer_name: &str,
     chunk: &IndexedChunk,
 ) -> UploadTask {
-    UploadTask {
-        channel_id: channel_id.to_string(),
-        session_folder_id: folder_name.to_string(),
-        remote_dir: folder_name.to_string(),
-        chunk_path: chunk.path.clone(),
-        chunk_name: chunk.name.clone(),
-        streamer_name: streamer_name.to_string(),
-    }
+    UploadTask::chunk(
+        channel_id,
+        folder_name,
+        folder_name,
+        chunk.path.clone(),
+        chunk.name.clone(),
+        streamer_name,
+    )
 }
 
 fn parse_chat_chunk_index(file_name: &str) -> Option<u64> {
