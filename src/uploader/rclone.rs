@@ -1,7 +1,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::AsyncBufReadExt;
 
 use crate::config::RcloneConfig;
 use crate::uploader::backend::{BoxFuture, ProgressCallback, UploadBackend};
@@ -119,20 +119,6 @@ impl RcloneBackend {
         cmd
     }
 
-    /// Builds a `tokio::process::Command` configured for `rclone rcat`.
-    pub fn build_rcat_command(&self, remote_dest: &str) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(self.resolve_bin());
-        cmd.kill_on_drop(true);
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd.arg("rcat").arg(remote_dest);
-        for arg in &self.config.extra_args {
-            cmd.arg(arg);
-        }
-        cmd
-    }
-
     /// Builds a `tokio::process::Command` configured for `rclone lsf --max-depth 1`.
     pub fn build_check_command(&self) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(self.resolve_bin());
@@ -217,72 +203,6 @@ impl UploadBackend for RcloneBackend {
                 } else {
                     Err(anyhow::anyhow!(
                         "rclone failed with status {status}: {trimmed}"
-                    ))
-                }
-            }
-        })
-    }
-
-    fn upload_file_and_delete<'a>(
-        &'a self,
-        local_path: &'a Path,
-        remote_dir: &'a str,
-        on_progress: ProgressCallback,
-    ) -> BoxFuture<'a, anyhow::Result<u64>> {
-        Box::pin(async move {
-            let file_size = self
-                .upload_file(local_path, remote_dir, on_progress)
-                .await?;
-
-            crate::uploader::unlink_local_file_with_retry(local_path)
-                .await
-                .with_context(|| {
-                    format!("failed to remove local file after upload: {local_path:?}")
-                })?;
-
-            Ok(file_size)
-        })
-    }
-
-    fn upload_text<'a>(
-        &'a self,
-        remote_dir: &'a str,
-        file_name: &'a str,
-        content: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move {
-            let remote_dest = format_destination(&self.config.remote_path, remote_dir, file_name);
-            let bin = self.resolve_bin();
-            let mut cmd = self.build_rcat_command(&remote_dest);
-            let mut child = cmd
-                .spawn()
-                .with_context(|| format!("failed to spawn rclone rcat from '{bin}'"))?;
-
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(content.as_bytes()).await.with_context(|| {
-                    format!("failed to write text content to rclone rcat for '{remote_dest}'")
-                })?;
-                stdin.flush().await.with_context(|| {
-                    format!("failed to flush text content to rclone rcat for '{remote_dest}'")
-                })?;
-                drop(stdin);
-            }
-
-            let output = child
-                .wait_with_output()
-                .await
-                .with_context(|| "failed to wait for rclone rcat process")?;
-            if output.status.success() {
-                Ok(())
-            } else {
-                let stderr_str = String::from_utf8_lossy(&output.stderr);
-                let trimmed = stderr_str.trim();
-                let status = output.status;
-                if trimmed.is_empty() {
-                    Err(anyhow::anyhow!("rclone rcat failed with status {status}"))
-                } else {
-                    Err(anyhow::anyhow!(
-                        "rclone rcat failed with status {status}: {trimmed}"
                     ))
                 }
             }

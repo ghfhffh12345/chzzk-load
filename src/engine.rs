@@ -392,23 +392,32 @@ impl EngineOrchestrator {
                             let recordings_base =
                                 resolve_path(Path::new(&self.settings.general.recordings_dir));
                             let session_dir = recordings_base.join(&remote_dir);
-                            if let Ok(event_line) = event.to_json_line() {
-                                use tokio::io::AsyncWriteExt;
-                                if let Ok(mut file) = tokio::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(session_dir.join("metadata.jsonl"))
-                                    .await
-                                {
-                                    let _ = file.write_all(event_line.as_bytes()).await;
-                                    let _ = file.flush().await;
+                            let _ = tokio::fs::create_dir_all(&session_dir).await;
+                            let metadata_path = session_dir.join("metadata.jsonl");
+                            if metadata_path.exists() {
+                                if let Ok(event_line) = event.to_json_line() {
+                                    use tokio::io::AsyncWriteExt;
+                                    if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                                        .append(true)
+                                        .open(&metadata_path)
+                                        .await
+                                    {
+                                        let _ = file.write_all(event_line.as_bytes()).await;
+                                        let _ = file.flush().await;
+                                    }
                                 }
+                            } else {
+                                let _ = tokio::fs::write(&metadata_path, &full_jsonl).await;
                             }
 
-                            // 2. Synchronize to cloud storage via rcat
+                            // 2. Synchronize to cloud storage
                             if let Some(backend) = self.backend.as_ref() {
                                 let res = backend
-                                    .upload_text(&remote_dir, "metadata.jsonl", &full_jsonl)
+                                    .upload_file(
+                                        &metadata_path,
+                                        &remote_dir,
+                                        Box::new(|_, _, _| {}),
+                                    )
                                     .await;
                                 match res {
                                     Ok(_) => {

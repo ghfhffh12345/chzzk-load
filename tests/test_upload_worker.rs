@@ -115,32 +115,6 @@ impl UploadBackend for FlexibleMockBackend {
         })
     }
 
-    fn upload_file_and_delete<'a>(
-        &'a self,
-        local_path: &'a Path,
-        remote_dir: &'a str,
-        on_progress: ProgressCallback,
-    ) -> BoxFuture<'a, anyhow::Result<u64>> {
-        Box::pin(async move {
-            let len = self
-                .upload_file(local_path, remote_dir, on_progress)
-                .await?;
-            if local_path.exists() {
-                let _ = std::fs::remove_file(local_path);
-            }
-            Ok(len)
-        })
-    }
-
-    fn upload_text<'a>(
-        &'a self,
-        _remote_dir: &'a str,
-        _file_name: &'a str,
-        _content: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move { Ok(()) })
-    }
-
     fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
             if self.connection_ok.load(Ordering::SeqCst) {

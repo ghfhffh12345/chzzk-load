@@ -117,28 +117,6 @@ fn test_rclone_backend_bin_resolution() {
 }
 
 #[test]
-fn test_rclone_backend_rcat_command_builder() {
-    let config = RcloneConfig {
-        remote_path: "gdrive:Chzzk".to_string(),
-        upload_concurrency: 1,
-        rclone_bin: "rclone".to_string(),
-        extra_args: vec!["--drive-chunk-size=32M".to_string()],
-        skip_connection_check: false,
-    };
-    let backend = RcloneBackend::new(config);
-    let cmd = backend.build_rcat_command("gdrive:Chzzk/session/metadata.jsonl");
-    let std_cmd = cmd.as_std();
-    let args: Vec<String> = std_cmd
-        .get_args()
-        .map(|s| s.to_string_lossy().to_string())
-        .collect();
-
-    assert_eq!(args[0], "rcat");
-    assert_eq!(args[1], "gdrive:Chzzk/session/metadata.jsonl");
-    assert!(args.contains(&"--drive-chunk-size=32M".to_string()));
-}
-
-#[test]
 fn test_rclone_backend_check_command_builder() {
     let config = RcloneConfig {
         remote_path: "gdrive:Chzzk".to_string(),

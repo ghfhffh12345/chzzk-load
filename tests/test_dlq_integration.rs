@@ -105,7 +105,7 @@ impl ControlledRcloneBackend {
 }
 
 impl UploadBackend for ControlledRcloneBackend {
-    fn upload_file_and_delete<'a>(
+    fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,
         remote_dir: &'a str,
@@ -130,18 +130,9 @@ impl UploadBackend for ControlledRcloneBackend {
             }
 
             self.inner
-                .upload_file_and_delete(local_path, remote_dir, on_progress)
+                .upload_file(local_path, remote_dir, on_progress)
                 .await
         })
-    }
-
-    fn upload_text<'a>(
-        &'a self,
-        remote_dir: &'a str,
-        file_name: &'a str,
-        content: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
-        self.inner.upload_text(remote_dir, file_name, content)
     }
 
     fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {

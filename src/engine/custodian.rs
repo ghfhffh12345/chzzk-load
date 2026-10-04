@@ -353,11 +353,21 @@ mod tests {
         custodian.register_active(&dir_a, "channel_a", "Streamer A");
         custodian.mark_concluded(&dir_a);
 
+        // Under strict emptiness, presence of metadata.jsonl preserves the directory
         let purged_a = custodian.try_purge(&dir_a).await.unwrap();
         assert!(
-            purged_a,
-            "Directory with only metadata.jsonl must be purged"
+            !purged_a,
+            "Under strict emptiness, directory with metadata.jsonl must NOT be purged until empty"
         );
+        assert!(
+            dir_a.exists(),
+            "Directory with metadata must still exist on disk"
+        );
+
+        // Once metadata.jsonl is removed (simulating confirmed upload & unlink), it is purged
+        tokio::fs::remove_file(&meta_file).await.unwrap();
+        let purged_a_empty = custodian.try_purge(&dir_a).await.unwrap();
+        assert!(purged_a_empty, "Strictly empty directory must be purged");
         assert!(!dir_a.exists(), "Purged directory must not exist on disk");
         assert_eq!(
             custodian.tracked_state(&dir_a),
@@ -479,21 +489,21 @@ mod tests {
 
         let purged_count = custodian.try_purge_drained().await;
         assert_eq!(
-            purged_count, 2,
-            "Expected exactly 2 quiescent directories purged"
+            purged_count, 1,
+            "Expected exactly 1 strictly empty quiescent directory purged"
         );
 
-        // Active and chunks must survive and stay tracked
+        // Active, chunks, and metadata-containing directories must survive and stay tracked
         assert!(dir_active.exists());
         assert!(custodian.tracked_state(&dir_active).unwrap().is_active());
 
         assert!(dir_chunks.exists());
         assert!(custodian.tracked_state(&dir_chunks).unwrap().is_draining());
 
-        // Quiescent directories must be deleted and untracked
-        assert!(!dir_meta.exists());
-        assert_eq!(custodian.tracked_state(&dir_meta), None);
+        assert!(dir_meta.exists());
+        assert!(custodian.tracked_state(&dir_meta).unwrap().is_draining());
 
+        // Strictly empty directory must be deleted and untracked
         assert!(!dir_empty.exists());
         assert_eq!(custodian.tracked_state(&dir_empty), None);
 

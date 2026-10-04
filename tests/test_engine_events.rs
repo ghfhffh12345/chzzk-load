@@ -36,7 +36,7 @@ struct ConcurrencyMockBackend {
 }
 
 impl UploadBackend for ConcurrencyMockBackend {
-    fn upload_file_and_delete<'a>(
+    fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,
         _remote_dir: &'a str,
@@ -54,18 +54,8 @@ impl UploadBackend for ConcurrencyMockBackend {
                 let _ = rx.recv().await;
             }
             let len = tokio::fs::metadata(local_path).await?.len();
-            tokio::fs::remove_file(local_path).await?;
             Ok(len)
         })
-    }
-
-    fn upload_text<'a>(
-        &'a self,
-        _remote_dir: &'a str,
-        _file_name: &'a str,
-        _content: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move { Ok(()) })
     }
 
     fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
@@ -81,7 +71,7 @@ struct SerialMockBackend {
 }
 
 impl UploadBackend for SerialMockBackend {
-    fn upload_file_and_delete<'a>(
+    fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,
         _remote_dir: &'a str,
@@ -106,18 +96,8 @@ impl UploadBackend for SerialMockBackend {
                 self.task1_in_flight.store(false, Ordering::SeqCst);
             }
             let len = tokio::fs::metadata(local_path).await?.len();
-            tokio::fs::remove_file(local_path).await?;
             Ok(len)
         })
-    }
-
-    fn upload_text<'a>(
-        &'a self,
-        _remote_dir: &'a str,
-        _file_name: &'a str,
-        _content: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move { Ok(()) })
     }
 
     fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
@@ -969,16 +949,19 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
 
     // Poll 1: Channel is polled with same initial title (no metadata upload expected)
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(mock_backend.texts.lock().await.is_empty());
+    assert!(mock_backend.uploads.lock().await.is_empty());
 
     // Poll 2: Streamer changed title to "Updated Stream Title? Playing Now?"
     orchestrator.poll_channels_once(&upload_tx).await;
 
     // Verify backend received metadata.jsonl upload
-    let texts = mock_backend.texts.lock().await;
-    assert_eq!(texts.len(), 1);
-    assert_eq!(texts[0].1, "metadata.jsonl");
-    let content = &texts[0].2;
+    let uploads = mock_backend.uploads.lock().await;
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(
+        uploads[0].0.file_name().unwrap().to_string_lossy(),
+        "metadata.jsonl"
+    );
+    let content = fs::read_to_string(&uploads[0].0).unwrap();
     assert!(content.contains("\"INITIAL_STATE\""));
     assert!(content.contains("\"stream_offset_ms\":0"));
     assert!(content.contains("\"METADATA_CHANGED\""));
@@ -1078,15 +1061,18 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
 
     // Poll 1: Channel is polled with same initial title (no history upload)
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(mock_backend.texts.lock().await.is_empty());
+    assert!(mock_backend.uploads.lock().await.is_empty());
 
     // Poll 2: Streamer changed title to "Updated Stream Title? Playing Now?"
     orchestrator.poll_channels_once(&upload_tx).await;
 
-    let texts = mock_backend.texts.lock().await;
-    assert_eq!(texts.len(), 1);
-    assert_eq!(texts[0].1, "metadata.jsonl");
-    let content = &texts[0].2;
+    let uploads = mock_backend.uploads.lock().await;
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(
+        uploads[0].0.file_name().unwrap().to_string_lossy(),
+        "metadata.jsonl"
+    );
+    let content = fs::read_to_string(&uploads[0].0).unwrap();
     assert!(content.contains("\"INITIAL_STATE\""));
     assert!(content.contains("Initial Stream Title"));
     assert!(content.contains("\"METADATA_CHANGED\""));
@@ -1259,15 +1245,18 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
 
     // Poll 1: Channel polled with same initial metadata
     orchestrator.poll_channels_once(&upload_tx).await;
-    assert!(mock_backend.texts.lock().await.is_empty());
+    assert!(mock_backend.uploads.lock().await.is_empty());
 
     // Poll 2: Channel metadata changes to Game + Watch Party
     orchestrator.poll_channels_once(&upload_tx).await;
 
-    let texts = mock_backend.texts.lock().await;
-    assert_eq!(texts.len(), 1);
-    assert_eq!(texts[0].1, "metadata.jsonl");
-    let content = &texts[0].2;
+    let uploads = mock_backend.uploads.lock().await;
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(
+        uploads[0].0.file_name().unwrap().to_string_lossy(),
+        "metadata.jsonl"
+    );
+    let content = fs::read_to_string(&uploads[0].0).unwrap();
     assert!(content.contains("\"METADATA_CHANGED\""));
     assert!(content.contains("Valorant"));
     assert!(content.contains("\"is_watch_party\":true"));

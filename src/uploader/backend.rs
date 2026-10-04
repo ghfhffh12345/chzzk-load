@@ -17,26 +17,7 @@ pub trait UploadBackend: Send + Sync {
         local_path: &'a Path,
         remote_dir: &'a str,
         on_progress: ProgressCallback,
-    ) -> BoxFuture<'a, anyhow::Result<u64>> {
-        self.upload_file_and_delete(local_path, remote_dir, on_progress)
-    }
-
-    /// Uploads a file at `local_path` to `remote_dir`, reports progress,
-    /// and deletes the local file upon confirmed completion.
-    fn upload_file_and_delete<'a>(
-        &'a self,
-        local_path: &'a Path,
-        remote_dir: &'a str,
-        on_progress: ProgressCallback,
     ) -> BoxFuture<'a, anyhow::Result<u64>>;
-
-    /// Uploads text content directly to a remote file.
-    fn upload_text<'a>(
-        &'a self,
-        remote_dir: &'a str,
-        file_name: &'a str,
-        content: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>>;
 
     /// Verifies connectivity to the storage backend.
     fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>>;
@@ -46,7 +27,6 @@ pub trait UploadBackend: Send + Sync {
 #[derive(Default, Clone)]
 pub struct MockUploadBackend {
     pub uploads: Arc<Mutex<Vec<(PathBuf, String)>>>,
-    pub texts: Arc<Mutex<Vec<(String, String, String)>>>,
     pub should_fail: Arc<AtomicBool>,
 }
 
@@ -68,48 +48,17 @@ impl UploadBackend for MockUploadBackend {
                 return Err(anyhow::anyhow!("simulated error"));
             }
 
-            let len = tokio::fs::metadata(local_path).await?.len();
+            let len = if local_path.exists() {
+                tokio::fs::metadata(local_path).await?.len()
+            } else {
+                1024
+            };
             self.uploads
                 .lock()
                 .await
                 .push((local_path.to_path_buf(), remote_dir.to_string()));
             on_progress(len, len, 10.0);
             Ok(len)
-        })
-    }
-
-    fn upload_file_and_delete<'a>(
-        &'a self,
-        local_path: &'a Path,
-        remote_dir: &'a str,
-        on_progress: ProgressCallback,
-    ) -> BoxFuture<'a, anyhow::Result<u64>> {
-        Box::pin(async move {
-            let len = self
-                .upload_file(local_path, remote_dir, on_progress)
-                .await?;
-            crate::uploader::unlink_local_file_with_retry(local_path).await?;
-            Ok(len)
-        })
-    }
-
-    fn upload_text<'a>(
-        &'a self,
-        remote_dir: &'a str,
-        file_name: &'a str,
-        content: &'a str,
-    ) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move {
-            if self.should_fail.load(Ordering::SeqCst) {
-                return Err(anyhow::anyhow!("simulated error"));
-            }
-
-            self.texts.lock().await.push((
-                remote_dir.to_string(),
-                file_name.to_string(),
-                content.to_string(),
-            ));
-            Ok(())
         })
     }
 
@@ -129,7 +78,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
-    async fn test_mock_backend_upload_and_delete() {
+    async fn test_mock_backend_upload_file() {
         let temp_dir = std::env::temp_dir().join(format!("test_mock_up_{}", rand::random::<u32>()));
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
         let file_path = temp_dir.join("test_chunk.ts");
@@ -143,7 +92,7 @@ mod tests {
         let progress_called_clone = progress_called.clone();
 
         let uploaded_len = mock
-            .upload_file_and_delete(
+            .upload_file(
                 &file_path,
                 "remote_dir_1",
                 Box::new(move |uploaded, total, speed| {
@@ -159,8 +108,8 @@ mod tests {
         assert_eq!(uploaded_len, file_len);
         assert!(progress_called.load(Ordering::SeqCst));
         assert!(
-            !file_path.exists(),
-            "local file must be deleted upon confirmed upload"
+            file_path.exists(),
+            "local file must remain intact upon confirmed upload"
         );
 
         let uploads = mock.uploads.lock().await;
@@ -168,44 +117,6 @@ mod tests {
         assert_eq!(uploads[0], (file_path, "remote_dir_1".to_string()));
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_mock_backend_upload_text() {
-        let mock = MockUploadBackend::default();
-        mock.upload_text(
-            "remote_dir_2",
-            "metadata.jsonl",
-            "{\"event\":\"INITIAL_STATE\"}",
-        )
-        .await
-        .expect("upload_text should succeed");
-
-        let texts = mock.texts.lock().await;
-        assert_eq!(texts.len(), 1);
-        assert_eq!(
-            texts[0],
-            (
-                "remote_dir_2".to_string(),
-                "metadata.jsonl".to_string(),
-                "{\"event\":\"INITIAL_STATE\"}".to_string(),
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mock_backend_upload_text_error() {
-        let mock = MockUploadBackend::default();
-        mock.should_fail.store(true, Ordering::SeqCst);
-        let res = mock
-            .upload_text(
-                "remote_dir_2",
-                "metadata.jsonl",
-                "{\"event\":\"INITIAL_STATE\"}",
-            )
-            .await;
-        assert!(res.is_err());
-        assert!(mock.texts.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -220,7 +131,7 @@ mod tests {
         mock.should_fail.store(true, Ordering::SeqCst);
 
         let res = mock
-            .upload_file_and_delete(&file_path, "remote_dir_err", Box::new(|_, _, _| {}))
+            .upload_file(&file_path, "remote_dir_err", Box::new(|_, _, _| {}))
             .await;
 
         assert!(res.is_err(), "upload should fail when should_fail is true");

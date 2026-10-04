@@ -251,12 +251,12 @@ impl RecordingSession {
             if let Some(ref backend) = backend_opt {
                 let backend = backend.clone();
                 let remote_dir = session_folder_name.clone();
-                let initial_jsonl = initial_metadata_jsonl.clone();
+                let metadata_path = metadata_path.clone();
                 let event_tx_clone = event_tx.clone();
                 let channel_id_clone = channel_id.clone();
                 tokio::spawn(async move {
                     if let Err(e) = backend
-                        .upload_text(&remote_dir, "metadata.jsonl", &initial_jsonl)
+                        .upload_file(&metadata_path, &remote_dir, Box::new(|_, _, _| {}))
                         .await
                     {
                         let _ = event_tx_clone
@@ -418,6 +418,10 @@ impl RecordingSession {
                     {
                         chat_handle.abort();
                     }
+                    let _ = crate::uploader::unlink_local_file_with_retry(
+                        &session_dir.join("metadata.jsonl"),
+                    )
+                    .await;
                     custodian.mark_concluded(&session_dir);
                     let _ = custodian.try_purge(&session_dir).await;
                     let _ = event_tx
@@ -550,6 +554,7 @@ impl RecordingSession {
 
             // Collect lingering chunks on stream conclusion, cancellation, or low disk space
             dispatcher.seal_and_enqueue(&mut watcher, true).await;
+            let no_chunks_saved = watcher.enqueued_chunks().is_empty();
 
             session_cancel.cancel();
             let metadata_jsonl = registry
@@ -562,10 +567,12 @@ impl RecordingSession {
                     && let Some(ref backend) = backend_opt
                 {
                     match backend
-                        .upload_text(&session_folder_name, "metadata.jsonl", &metadata_jsonl)
+                        .upload_file(&metadata_path, &session_folder_name, Box::new(|_, _, _| {}))
                         .await
                     {
                         Ok(_) => {
+                            let _ =
+                                crate::uploader::unlink_local_file_with_retry(&metadata_path).await;
                             let _ = event_tx
                                 .send(AppEvent::Log(LogEntry::rec(format!(
                                     "Uploaded 'metadata.jsonl' for {channel_id}"
@@ -580,6 +587,8 @@ impl RecordingSession {
                                 .await;
                         }
                     }
+                } else if no_chunks_saved && backend_opt.is_none() {
+                    let _ = crate::uploader::unlink_local_file_with_retry(&metadata_path).await;
                 }
             };
 

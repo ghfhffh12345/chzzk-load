@@ -397,7 +397,7 @@ async fn test_real_ffmpeg_shutdown_cleanup() {
 }
 
 #[tokio::test]
-async fn test_upload_file_and_delete_with_transient_file_lock() {
+async fn test_upload_and_unlink_with_transient_file_lock() {
     if !ensure_rclone_available() {
         return;
     }
@@ -432,14 +432,17 @@ async fn test_upload_file_and_delete_with_transient_file_lock() {
     });
 
     let res = backend
-        .upload_file_and_delete(&chunk_path, "test_session", Box::new(|_, _, _| {}))
+        .upload_file(&chunk_path, "test_session", Box::new(|_, _, _| {}))
         .await;
 
     let res_err = res.as_ref().err().map(|e| e.to_string());
+    assert!(res.is_ok(), "upload_file should succeed: {:?}", res_err);
+
+    let unlink_res = chzzk_load::uploader::unlink_local_file_with_retry(&chunk_path).await;
     assert!(
-        res.is_ok(),
-        "upload_file_and_delete should tolerate transient file lock: {:?}",
-        res_err
+        unlink_res.is_ok(),
+        "unlink_local_file_with_retry should tolerate transient file lock: {:?}",
+        unlink_res.err()
     );
     assert!(
         !chunk_path.exists(),
