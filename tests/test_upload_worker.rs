@@ -678,10 +678,9 @@ async fn test_dlq_disk_aware_eviction_globally_evicts_oldest_first() {
         !(name == "chunk_0001.ts" && attempt >= 2)
     }));
 
-    // Provider returns 0.5 GB on first check (triggering eviction of chunk_0000),
-    // then 5.0 GB on subsequent checks (recovering, so chunk_0001 is spared).
-    let check_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let check_count_clone = check_count.clone();
+    // Injected disk space provider: returns 0.5 GB while path0_ts remains on disk (< 2.0 GB threshold),
+    // triggering eviction of chunk_0000, then 5.0 GB once chunk0 is evicted (recovering, so chunk_0001 is spared).
+    let path0_ts_check = path0_ts.clone();
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
     let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
@@ -692,10 +691,7 @@ async fn test_dlq_disk_aware_eviction_globally_evicts_oldest_first() {
         circuit_breaker_failures: 20,
         ..Default::default()
     }
-    .with_disk_space_provider(move |_path| {
-        let c = check_count_clone.fetch_add(1, Ordering::SeqCst);
-        if c == 0 { 0.5 } else { 5.0 }
-    });
+    .with_disk_space_provider(move |_path| if path0_ts_check.exists() { 0.5 } else { 5.0 });
 
     let worker_handle = UploadWorker::spawn_with_options(
         Some(backend.clone()),

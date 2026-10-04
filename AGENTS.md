@@ -8,6 +8,7 @@
 
 ```bash
 # Check, lint, and format (PowerShell / Bash compatible)
+cargo check --tests; cargo clippy --tests           # Fast test linter loop (<1s, catch style/import errors before test runs)
 cargo check --all-targets; cargo clippy --all-targets -- -D warnings; cargo fmt --check
 
 # Test suite (Tiered Fast Feedback)
@@ -17,7 +18,8 @@ cargo test --test test_engine_orchestrator_registry # Typed engine seam unit tes
 cargo test --test test_recorder_ffmpeg              # FfmpegSession unit tests (<1s)
 cargo test --test test_recorder_watcher             # FFmpeg watcher unit tests (<1s)
 cargo test --test test_tui_state                    # TUI state unit tests (<1s)
-cargo test --test test_engine_events <filter>       # Heavy async integration tests (20-25s)
+cargo test --test test_shutdown_cleanup             # Shutdown & cleanup tests (calibrate WaitMsBeforeAsync: 15000)
+cargo test --test test_engine_events <filter>       # Heavy async integration tests (20-25s; calibrate WaitMsBeforeAsync: 15000)
 cargo test                                          # Full test suite (final verification gate)
 node scripts/test-npm-packages.js                   # Node packaging and CLI launcher suite
 
@@ -79,12 +81,12 @@ cargo build --release
 - **Resilient Test Ports & Paths**: Use dynamic ephemeral port binding (`127.0.0.1:0`), never hardcoded ports. All test filesystem mutations must operate strictly within `std::env::temp_dir()`.
 
 ### 2.7. Testing & Fast-Feedback Discipline
-- **Tiered Test Execution**: Always run targeted unit and smoke tests first (`test_cli_smoke`, `test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, running in <1s) during tight TDD loops. Reserve heavy async integration suites (`test_engine_events`, taking 20–25s) and full `cargo test` for the final verification gate before commit.
+- **Tiered Test Execution**: Always run targeted unit and smoke tests first (`test_cli_smoke`, `test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, running in <1s) during tight TDD loops. Run `cargo check --tests; cargo clippy --tests` immediately after drafting test files to catch mechanical style and unused import issues in <1 second before launching multi-second test suites. Reserve heavy async integration suites (`test_engine_events`, taking 20–25s) and full `cargo test` for the final verification gate before commit.
 - **Subprocess Hermeticity**: Orchestrator, lifecycle, and chat integration tests (`test_engine_*`) must never spawn real FFmpeg against dummy network ports. Use `get_mock_ffmpeg_bin()` from `tests/common/mock_ffmpeg.rs` (which automatically sets `CHZZK_LOAD_FFMPEG_BIN` in the test process) or inject it explicitly via `.with_ffmpeg_bin(mock_bin.to_string_lossy())` to prevent process exit races and empty-directory cleanup bugs. Real FFmpeg subprocesses are reserved exclusively for `test_recorder_ffmpeg.rs` and `test_recorder_watcher.rs`.
 - **State Machine Invariant Coverage**: Every channel state transition guard, restriction condition, and cancellation behavior in `ChannelLifecycleRegistry` must have a dedicated zero-overhead unit test in `tests/test_channel_lifecycle_registry.rs`. Never rely exclusively on integration suites to catch lifecycle state regressions.
 - **Ephemeral Port & Directory Isolation**: Tests must never bind hardcoded network ports (use `127.0.0.1:0`) and must isolate all filesystem activity inside `std::env::temp_dir()`. Clean up directories upon test completion.
 - **Cross-Platform Shell Compatibility**: Write command snippets using semicolon statement separators `;` or separate lines rather than Bash-only `&&` operators to ensure compatibility with Windows PowerShell and POSIX shells.
-- **Pre-Commit Hook Calibration**: The repository enforces pre-commit hooks via git `core.hooksPath = .githooks` (`cargo fmt`, `cargo check`, `cargo clippy`, and the 6 fast unit test suites). When running `git commit` via `run_command`, calibrate with `WaitMsBeforeAsync: 20000` so the hook finishes synchronously without unexpected async backgrounding. Slower suites (`test_shutdown_cleanup`, `test_engine_events`) run only during `cargo test` as the full verification gate.
+- **Pre-Commit Hook & Command Calibration**: The repository enforces pre-commit hooks via git `core.hooksPath = .githooks` (`cargo fmt`, `cargo check`, `cargo clippy`, and the 6 fast unit test suites). When running `git commit` via `run_command`, calibrate with `WaitMsBeforeAsync: 20000` so the hook finishes synchronously without unexpected async backgrounding. Similarly, calibrate `WaitMsBeforeAsync: 15000` when executing heavy async integration suites (`test_engine_events`, `test_shutdown_cleanup`) to prevent premature backgrounding near the default 10,000ms threshold. Slower suites run only during `cargo test` as the full verification gate.
 
 ### 2.8. Tool Economy & Async Execution
 - **Reactive Yielding**: Stop calling tools and yield the turn immediately after launching background commands (`run_command`) or subagents (`invoke_subagent`) when no local work remains. Rely exclusively on reactive environment wakeup messages on task exit or subagent reply. Never poll or loop over `manage_task(Action='status')` or `manage_subagents(Action='list')`, and never set `schedule` timers on active background task IDs (`task-XXX`) since the system automatically notifies and wakes upon task completion.

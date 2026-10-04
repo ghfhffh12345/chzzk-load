@@ -15,6 +15,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Shared Subprocess Mocking**: Never invoke `rustc` or recompile dummy executables inline inside individual test bodies.
   - *Hard Violation*: Inline dummy process compilation or duplicate C-ABI `atexit` temporary directory handlers.
   - *Resolution*: Import and reuse the shared mock fixture via `mod common; use common::mock_ffmpeg::get_mock_ffmpeg_bin;`.
+- **Shared Asynchronous Test Listeners**: Encapsulate recurring background notification loops (such as `drain_notify` driving `SessionCustodian::try_purge_drained`) into reusable test helper functions rather than duplicating ad-hoc spawned loops across individual test cases.
+  - *Code Smell (Duplicated Code)*: Re-implementing identical background signal listeners (`tokio::spawn(async move { loop { notify.notified().await; ... } })`) across multiple integration tests.
+  - *Resolution*: Factor background signal listeners into a shared test helper (such as `spawn_drain_purge_listener(custodian, drain_notify)`) within the test file or `tests/common/`.
 - **Ephemeral Port & Path Isolation**: Tests must never bind hardcoded network ports (`127.0.0.1:0` only) and all filesystem mutations must operate strictly within `std::env::temp_dir()`.
 - **No Test-Convenience Forwarding Shims**: Top-level orchestrators (`EngineOrchestrator`) must expose only real public caller interfaces. Never add public static or instance forwarding shims (*Middle Man* smell) solely to facilitate tests of internal subsystems from external integration tests.
   - *Hard Violation*: Adding public static or instance pass-through shims on `EngineOrchestrator` (e.g. `process_sealed_chunk`, `seal_and_enqueue_chunks`) to test internal subsystem logic from outer integration tests.
