@@ -25,7 +25,7 @@ pub use cleanup::{
 };
 pub use dispatcher::{process_sealed_chunk, seal_and_enqueue_chunks};
 pub use reconciliation::{ReconciliationReport, reconcile_orphaned_sessions};
-pub use recording::RecordingSession;
+pub use recording::{RecordingSession, RecordingSessionParams};
 pub use registry::{
     ChannelLifecycleKind, ChannelLifecycleRegistry, ChannelLifecycleState, PollAction,
     RestrictionReason,

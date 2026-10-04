@@ -18,6 +18,123 @@ use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{UploadBackend, UploadTask, broadcast_identifier};
 
+/// Parameters required to spawn a `RecordingSession`.
+#[derive(Clone)]
+pub struct RecordingSessionParams {
+    pub channel_id: String,
+    pub info: LiveStreamInfo,
+    pub upload_tx: Sender<UploadTask>,
+    pub settings: Settings,
+    pub backend: Option<Arc<dyn UploadBackend>>,
+    pub chzzk: Arc<dyn LiveStreamSource>,
+    pub event_tx: Sender<AppEvent>,
+    pub registry: ChannelLifecycleRegistry,
+    pub cancel_token: CancellationToken,
+    pub ffmpeg_bin: Option<String>,
+}
+
+/// Internal helper capturing ambient session context to dispatch sealed chunks
+/// to the upload queue and emit telemetry events.
+#[allow(dead_code)]
+#[derive(Clone)]
+pub(crate) struct SessionChunkDispatcher {
+    pub(crate) session_folder: String,
+    pub(crate) channel_id: String,
+    pub(crate) streamer_name: String,
+    pub(crate) upload_tx: Sender<UploadTask>,
+    pub(crate) event_tx: Sender<AppEvent>,
+    pub(crate) backend_active: bool,
+}
+
+#[allow(dead_code)]
+impl SessionChunkDispatcher {
+    pub(crate) fn new(
+        session_folder: String,
+        channel_id: String,
+        streamer_name: String,
+        upload_tx: Sender<UploadTask>,
+        event_tx: Sender<AppEvent>,
+        backend_active: bool,
+    ) -> Self {
+        Self {
+            session_folder,
+            channel_id,
+            streamer_name,
+            upload_tx,
+            event_tx,
+            backend_active,
+        }
+    }
+
+    /// Processes a single sealed chunk: emits `ChunkSealed` event, and forwards it to the upload queue
+    /// or logs that it has been saved locally.
+    pub(crate) async fn process_sealed_chunk(&self, chunk_path: &Path) {
+        if let Some(chunk_name) = chunk_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+        {
+            let size = tokio::fs::metadata(chunk_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            let _ = self
+                .event_tx
+                .send(AppEvent::ChunkSealed {
+                    chunk_name: chunk_name.to_string(),
+                    size_bytes: size,
+                })
+                .await;
+
+            let target = broadcast_identifier(&self.streamer_name, &self.channel_id);
+
+            if self.backend_active {
+                let send_res = self
+                    .upload_tx
+                    .send(UploadTask {
+                        channel_id: self.channel_id.clone(),
+                        session_folder_id: self.session_folder.clone(),
+                        remote_dir: self.session_folder.clone(),
+                        chunk_path: chunk_path.to_path_buf(),
+                        chunk_name: chunk_name.to_string(),
+                        streamer_name: self.streamer_name.clone(),
+                    })
+                    .await;
+
+                if send_res.is_ok() {
+                    let _ = self
+                        .event_tx
+                        .send(AppEvent::Log(LogEntry::rec(format!(
+                            "[{target}] {chunk_name} sealed. Pushed to cloud upload queue."
+                        ))))
+                        .await;
+                } else {
+                    let _ = self
+                        .event_tx
+                        .send(AppEvent::Log(LogEntry::rec(format!(
+                            "[{target}] {chunk_name} sealed (saved locally)."
+                        ))))
+                        .await;
+                }
+            } else {
+                let _ = self
+                    .event_tx
+                    .send(AppEvent::Log(LogEntry::rec(format!(
+                        "[{target}] {chunk_name} sealed (saved locally)."
+                    ))))
+                    .await;
+            }
+        }
+    }
+
+    /// Detects newly sealed chunks using `SegmentWatcher` and dispatches each to the upload queue.
+    pub(crate) async fn seal_and_enqueue(&self, watcher: &mut SegmentWatcher, is_finished: bool) {
+        let sealed_chunks = watcher.detect_sealed(is_finished);
+        for chunk_path in sealed_chunks {
+            self.process_sealed_chunk(&chunk_path).await;
+        }
+    }
+}
+
 /// Executes the complete lifecycle of a single recording session for a live channel.
 pub struct RecordingSession;
 
@@ -518,5 +635,269 @@ impl RecordingSession {
                     .await;
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn test_session_chunk_dispatcher_no_backend_saves_locally() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_scd_no_backend_{}", rand::random::<u32>()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let chunk_path = temp_dir.join("chunk_0000.ts");
+        fs::write(&chunk_path, b"dummy video bytes").unwrap();
+
+        let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+        let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+
+        let dispatcher = SessionChunkDispatcher::new(
+            "Streamer - Title".to_string(),
+            "chan_local".to_string(),
+            "Streamer".to_string(),
+            upload_tx,
+            event_tx,
+            false,
+        );
+
+        dispatcher.process_sealed_chunk(&chunk_path).await;
+
+        assert!(upload_rx.try_recv().is_err());
+
+        let mut got_chunk_sealed = false;
+        let mut got_saved_locally_log = false;
+
+        while let Ok(ev) = event_rx.try_recv() {
+            match ev {
+                AppEvent::ChunkSealed {
+                    chunk_name,
+                    size_bytes,
+                } => {
+                    assert_eq!(chunk_name, "chunk_0000.ts");
+                    assert_eq!(size_bytes, 17);
+                    got_chunk_sealed = true;
+                }
+                AppEvent::Log(msg)
+                    if msg == "[REC] [Streamer] chunk_0000.ts sealed (saved locally)." =>
+                {
+                    got_saved_locally_log = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(got_chunk_sealed);
+        assert!(got_saved_locally_log);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_session_chunk_dispatcher_backend_active_pushes_task() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_scd_active_{}", rand::random::<u32>()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let chunk_path = temp_dir.join("chunk_0001.ts");
+        fs::write(&chunk_path, b"test chunk content").unwrap();
+
+        let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+        let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+
+        let dispatcher = SessionChunkDispatcher::new(
+            "Subfolder".to_string(),
+            "chan_sub".to_string(),
+            "StreamerSub".to_string(),
+            upload_tx,
+            event_tx,
+            true,
+        );
+
+        dispatcher.process_sealed_chunk(&chunk_path).await;
+
+        let task = upload_rx.recv().await.expect("Expected UploadTask");
+        assert_eq!(task.remote_dir, "Subfolder");
+        assert_eq!(task.session_folder_id, "Subfolder");
+        assert_eq!(task.chunk_name, "chunk_0001.ts");
+        assert_eq!(task.channel_id, "chan_sub");
+        assert_eq!(task.streamer_name, "StreamerSub");
+
+        let mut got_pushed_log = false;
+        while let Ok(ev) = event_rx.try_recv() {
+            if let AppEvent::Log(msg) = ev
+                && msg == "[REC] [StreamerSub] chunk_0001.ts sealed. Pushed to cloud upload queue."
+            {
+                got_pushed_log = true;
+            }
+        }
+
+        assert!(got_pushed_log);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_session_chunk_dispatcher_upload_channel_closed_saves_locally() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_scd_closed_{}", rand::random::<u32>()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let chunk_path = temp_dir.join("chunk_0002.ts");
+        fs::write(&chunk_path, b"test video data").unwrap();
+
+        let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+        let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+        drop(upload_rx);
+
+        let dispatcher = SessionChunkDispatcher::new(
+            "Subfolder".to_string(),
+            "chan_fail_test".to_string(),
+            "StreamerFail".to_string(),
+            upload_tx,
+            event_tx,
+            true,
+        );
+
+        dispatcher.process_sealed_chunk(&chunk_path).await;
+
+        let mut got_saved_locally_log = false;
+        while let Ok(ev) = event_rx.try_recv() {
+            if let AppEvent::Log(msg) = ev
+                && msg == "[REC] [StreamerFail] chunk_0002.ts sealed (saved locally)."
+            {
+                got_saved_locally_log = true;
+            }
+        }
+
+        assert!(got_saved_locally_log);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_session_chunk_dispatcher_existing_folder_id_skips_retry() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_scd_existing_{}", rand::random::<u32>()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let chunk_path = temp_dir.join("chunk_0003.ts");
+        fs::write(&chunk_path, b"another chunk data").unwrap();
+
+        let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
+        let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+
+        let dispatcher = SessionChunkDispatcher::new(
+            "Subfolder".to_string(),
+            "chan_exist".to_string(),
+            "StreamerExist".to_string(),
+            upload_tx,
+            event_tx,
+            true,
+        );
+
+        dispatcher.process_sealed_chunk(&chunk_path).await;
+
+        let task = upload_rx.recv().await.expect("Expected UploadTask");
+        assert_eq!(task.remote_dir, "Subfolder");
+        assert_eq!(task.session_folder_id, "Subfolder");
+        assert_eq!(task.chunk_name, "chunk_0003.ts");
+
+        let mut got_pushed_log = false;
+        while let Ok(ev) = event_rx.try_recv() {
+            if let AppEvent::Log(msg) = ev
+                && msg
+                    == "[REC] [StreamerExist] chunk_0003.ts sealed. Pushed to cloud upload queue."
+            {
+                got_pushed_log = true;
+            }
+        }
+        assert!(got_pushed_log);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_session_chunk_dispatcher_seal_and_enqueue_with_watcher() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_scd_watcher_{}", rand::random::<u32>()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let chunk0 = temp_dir.join("chunk_0000.ts");
+        let chunk1 = temp_dir.join("chunk_0001.ts");
+        fs::write(&chunk0, b"first chunk").unwrap();
+        fs::write(&chunk1, b"second chunk").unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
+        let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+
+        let dispatcher = SessionChunkDispatcher::new(
+            "SessionWatcherFolder".to_string(),
+            "chan_watcher".to_string(),
+            "StreamerWatcher".to_string(),
+            upload_tx,
+            event_tx,
+            true,
+        );
+
+        let mut watcher = SegmentWatcher::new(temp_dir.clone());
+
+        // When not finished, chunk_0000.ts is sealed because chunk_0001.ts exists
+        dispatcher.seal_and_enqueue(&mut watcher, false).await;
+        let task0 = upload_rx.recv().await.expect("Expected chunk_0000 task");
+        assert_eq!(task0.chunk_name, "chunk_0000.ts");
+        assert!(upload_rx.try_recv().is_err());
+
+        // When finished, remaining chunk_0001.ts is sealed
+        dispatcher.seal_and_enqueue(&mut watcher, true).await;
+        let task1 = upload_rx.recv().await.expect("Expected chunk_0001 task");
+        assert_eq!(task1.chunk_name, "chunk_0001.ts");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_recording_session_params_construction() {
+        use crate::chzzk::models_metadata::StreamMetadataState;
+        use crate::chzzk::source::MockLiveStreamSource;
+
+        let (upload_tx, _upload_rx) = mpsc::channel(1);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let registry = ChannelLifecycleRegistry::new();
+        let cancel_token = CancellationToken::new();
+        let settings = Settings::default();
+        let chzzk = Arc::new(MockLiveStreamSource::new());
+
+        let info = LiveStreamInfo {
+            channel_id: "test_chan".to_string(),
+            live_id: Some(12345),
+            streamer_name: "TestStreamer".to_string(),
+            title: "TestTitle".to_string(),
+            hls_url: "https://example.com/live.m3u8".to_string(),
+            chat_channel_id: Some("chat_123".to_string()),
+            metadata: StreamMetadataState::default(),
+        };
+
+        let params = RecordingSessionParams {
+            channel_id: "test_chan".to_string(),
+            info: info.clone(),
+            upload_tx,
+            settings,
+            backend: None,
+            chzzk,
+            event_tx,
+            registry,
+            cancel_token,
+            ffmpeg_bin: Some("custom-ffmpeg".to_string()),
+        };
+
+        assert_eq!(params.channel_id, "test_chan");
+        assert_eq!(params.info.live_id, Some(12345));
+        assert_eq!(params.ffmpeg_bin.as_deref(), Some("custom-ffmpeg"));
+        assert!(params.backend.is_none());
     }
 }
