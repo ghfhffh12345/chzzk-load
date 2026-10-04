@@ -138,12 +138,14 @@ impl EngineOrchestrator {
         self.ffmpeg_bin.as_deref()
     }
 
-    pub fn custodian(&self) -> &Arc<SessionCustodian> {
-        &self.custodian
+    pub fn with_custodian(mut self, custodian: Arc<SessionCustodian>) -> Self {
+        self.custodian = custodian;
+        self
     }
 
-    pub fn drain_notify(&self) -> &Arc<tokio::sync::Notify> {
-        &self.drain_notify
+    pub fn with_drain_notify(mut self, drain_notify: Arc<tokio::sync::Notify>) -> Self {
+        self.drain_notify = drain_notify;
+        self
     }
 
     pub fn cancel(&self) {

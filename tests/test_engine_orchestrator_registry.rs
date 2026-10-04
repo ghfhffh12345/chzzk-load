@@ -6,10 +6,11 @@ use tokio::sync::mpsc;
 use chzzk_load::chzzk::models::{LiveDetail, LiveStreamInfo};
 use chzzk_load::chzzk::source::MockLiveStreamSource;
 use chzzk_load::config::{ChannelConfig, GeneralConfig, Settings};
-use chzzk_load::engine::{ChannelLifecycleState, EngineOrchestrator};
+use chzzk_load::engine::{ChannelLifecycleState, EngineOrchestrator, SessionCustodian};
 use chzzk_load::tui::event::AppEvent;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 use common::mock_source::{make_close_detail, make_open_detail, make_restricted_detail};
+use common::observability::{assert_log_emitted, assert_log_emitted_timeout};
 
 #[tokio::test]
 async fn test_orchestrator_typed_query_seam_idle() {
@@ -276,15 +277,7 @@ async fn test_orchestrator_handles_api_restricted_stream_via_registry() {
     ));
 
     // Verify error log was emitted
-    let mut got_error_log = false;
-    while let Ok(event) = event_rx.try_recv() {
-        if let AppEvent::Log(entry) = event {
-            if entry.message.contains("19+ age-restricted") {
-                got_error_log = true;
-            }
-        }
-    }
-    assert!(got_error_log, "Must log 19+ age restriction error");
+    assert_log_emitted(&mut event_rx, "19+ age-restricted");
 
     // Poll 2: Offline resets to Idle
     orchestrator.poll_channels_once(&upload_tx).await;
@@ -725,15 +718,7 @@ async fn test_orchestrator_polling_restricted_stream_with_fake_source() {
     assert_eq!(mock.call_count("chan_restricted"), 1);
 
     // Verify warning log emitted
-    let mut saw_log = false;
-    while let Ok(event) = event_rx.try_recv() {
-        if let AppEvent::Log(entry) = event {
-            if entry.message.contains("19+ age-restricted") {
-                saw_log = true;
-            }
-        }
-    }
-    assert!(saw_log);
+    assert_log_emitted(&mut event_rx, "19+ age-restricted");
 
     // Poll 2: Stream goes offline (Close) -> transitions back to Idle
     mock.set_channel_state(
@@ -781,15 +766,7 @@ async fn test_orchestrator_polling_error_handling_with_fake_source() {
     assert_eq!(mock.call_count("chan_err"), 1);
 
     // Verify warning log for polling failure
-    let mut saw_warn = false;
-    while let Ok(event) = event_rx.try_recv() {
-        if let AppEvent::Log(entry) = event {
-            if entry.message.contains("Polling failed for chan_err") {
-                saw_warn = true;
-            }
-        }
-    }
-    assert!(saw_warn, "Must log warning when polling fails");
+    assert_log_emitted(&mut event_rx, "Polling failed for chan_err");
 
     // Clear error and verify recovery
     mock.clear_channel_error("chan_err");
@@ -993,16 +970,7 @@ async fn test_orchestrator_polling_cooldown_evaluation_with_fake_source() {
     assert_eq!(mock.call_count("chan_cd"), 1);
 
     // Verify InCooldown AppEvent::Log was emitted
-    let mut saw_cooldown_log = false;
-    while let Ok(event) = event_rx.try_recv() {
-        if let AppEvent::Log(entry) = event {
-            if entry.message.contains("Waiting for API cache to close") {
-                saw_cooldown_log = true;
-                break;
-            }
-        }
-    }
-    assert!(saw_cooldown_log, "Must log cooldown waiting message");
+    assert_log_emitted(&mut event_rx, "Waiting for API cache to close");
 
     // Enqueue a new stream with a DIFFERENT live_id -> Cooldown should be bypassed and start recording immediately
     let new_stream = LiveDetail::Open(LiveStreamInfo {
@@ -1100,12 +1068,17 @@ async fn test_orchestrator_drain_notify_triggers_custodian_purge_in_select_loop(
     let chzzk = Arc::new(MockLiveStreamSource::new());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
 
-    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+    let drain_notify = Arc::new(tokio::sync::Notify::new());
+    let custodian = Arc::new(SessionCustodian::new(event_tx.clone()));
+
+    let orchestrator = Arc::new(
+        EngineOrchestrator::new(settings, chzzk, None, event_tx)
+            .with_drain_notify(drain_notify.clone())
+            .with_custodian(custodian.clone()),
+    );
 
     // Register session as draining in the orchestrator's custodian
-    orchestrator
-        .custodian()
-        .register_draining(&session_dir, "chan_drain", "StreamerDrain");
+    custodian.register_draining(&session_dir, "chan_drain", "StreamerDrain");
 
     let orch_clone = orchestrator.clone();
     let run_handle = tokio::spawn(async move {
@@ -1114,41 +1087,19 @@ async fn test_orchestrator_drain_notify_triggers_custodian_purge_in_select_loop(
 
     // Verify session directory exists initially and is tracked as draining
     assert!(session_dir.exists());
-    assert!(
-        orchestrator
-            .custodian()
-            .tracked_state(&session_dir)
-            .is_some()
-    );
+    assert!(custodian.tracked_state(&session_dir).is_some());
 
     // Signal drain_notify to wake the orchestrator's select loop immediately
-    orchestrator.drain_notify().notify_one();
+    drain_notify.notify_one();
 
     // Verify that the select loop wakes and immediately purges the drained directory
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-    let mut purged = false;
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv()).await {
-            Ok(Some(AppEvent::Log(entry)))
-                if entry.message.contains("Cleaned up empty session folder") =>
-            {
-                purged = true;
-                break;
-            }
-            Ok(Some(_)) => continue,
-            _ => break,
-        }
-    }
-    assert!(
-        purged,
-        "drain_notify signal must trigger immediate custodian purge in the orchestrator select loop"
-    );
-    assert!(
-        orchestrator
-            .custodian()
-            .tracked_state(&session_dir)
-            .is_none()
-    );
+    assert_log_emitted_timeout(
+        &mut event_rx,
+        "Cleaned up empty session folder",
+        std::time::Duration::from_secs(3),
+    )
+    .await;
+    assert!(custodian.tracked_state(&session_dir).is_none());
     assert!(!session_dir.exists());
 
     orchestrator.cancel();
@@ -1183,12 +1134,13 @@ async fn test_orchestrator_shutdown_purges_custodian_draining_directories() {
 
     let chzzk = Arc::new(MockLiveStreamSource::new());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let custodian = Arc::new(SessionCustodian::new(event_tx.clone()));
 
-    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::new(settings, chzzk, None, event_tx).with_custodian(custodian.clone()),
+    );
 
-    orchestrator
-        .custodian()
-        .register_draining(&session_dir, "chan_shut", "StreamerShut");
+    custodian.register_draining(&session_dir, "chan_shut", "StreamerShut");
 
     let orch_clone = orchestrator.clone();
     let run_handle = tokio::spawn(async move {
@@ -1206,10 +1158,7 @@ async fn test_orchestrator_shutdown_purges_custodian_draining_directories() {
 
     // Shutdown barrier must have purged the draining directory via custodian
     assert!(
-        orchestrator
-            .custodian()
-            .tracked_state(&session_dir)
-            .is_none(),
+        custodian.tracked_state(&session_dir).is_none(),
         "Shutdown barrier must purge draining directories from custodian"
     );
     assert!(

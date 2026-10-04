@@ -15,6 +15,7 @@ use chzzk_load::uploader::UploadBackend;
 mod common;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 use common::mock_source::make_open_detail;
+use common::observability::assert_log_emitted;
 
 fn ensure_rclone_available() -> bool {
     let bin = std::env::var("CHZZK_LOAD_RCLONE_BIN").unwrap_or_else(|_| "rclone".to_string());
@@ -176,19 +177,7 @@ async fn test_graceful_shutdown_cleans_session_folder_with_metadata_and_last_chu
         session_dir.display()
     );
 
-    let mut got_clean_log = false;
-    while let Ok(ev) = event_rx.try_recv() {
-        if let AppEvent::Log(entry) = ev {
-            if entry.message.contains("Cleaned up empty session folder") {
-                got_clean_log = true;
-                break;
-            }
-        }
-    }
-    assert!(
-        got_clean_log,
-        "Expected custodian log message indicating session folder cleanup upon shutdown"
-    );
+    assert_log_emitted(&mut event_rx, "Cleaned up empty session folder");
 
     let _ = fs::remove_dir_all(&session_dir);
     let _ = fs::remove_dir_all(&temp_dir);

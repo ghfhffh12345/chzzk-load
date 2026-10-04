@@ -107,3 +107,70 @@ pub fn unwrap_with_logs<T, E: std::fmt::Debug>(
         }
     }
 }
+
+fn process_event_for_match(
+    event: &AppEvent,
+    expected_substr: &str,
+    captured: &mut Vec<String>,
+) -> bool {
+    match event {
+        AppEvent::Log(entry) => {
+            captured.push(entry.to_string());
+            entry.contains(expected_substr)
+        }
+        other => {
+            captured.push(format!("<non-log event: {:?}>", other));
+            false
+        }
+    }
+}
+
+/// Non-blockingly drains events from `rx` and asserts that at least one log entry
+/// contains `expected_substr`. If not found, panics with an informative message
+/// formatting all drained logs.
+pub fn assert_log_emitted(rx: &mut mpsc::Receiver<AppEvent>, expected_substr: &str) {
+    let mut captured = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if process_event_for_match(&event, expected_substr, &mut captured) {
+            return;
+        }
+    }
+    panic!(
+        "Expected log containing '{}', but not found. {}",
+        expected_substr,
+        format_captured_logs(&captured)
+    );
+}
+
+/// Awaits events from `rx` until a log entry matching `expected_substr` is received,
+/// or `timeout` expires. If not found, panics with an informative message formatting all captured logs.
+pub async fn assert_log_emitted_timeout(
+    rx: &mut mpsc::Receiver<AppEvent>,
+    expected_substr: &str,
+    timeout: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut captured = Vec::new();
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline - now;
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(event)) => {
+                if process_event_for_match(&event, expected_substr, &mut captured) {
+                    return;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    panic!(
+        "Timed out waiting for log containing '{}' (timeout: {:?}). {}",
+        expected_substr,
+        timeout,
+        format_captured_logs(&captured)
+    );
+}

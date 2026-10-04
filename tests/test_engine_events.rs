@@ -9,7 +9,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
-use common::observability::{TestLogRecorder, assert_with_logs, expect_with_logs};
+use common::observability::{
+    TestLogRecorder, assert_log_emitted, assert_log_emitted_timeout, assert_with_logs,
+    expect_with_logs,
+};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -655,15 +658,7 @@ async fn test_engine_orchestrator_graceful_shutdown() {
     let res = tokio::time::timeout(std::time::Duration::from_secs(3), run_handle).await;
     assert!(res.is_ok(), "Engine did not shut down within timeout");
 
-    let mut got_shutdown_log = false;
-    while let Ok(ev) = event_rx.try_recv() {
-        if let AppEvent::Log(msg) = ev
-            && msg.contains("Engine graceful shutdown complete.")
-        {
-            got_shutdown_log = true;
-        }
-    }
-    assert!(got_shutdown_log, "Expected shutdown completion log");
+    assert_log_emitted(&mut event_rx, "Engine graceful shutdown complete.");
 }
 
 #[tokio::test]
@@ -1185,16 +1180,7 @@ async fn test_engine_orchestrator_stream_title_change_before_folder_creation() {
     assert_eq!(session.current_title, "Early Title 2? Pending?");
     assert_eq!(session.metadata_history.len(), 2);
 
-    let mut got_title_change_log = false;
-    while let Ok(ev) = event_rx.try_recv() {
-        if let AppEvent::Log(msg) = ev
-            && msg.contains("chan_pre")
-            && msg.contains("Stream metadata changed")
-        {
-            got_title_change_log = true;
-        }
-    }
-    assert!(got_title_change_log, "Expected metadata change log message");
+    assert_log_emitted(&mut event_rx, "[chan_pre] Stream metadata changed");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -1397,19 +1383,7 @@ async fn test_engine_orchestrator_graceful_shutdown_cleans_empty_session_dirs() 
         "Non-empty session directory must be preserved"
     );
 
-    let mut got_clean_log = false;
-    while let Ok(ev) = event_rx.try_recv() {
-        if let AppEvent::Log(msg) = ev
-            && msg.contains("Cleaned up")
-            && msg.contains("empty session folder")
-        {
-            got_clean_log = true;
-        }
-    }
-    assert!(
-        got_clean_log,
-        "Expected log message indicating cleanup of empty session folder"
-    );
+    assert_log_emitted(&mut event_rx, "empty session folder");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2675,17 +2649,12 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
         .await
         .unwrap();
 
-    let mut got_clean_log = false;
-    while let Ok(Some(ev)) =
-        tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv()).await
-    {
-        if let AppEvent::Log(entry) = ev
-            && entry.message.contains("Cleaned up empty session folder")
-        {
-            got_clean_log = true;
-            break;
-        }
-    }
+    assert_log_emitted_timeout(
+        &mut event_rx,
+        "Cleaned up empty session folder",
+        std::time::Duration::from_secs(5),
+    )
+    .await;
 
     let _ = purge_task.await;
 
@@ -2696,10 +2665,6 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
     assert!(
         !session_dir.exists(),
         "Empty stream session folder must be deleted after broadcast ends and all cleanup tasks are finished"
-    );
-    assert!(
-        got_clean_log,
-        "Expected log message indicating session folder cleanup"
     );
 
     let uploads = mock_backend.uploads.lock().await;
@@ -2789,20 +2754,7 @@ async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_e
         "Empty session directory must be deleted after stream ends during normal polling"
     );
 
-    let mut got_clean_log = false;
-    while let Ok(ev) = event_rx.try_recv() {
-        if let AppEvent::Log(entry) = ev
-            && entry.message.contains("Cleaned up")
-            && entry.message.contains("empty session folder")
-        {
-            got_clean_log = true;
-            break;
-        }
-    }
-    assert!(
-        got_clean_log,
-        "Expected clean log message for deleted empty session folder"
-    );
+    assert_log_emitted(&mut event_rx, "empty session folder");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
