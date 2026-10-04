@@ -16,6 +16,10 @@ _Avoid_: Broadcast, job, stream recorder
 The state machine coordinator that manages channel transitions, cooldown windows, access restrictions, and cancellation tokens behind a single atomic lock.
 _Avoid_: Engine state, channel manager, session store
 
+**Session Custodian**:
+The lifecycle coordinator that tracks recording session directories across active capture and draining phases, safely purging empty or quiescent session folders once in-flight chunk uploads complete.
+_Avoid_: Folder cleaner, directory manager, session cleaner, purge service
+
 **Cooldown Window**:
 A grace period following broadcast conclusion that prevents redundant recording sessions during Chzzk CDN API cache expiration delays.
 _Avoid_: Sleep, pause, debounce delay

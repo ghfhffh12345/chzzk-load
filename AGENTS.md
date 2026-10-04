@@ -59,6 +59,7 @@ cargo build --release
   - `src/engine/recording.rs`: Per-stream `RecordingSession` subprocess and chunk lifecycle.
   - `src/engine/session.rs`: Active recording session state, metadata history, and folder naming.
   - `src/engine/registry.rs`: Atomic lifecycle state machine (`ChannelLifecycleRegistry`).
+  - `src/engine/custodian.rs`: Lifecycle coordinator for recording session directory tracking and safe quiescence-based purging (`SessionCustodian`).
   - `src/engine/cleanup.rs`: Session directory retention and empty-folder purge.
   - `src/engine/reconciliation.rs`: Startup crash recovery and orphaned chunk reconciliation.
 - **Anti-Race Cooldown**: Deduplicate CDN cache TTL (10–30s) using finished `live_id`s and post-recording cooldown.
