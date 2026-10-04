@@ -1072,3 +1072,150 @@ async fn test_orchestrator_inherits_mock_ffmpeg_bin_from_environment_without_exp
     orchestrator.cancel();
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_orchestrator_drain_notify_triggers_custodian_purge_in_select_loop() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_drain_notify_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let session_dir = temp_dir.join("2026-10-04_120000 StreamerDrain - Drain Stream");
+    let _ = std::fs::create_dir_all(&session_dir);
+    // Write metadata.jsonl so it represents a concluded session that is eligible for purge
+    let _ = std::fs::write(
+        session_dir.join("metadata.jsonl"),
+        b"{\"title\":\"test\"}\n",
+    );
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60, // Long poll interval so test doesn't rely on timer polling
+            ..Default::default()
+        },
+        channels: vec![],
+        ..Default::default()
+    };
+
+    let chzzk = Arc::new(MockLiveStreamSource::new());
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+
+    // Register session as draining in the orchestrator's custodian
+    orchestrator
+        .custodian()
+        .register_draining(&session_dir, "chan_drain", "StreamerDrain");
+
+    let orch_clone = orchestrator.clone();
+    let run_handle = tokio::spawn(async move {
+        orch_clone.run().await;
+    });
+
+    // Verify session directory exists initially and is tracked as draining
+    assert!(session_dir.exists());
+    assert!(
+        orchestrator
+            .custodian()
+            .tracked_state(&session_dir)
+            .is_some()
+    );
+
+    // Signal drain_notify to wake the orchestrator's select loop immediately
+    orchestrator.drain_notify().notify_one();
+
+    // Verify that the select loop wakes and immediately purges the drained directory
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut purged = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv()).await {
+            Ok(Some(AppEvent::Log(entry)))
+                if entry.message.contains("Cleaned up empty session folder") =>
+            {
+                purged = true;
+                break;
+            }
+            Ok(Some(_)) => continue,
+            _ => break,
+        }
+    }
+    assert!(
+        purged,
+        "drain_notify signal must trigger immediate custodian purge in the orchestrator select loop"
+    );
+    assert!(
+        orchestrator
+            .custodian()
+            .tracked_state(&session_dir)
+            .is_none()
+    );
+    assert!(!session_dir.exists());
+
+    orchestrator.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), run_handle).await;
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_shutdown_purges_custodian_draining_directories() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_orch_shutdown_purge_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let session_dir = temp_dir.join("2026-10-04_120000 StreamerShut - Shut Stream");
+    let _ = std::fs::create_dir_all(&session_dir);
+    let _ = std::fs::write(
+        session_dir.join("metadata.jsonl"),
+        b"{\"title\":\"shut\"}\n",
+    );
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![],
+        ..Default::default()
+    };
+
+    let chzzk = Arc::new(MockLiveStreamSource::new());
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+
+    orchestrator
+        .custodian()
+        .register_draining(&session_dir, "chan_shut", "StreamerShut");
+
+    let orch_clone = orchestrator.clone();
+    let run_handle = tokio::spawn(async move {
+        orch_clone.run().await;
+    });
+
+    // Trigger graceful shutdown
+    orchestrator.cancel();
+
+    let shutdown_res = tokio::time::timeout(std::time::Duration::from_secs(5), run_handle).await;
+    assert!(
+        shutdown_res.is_ok(),
+        "Orchestrator run loop must exit cleanly on shutdown"
+    );
+
+    // Shutdown barrier must have purged the draining directory via custodian
+    assert!(
+        orchestrator
+            .custodian()
+            .tracked_state(&session_dir)
+            .is_none(),
+        "Shutdown barrier must purge draining directories from custodian"
+    );
+    assert!(
+        !session_dir.exists(),
+        "Draining session folder must be unlinked upon graceful shutdown"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

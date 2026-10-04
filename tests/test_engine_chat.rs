@@ -687,6 +687,7 @@ async fn test_recording_session_resolves_chat_token_and_ws_url_from_source() {
         registry,
         cancel_token: cancel_token.clone(),
         ffmpeg_bin: Some(get_mock_ffmpeg_bin().to_string_lossy().to_string()),
+        custodian: Arc::new(chzzk_load::engine::SessionCustodian::without_events()),
     };
 
     let session_handle = RecordingSession::spawn(params);

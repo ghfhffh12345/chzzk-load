@@ -10,6 +10,7 @@ use crate::chzzk::chat::ChzzkChatClient;
 use crate::chzzk::models::LiveStreamInfo;
 use crate::chzzk::source::LiveStreamSource;
 use crate::config::Settings;
+use crate::engine::SessionCustodian;
 use crate::engine::registry::{ChannelLifecycleRegistry, RestrictionReason};
 use crate::engine::session::ActiveSessionState;
 use crate::recorder::ffmpeg::{FfmpegEvent, FfmpegExit, FfmpegSession};
@@ -30,6 +31,7 @@ pub struct RecordingSessionParams {
     pub registry: ChannelLifecycleRegistry,
     pub cancel_token: CancellationToken,
     pub ffmpeg_bin: Option<String>,
+    pub custodian: Arc<SessionCustodian>,
 }
 
 /// Internal helper capturing ambient session context to dispatch sealed chunks
@@ -133,10 +135,24 @@ impl SessionChunkDispatcher {
 }
 
 /// Executes the complete lifecycle of a single recording session for a live channel.
-pub struct RecordingSession;
+pub struct RecordingSession {
+    params: RecordingSessionParams,
+}
 
 impl RecordingSession {
+    pub fn new(params: RecordingSessionParams) -> Self {
+        Self { params }
+    }
+
+    pub fn custodian(&self) -> &Arc<SessionCustodian> {
+        &self.params.custodian
+    }
+
     pub fn spawn(params: RecordingSessionParams) -> tokio::task::JoinHandle<()> {
+        Self::new(params).run()
+    }
+
+    pub fn run(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let RecordingSessionParams {
                 channel_id,
@@ -149,7 +165,8 @@ impl RecordingSession {
                 registry,
                 cancel_token,
                 ffmpeg_bin,
-            } = params;
+                custodian,
+            } = self.params;
 
             let _ = event_tx
                 .send(AppEvent::RecordingStarted {
@@ -205,6 +222,7 @@ impl RecordingSession {
 
             let recordings_base = resolve_path(Path::new(&settings.general.recordings_dir));
             let session_dir = recordings_base.join(&session_folder_name);
+            custodian.register_active(&session_dir, &channel_id, &info.streamer_name);
 
             if let Err(e) = tokio::fs::create_dir_all(&session_dir).await {
                 let _ = event_tx
@@ -215,6 +233,8 @@ impl RecordingSession {
                     ))))
                     .await;
                 registry.reset_to_idle(&channel_id);
+                custodian.mark_concluded(&session_dir);
+                let _ = custodian.try_purge(&session_dir).await;
                 let _ = event_tx
                     .send(AppEvent::RecordingEnded {
                         channel_id: channel_id.clone(),
@@ -402,12 +422,8 @@ impl RecordingSession {
                     {
                         chat_handle.abort();
                     }
-                    if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
-                        while let Ok(Some(entry)) = rd.next_entry().await {
-                            let _ = tokio::fs::remove_file(entry.path()).await;
-                        }
-                    }
-                    let _ = tokio::fs::remove_dir(&session_dir).await;
+                    custodian.mark_concluded(&session_dir);
+                    let _ = custodian.try_purge(&session_dir).await;
                     let _ = event_tx
                         .send(AppEvent::RecordingEnded {
                             channel_id: channel_id.clone(),
@@ -484,13 +500,16 @@ impl RecordingSession {
                     chat_handle.abort();
                 }
 
-                // Clean up session directory and any empty/partial files
+                // Clean up any partial media files, then let custodian perform gated purge
                 if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
                     while let Ok(Some(entry)) = rd.next_entry().await {
-                        let _ = tokio::fs::remove_file(entry.path()).await;
+                        if entry.file_name() != "metadata.jsonl" {
+                            let _ = tokio::fs::remove_file(entry.path()).await;
+                        }
                     }
                 }
-                let _ = tokio::fs::remove_dir(&session_dir).await;
+                custodian.mark_concluded(&session_dir);
+                let _ = custodian.try_purge(&session_dir).await;
 
                 let log_msg = format!(
                     "Recording unavailable for channel {} ({}): restricted stream requires valid Naver credentials (nid_aut, nid_ses)",
@@ -595,18 +614,8 @@ impl RecordingSession {
                 ))))
                 .await;
 
-            // Clean up session directory if empty (e.g. no chunks were saved or all chunks/chat were already uploaded)
-            let target = broadcast_identifier(&info.streamer_name, &channel_id);
-            if let Ok(true) =
-                crate::engine::cleanup::cleanup_session_dir_if_empty(&session_dir).await
-            {
-                let _ = event_tx
-                    .send(AppEvent::Log(LogEntry::clean(format!(
-                        "[{target}] Cleaned up empty session folder '{}'",
-                        session_dir.display()
-                    ))))
-                    .await;
-            }
+            custodian.mark_concluded(&session_dir);
+            let _ = custodian.try_purge(&session_dir).await;
         })
     }
 }
@@ -866,6 +875,7 @@ mod tests {
             registry,
             cancel_token,
             ffmpeg_bin: Some("custom-ffmpeg".to_string()),
+            custodian: Arc::new(SessionCustodian::without_events()),
         };
 
         assert_eq!(params.channel_id, "test_chan");
@@ -912,6 +922,7 @@ mod tests {
             registry: registry.clone(),
             cancel_token: cancel_token.clone(),
             ffmpeg_bin: Some("nonexistent_ffmpeg_bin_for_test".to_string()),
+            custodian: Arc::new(SessionCustodian::without_events()),
         };
 
         let session_state = crate::engine::session::ActiveSessionState::new(
@@ -931,6 +942,75 @@ mod tests {
             crate::engine::registry::ChannelLifecycleKind::Idle
         );
         assert!(!registry.is_recording("test_chan_spawn"));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_recording_session_receives_custodian_and_registers_active_then_purges() {
+        use crate::chzzk::models_metadata::StreamMetadataState;
+        use crate::chzzk::source::MockLiveStreamSource;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_rs_custodian_{}", rand::random::<u32>()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let (upload_tx, _upload_rx) = mpsc::channel(1);
+        let (event_tx, _event_rx) = mpsc::channel(20);
+        let registry = ChannelLifecycleRegistry::new();
+        let cancel_token = CancellationToken::new();
+        let mut settings = Settings::default();
+        settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
+        let chzzk = Arc::new(MockLiveStreamSource::new());
+        let custodian = Arc::new(SessionCustodian::new(event_tx.clone()));
+
+        let info = LiveStreamInfo {
+            channel_id: "test_chan_custodian".to_string(),
+            live_id: Some(99999),
+            streamer_name: "CustodianStreamer".to_string(),
+            title: "CustodianTitle".to_string(),
+            hls_url: "http://127.0.0.1:0/dummy.m3u8".to_string(),
+            chat_channel_id: None,
+            metadata: StreamMetadataState::default(),
+        };
+
+        let params = RecordingSessionParams {
+            channel_id: "test_chan_custodian".to_string(),
+            info,
+            upload_tx,
+            settings,
+            backend: None,
+            chzzk,
+            event_tx,
+            registry: registry.clone(),
+            cancel_token: cancel_token.clone(),
+            ffmpeg_bin: Some("nonexistent_ffmpeg_bin_for_test".to_string()),
+            custodian: custodian.clone(),
+        };
+
+        let session = RecordingSession::new(params);
+        assert_eq!(Arc::as_ptr(session.custodian()), Arc::as_ptr(&custodian));
+
+        let session_state = crate::engine::session::ActiveSessionState::new(
+            "2026-10-04_120000".to_string(),
+            "CustodianStreamer".to_string(),
+            None,
+            StreamMetadataState::default(),
+        );
+        let session_dir = temp_dir.join(session_state.folder_name());
+        registry.start_recording(
+            "test_chan_custodian",
+            session_state,
+            cancel_token.child_token(),
+        );
+
+        let handle = session.run();
+        let _ = handle.await;
+
+        // Directory should be concluded and purged (empty because FFmpeg failed to spawn)
+        assert!(custodian.active_paths().is_empty());
+        assert!(custodian.tracked_state(&session_dir).is_none());
+        assert!(!session_dir.exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

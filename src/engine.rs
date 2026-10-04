@@ -40,6 +40,8 @@ pub struct EngineOrchestrator {
     registry: ChannelLifecycleRegistry,
     cancel_token: CancellationToken,
     refresh_notify: Arc<tokio::sync::Notify>,
+    drain_notify: Arc<tokio::sync::Notify>,
+    custodian: Arc<SessionCustodian>,
     session_handles: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     upload_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     ffmpeg_bin: Option<String>,
@@ -62,6 +64,8 @@ impl EngineOrchestrator {
         event_tx: Sender<AppEvent>,
         cancel_token: CancellationToken,
     ) -> Self {
+        let drain_notify = Arc::new(tokio::sync::Notify::new());
+        let custodian = Arc::new(SessionCustodian::new(event_tx.clone()));
         Self {
             settings,
             chzzk,
@@ -70,6 +74,8 @@ impl EngineOrchestrator {
             registry: ChannelLifecycleRegistry::new(),
             cancel_token,
             refresh_notify: Arc::new(tokio::sync::Notify::new()),
+            drain_notify,
+            custodian,
             session_handles: Arc::new(std::sync::Mutex::new(Vec::new())),
             upload_handle: Arc::new(std::sync::Mutex::new(None)),
             ffmpeg_bin: std::env::var("CHZZK_LOAD_FFMPEG_BIN").ok(),
@@ -130,6 +136,14 @@ impl EngineOrchestrator {
 
     pub fn ffmpeg_bin(&self) -> Option<&str> {
         self.ffmpeg_bin.as_deref()
+    }
+
+    pub fn custodian(&self) -> &Arc<SessionCustodian> {
+        &self.custodian
+    }
+
+    pub fn drain_notify(&self) -> &Arc<tokio::sync::Notify> {
+        &self.drain_notify
     }
 
     pub fn cancel(&self) {
@@ -260,6 +274,7 @@ impl EngineOrchestrator {
             registry: self.registry.clone(),
             cancel_token: self.cancel_token.clone(),
             ffmpeg_bin: self.ffmpeg_bin.clone(),
+            custodian: self.custodian.clone(),
         };
         let handle = RecordingSession::spawn(params);
 
@@ -569,7 +584,7 @@ impl EngineOrchestrator {
             upload_rx,
             concurrency,
             dlq_config,
-            None,
+            Some(self.drain_notify.clone()),
         );
         if let Ok(mut guard) = self.upload_handle.lock() {
             *guard = Some(upload_handle);
@@ -600,32 +615,40 @@ impl EngineOrchestrator {
             }
         }
 
+        let mut next_poll = tokio::time::Instant::now();
+
         loop {
             if self.cancel_token.is_cancelled() {
                 self.registry.cancel_all();
                 break;
             }
 
-            self.poll_channels_once(&upload_tx).await;
+            if tokio::time::Instant::now() >= next_poll {
+                self.poll_channels_once(&upload_tx).await;
+                self.custodian.try_purge_drained().await;
 
-            let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
-            let active_dirs: HashSet<String> = self
-                .registry
-                .active_sessions()
-                .values()
-                .map(|s| s.folder_name())
-                .collect();
+                let recordings_base =
+                    resolve_path(Path::new(&self.settings.general.recordings_dir));
+                let active_dirs: HashSet<String> = self
+                    .registry
+                    .active_sessions()
+                    .values()
+                    .map(|s| s.folder_name())
+                    .collect();
 
-            if let Ok(count) =
-                Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active_dirs).await
-                && count > 0
-            {
-                let _ = self
-                    .event_tx
-                    .try_send(AppEvent::Log(LogEntry::clean(format!(
-                        "Cleaned up {count} empty session folder(s) in '{}'",
-                        recordings_base.display()
-                    ))));
+                if let Ok(count) =
+                    Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active_dirs).await
+                    && count > 0
+                {
+                    let _ = self
+                        .event_tx
+                        .try_send(AppEvent::Log(LogEntry::clean(format!(
+                            "Cleaned up {count} empty session folder(s) in '{}'",
+                            recordings_base.display()
+                        ))));
+                }
+
+                next_poll = tokio::time::Instant::now() + poll_interval;
             }
 
             tokio::select! {
@@ -633,10 +656,14 @@ impl EngineOrchestrator {
                     self.registry.cancel_all();
                     break;
                 }
+                _ = self.drain_notify.notified() => {
+                    self.custodian.try_purge_drained().await;
+                }
                 _ = self.refresh_notify.notified() => {
                     // Manual refresh triggered: poll immediately on next iteration
+                    next_poll = tokio::time::Instant::now();
                 }
-                _ = tokio::time::sleep(poll_interval) => {
+                _ = tokio::time::sleep_until(next_poll) => {
                     // Normal interval elapsed
                 }
             }
@@ -667,6 +694,9 @@ impl EngineOrchestrator {
         if let Some(handle) = upload_task {
             let _ = handle.await;
         }
+
+        // Final custodian drain purge now that all uploads are done
+        self.custodian.try_purge_drained().await;
 
         // 4. Clean up any empty stream session folders inside the local recordings directory
         let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
