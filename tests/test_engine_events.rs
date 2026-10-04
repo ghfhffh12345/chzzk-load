@@ -106,6 +106,21 @@ impl UploadBackend for SerialMockBackend {
     }
 }
 
+/// Helper task listening to `drain_notify` signals to purge drained session directories upon quiescence.
+fn spawn_drain_purge_listener(
+    custodian: Arc<chzzk_load::engine::SessionCustodian>,
+    drain_notify: Arc<tokio::sync::Notify>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            drain_notify.notified().await;
+            if custodian.try_purge_drained().await > 0 {
+                break;
+            }
+        }
+    })
+}
+
 #[tokio::test]
 async fn test_app_event_mpsc_channel() {
     let (tx, mut rx) = mpsc::channel::<AppEvent>(10);
@@ -2614,13 +2629,20 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
     let chunk_path = session_dir.join("chunk_0000.ts");
     fs::write(&chunk_path, vec![0u8; 1024 * 1024]).unwrap();
 
+    let metadata_path = session_dir.join("metadata.jsonl");
+    fs::write(
+        &metadata_path,
+        b"{\"version\":2,\"event\":\"INITIAL_STATE\",\"stream_offset_ms\":0}\n",
+    )
+    .unwrap();
+
     let mock_backend = Arc::new(MockUploadBackend::default());
 
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
     let drain_notify = Arc::new(tokio::sync::Notify::new());
 
-    let custodian = chzzk_load::engine::SessionCustodian::new(event_tx.clone());
+    let custodian = Arc::new(chzzk_load::engine::SessionCustodian::new(event_tx.clone()));
     custodian.register_draining(&session_dir, channel_id, "Streamer Clean");
 
     let _consumer_handle = chzzk_load::uploader::UploadWorker::spawn_with_options(
@@ -2632,12 +2654,7 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
         Some(drain_notify.clone()),
     );
 
-    let custodian_clone = custodian.clone();
-    let notify_clone = drain_notify.clone();
-    let purge_task = tokio::spawn(async move {
-        notify_clone.notified().await;
-        custodian_clone.try_purge_drained().await;
-    });
+    let purge_task = spawn_drain_purge_listener(custodian.clone(), drain_notify.clone());
 
     upload_tx
         .send(UploadTask::chunk(
@@ -2647,6 +2664,18 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
             chunk_path.clone(),
             "chunk_0000.ts",
             "Streamer Clean",
+        ))
+        .await
+        .unwrap();
+
+    upload_tx
+        .send(UploadTask::metadata(
+            channel_id,
+            "folder_clean_123",
+            "folder_clean_123",
+            metadata_path.clone(),
+            "Streamer Clean",
+            true,
         ))
         .await
         .unwrap();
@@ -2665,13 +2694,18 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
         "Chunk file must be deleted upon upload confirmation"
     );
     assert!(
+        !metadata_path.exists(),
+        "Metadata file must be deleted upon confirmed teardown upload"
+    );
+    assert!(
         !session_dir.exists(),
-        "Empty stream session folder must be deleted after broadcast ends and all cleanup tasks are finished"
+        "Empty stream session folder must be deleted after all chunk and metadata uploads finish"
     );
 
     let uploads = mock_backend.uploads.lock().await;
-    assert_eq!(uploads.len(), 1);
-    assert_eq!(uploads[0].0, chunk_path);
+    assert_eq!(uploads.len(), 2);
+    assert!(uploads.iter().any(|(p, _)| p == &chunk_path));
+    assert!(uploads.iter().any(|(p, _)| p == &metadata_path));
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -2851,6 +2885,144 @@ async fn test_recording_session_cleans_empty_folder_when_no_chunks_saved() {
     assert!(
         got_clean_log,
         "Expected clean log message for empty session folder deletion"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_recording_session_with_backend_uploads_metadata_and_purges_empty_folder_on_conclusion()
+ {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_session_meta_backend_clean_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let mock_bin = get_mock_ffmpeg_bin();
+
+    let settings = Settings {
+        general: chzzk_load::config::GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            record_chat: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let chzzk = Arc::new(MockLiveStreamSource::new());
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(50);
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(20);
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let drain_notify = Arc::new(tokio::sync::Notify::new());
+
+    let mock_backend = Arc::new(MockUploadBackend::default());
+    let worker_handle = chzzk_load::uploader::UploadWorker::spawn_with_options(
+        Some(mock_backend.clone()),
+        event_tx.clone(),
+        upload_rx,
+        1,
+        chzzk_load::uploader::DlqConfig::default(),
+        Some(drain_notify.clone()),
+    );
+
+    let custodian = Arc::new(chzzk_load::engine::SessionCustodian::new(event_tx.clone()));
+    let orchestrator = Arc::new(
+        EngineOrchestrator::with_cancel_token(
+            settings,
+            chzzk,
+            Some(mock_backend.clone()),
+            event_tx,
+            cancel_token.clone(),
+        )
+        .with_custodian(custodian.clone())
+        .with_drain_notify(drain_notify.clone())
+        .with_ffmpeg_bin(mock_bin.to_string_lossy()),
+    );
+
+    let purge_task = spawn_drain_purge_listener(custodian.clone(), drain_notify.clone());
+
+    let info = chzzk_load::chzzk::models::LiveStreamInfo {
+        channel_id: "chan_backend_meta".to_string(),
+        live_id: Some(777888),
+        streamer_name: "MetaStreamer".to_string(),
+        title: "Meta Stream Title".to_string(),
+        hls_url: "http://127.0.0.1:9999/nonexistent.m3u8".to_string(),
+        chat_channel_id: None,
+        metadata: Default::default(),
+    };
+
+    orchestrator.spawn_recording_session("chan_backend_meta".to_string(), info, upload_tx.clone());
+
+    let cancel_clone = cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel_clone.cancel();
+    });
+
+    let mut got_clean_log = false;
+    let mut got_ended = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(ev)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), event_rx.recv()).await
+        {
+            match ev {
+                AppEvent::Log(entry)
+                    if entry.message.contains("Cleaned up empty session folder") =>
+                {
+                    got_clean_log = true;
+                }
+                AppEvent::RecordingEnded { ref channel_id }
+                    if channel_id == "chan_backend_meta" =>
+                {
+                    got_ended = true;
+                }
+                _ => {}
+            }
+        }
+        if got_clean_log && got_ended {
+            break;
+        }
+    }
+
+    assert!(got_ended, "RecordingEnded must be emitted");
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), purge_task).await;
+
+    drop(upload_tx);
+    let _ = worker_handle.await;
+
+    let mut entries = tokio::fs::read_dir(&temp_dir).await.unwrap();
+    let mut remaining_session_dirs = 0;
+    while let Some(entry) = entries.next_entry().await.unwrap() {
+        if entry
+            .file_type()
+            .await
+            .map(|ft| ft.is_dir())
+            .unwrap_or(false)
+        {
+            remaining_session_dirs += 1;
+        }
+    }
+    assert_eq!(
+        remaining_session_dirs, 0,
+        "Empty stream session folder must be purged after broadcast conclusion and final metadata upload"
+    );
+    assert!(
+        got_clean_log,
+        "Cleaned up empty session folder log must be emitted"
+    );
+
+    let uploads = mock_backend.uploads.lock().await;
+    assert!(
+        !uploads.is_empty(),
+        "MockUploadBackend must have received metadata.jsonl uploads"
+    );
+    assert!(
+        uploads
+            .iter()
+            .all(|(path, _)| path.file_name().and_then(|n| n.to_str()) == Some("metadata.jsonl")),
+        "All uploaded files should be metadata.jsonl"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

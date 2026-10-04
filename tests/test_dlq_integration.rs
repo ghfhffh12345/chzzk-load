@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -323,13 +322,26 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     let local_guard = TempDirGuard::new("test_rclone_disk_evict_src");
     let remote_guard = TempDirGuard::new("test_rclone_disk_evict_dst");
 
-    // Chunk 0 pair: chunk_0000.ts + chat_0000.jsonl (oldest)
+    // Metadata task (oldest, enqueued first): should strictly be immune to disk eviction
+    let meta_path = local_guard.path().join("metadata.jsonl");
+    let meta_payload = b"{\"version\":2,\"event\":\"INITIAL_STATE\",\"stream_offset_ms\":0}\n";
+    std::fs::write(&meta_path, meta_payload).expect("failed to write meta");
+    let task_meta = UploadTask::metadata(
+        "ch_stream1",
+        "session_evict",
+        "session_evict",
+        meta_path.clone(),
+        "StreamerA",
+        false,
+    );
+
+    // Chunk 0 pair: chunk_0000.ts + chat_0000.jsonl (oldest media pair)
     let chunk0_ts = local_guard.path().join("chunk_0000.ts");
     let chunk0_chat = local_guard.path().join("chat_0000.jsonl");
     std::fs::write(&chunk0_ts, b"video-0000").expect("failed to write chunk0 ts");
     std::fs::write(&chunk0_chat, b"chat-0000").expect("failed to write chunk0 chat");
 
-    // Chunk 1 pair: chunk_0001.ts + chat_0001.jsonl (newer)
+    // Chunk 1 pair: chunk_0001.ts + chat_0001.jsonl (newer media pair)
     let chunk1_ts = local_guard.path().join("chunk_0001.ts");
     let chunk1_chat = local_guard.path().join("chat_0001.jsonl");
     std::fs::write(&chunk1_ts, b"video-0001").expect("failed to write chunk1 ts");
@@ -348,10 +360,9 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
         |_path, attempt| attempt == 1,
     ));
 
-    // Injected disk space provider: returns 0.5 GB on first check (< 2.0 GB threshold),
-    // triggering eviction of the oldest pair, then 10.0 GB on subsequent checks.
-    let disk_check_count = Arc::new(AtomicUsize::new(0));
-    let disk_check_count_clone = disk_check_count.clone();
+    // Injected disk space provider: returns 0.5 GB while chunk0_ts remains on disk (< 2.0 GB threshold),
+    // triggering eviction of the oldest pair, then 10.0 GB once chunk0 is evicted.
+    let chunk0_ts_check = chunk0_ts.clone();
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
     let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
@@ -362,10 +373,11 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
         circuit_breaker_failures: 20,
         ..Default::default()
     }
-    .with_disk_space_provider(move |_path| {
-        let count = disk_check_count_clone.fetch_add(1, Ordering::SeqCst);
-        if count == 0 { 0.5 } else { 10.0 }
-    });
+    .with_disk_space_provider(
+        move |_path| {
+            if chunk0_ts_check.exists() { 0.5 } else { 10.0 }
+        },
+    );
 
     let worker_handle = UploadWorker::spawn_with_options(
         Some(backend.clone()),
@@ -376,7 +388,8 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
         None,
     );
 
-    // Enqueue both video and coupled chat tasks for both chunks
+    // Enqueue metadata first, then video and coupled chat tasks for both chunks
+    upload_tx.send(task_meta).await.unwrap();
     upload_tx.send(task0_ts).await.unwrap();
     upload_tx.send(task0_chat).await.unwrap();
     upload_tx.send(task1_ts).await.unwrap();
@@ -384,6 +397,24 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     drop(upload_tx);
 
     worker_handle.await.unwrap();
+
+    // Verify metadata was spared from eviction, uploaded via real rclone, and retained locally
+    assert!(
+        meta_path.exists(),
+        "metadata.jsonl must strictly be immune from DLQ eviction and remain on disk"
+    );
+    let remote_meta = remote_guard
+        .path()
+        .join("session_evict")
+        .join("metadata.jsonl");
+    assert!(
+        remote_meta.exists(),
+        "metadata.jsonl must exist on remote after real rclone upload"
+    );
+    assert_eq!(
+        std::fs::read(&remote_meta).expect("read remote meta"),
+        meta_payload
+    );
 
     // Verify Chunk 0 pair was permanently deleted from disk by disk-aware eviction
     assert!(
@@ -457,6 +488,7 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     // Verify event logs
     let mut saw_disk_eviction_log = false;
     let mut saw_chunk1_retry_success = false;
+    let mut saw_meta_retry_success = false;
 
     while let Ok(ev) = event_rx.try_recv() {
         if let AppEvent::Log(entry) = ev {
@@ -472,6 +504,18 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
             {
                 saw_chunk1_retry_success = true;
             }
+            if entry
+                .message
+                .contains("[DLQ] Successfully uploaded metadata.jsonl on retry 1")
+            {
+                saw_meta_retry_success = true;
+            }
+            assert!(
+                !entry
+                    .message
+                    .contains("Evicted oldest chunk metadata.jsonl"),
+                "metadata.jsonl must strictly be immune from DLQ eviction"
+            );
         }
     }
 
@@ -483,6 +527,135 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
         saw_chunk1_retry_success,
         "Retry 1 success log must be emitted for spared chunk_0001.ts"
     );
+    assert!(
+        saw_meta_retry_success,
+        "Retry 1 success log must be emitted for spared metadata.jsonl"
+    );
+}
+
+#[tokio::test]
+async fn test_real_rclone_metadata_snapshot_live_sync_and_teardown_retention() {
+    if !ensure_rclone_available() {
+        return;
+    }
+
+    let local_guard = TempDirGuard::new("test_rclone_meta_src");
+    let remote_guard = TempDirGuard::new("test_rclone_meta_dst");
+
+    let meta_path = local_guard.path().join("metadata.jsonl");
+    let payload_initial = b"{\"version\":2,\"event\":\"INITIAL_STATE\",\"stream_offset_ms\":0}\n";
+    std::fs::write(&meta_path, payload_initial).expect("failed to write initial metadata");
+
+    let task_initial = UploadTask::metadata(
+        "ch_meta_test",
+        "session_meta_1",
+        "session_meta_1",
+        meta_path.clone(),
+        "MetaStreamer",
+        false, // live sync snapshot: retain on disk
+    );
+
+    let backend = Arc::new(create_local_rclone_backend(remote_guard.path()));
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+    let (upload_tx, upload_rx) = tokio::sync::mpsc::channel(100);
+    let drain_notify = Arc::new(tokio::sync::Notify::new());
+
+    let worker_handle = UploadWorker::spawn_with_options(
+        Some(backend),
+        event_tx,
+        upload_rx,
+        1,
+        DlqConfig::default(),
+        Some(drain_notify.clone()),
+    );
+
+    // 1. Send live sync metadata snapshot
+    upload_tx.send(task_initial).await.unwrap();
+
+    // Wait until upload completed event or synced log
+    let mut saw_synced_log = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(AppEvent::Log(entry))) =
+            tokio::time::timeout(Duration::from_millis(200), event_rx.recv()).await
+        {
+            if entry
+                .message
+                .contains("[MetaStreamer] Uploaded metadata.jsonl (synced)")
+            {
+                saw_synced_log = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_synced_log, "Uploaded (synced) log must be recorded");
+
+    // Local metadata.jsonl must remain on disk
+    assert!(
+        meta_path.exists(),
+        "metadata.jsonl must remain on disk after live sync snapshot"
+    );
+
+    // Remote file must exist and match payload
+    let remote_meta = remote_guard
+        .path()
+        .join("session_meta_1")
+        .join("metadata.jsonl");
+    assert!(
+        remote_meta.exists(),
+        "Remote metadata.jsonl must exist after real rclone upload"
+    );
+    assert_eq!(
+        std::fs::read(&remote_meta).expect("read remote meta"),
+        payload_initial
+    );
+
+    // 2. Append teardown event to metadata.jsonl
+    let payload_teardown =
+        b"{\"version\":2,\"event\":\"METADATA_CHANGED\",\"stream_offset_ms\":5000}\n";
+    let mut full_payload = payload_initial.to_vec();
+    full_payload.extend_from_slice(payload_teardown);
+    std::fs::write(&meta_path, &full_payload).expect("write updated metadata");
+
+    let task_final = UploadTask::metadata(
+        "ch_meta_test",
+        "session_meta_1",
+        "session_meta_1",
+        meta_path.clone(),
+        "MetaStreamer",
+        true, // final teardown snapshot: delete on success
+    );
+
+    upload_tx.send(task_final).await.unwrap();
+    drop(upload_tx);
+
+    worker_handle.await.unwrap();
+
+    // Local metadata.jsonl must be unlinked after confirmed teardown upload
+    assert!(
+        !meta_path.exists(),
+        "metadata.jsonl must be deleted locally after final teardown upload"
+    );
+
+    // Remote file must match updated payload
+    assert_eq!(
+        std::fs::read(&remote_meta).expect("read remote meta final"),
+        full_payload,
+        "Remote metadata.jsonl must reflect updated content"
+    );
+
+    let mut saw_deleted_log = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AppEvent::Log(entry) = ev {
+            if entry
+                .message
+                .contains("[MetaStreamer] Uploaded & deleted metadata.jsonl")
+            {
+                saw_deleted_log = true;
+            }
+        }
+    }
+    assert!(saw_deleted_log, "Uploaded & deleted log must be recorded");
 }
 
 #[tokio::test]

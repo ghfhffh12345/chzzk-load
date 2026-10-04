@@ -17,7 +17,7 @@ The state machine coordinator that manages channel transitions, cooldown windows
 _Avoid_: Engine state, channel manager, session store
 
 **Session Custodian**:
-The lifecycle coordinator that tracks recording session directories across active capture and draining phases, safely purging empty or quiescent session folders once in-flight chunk uploads complete.
+The lifecycle coordinator that tracks recording session directories across active capture and draining phases, safely purging empty or quiescent session folders once in-flight chunk uploads complete under strict directory emptiness.
 _Avoid_: Folder cleaner, directory manager, session cleaner, purge service
 
 **Cooldown Window**:
@@ -45,15 +45,23 @@ The background queue that continuously retries failed file uploads upon network 
 _Avoid_: Retry loop, failed upload cache
 
 **Disk-Aware Retry Policy**:
-The eviction strategy used by the DLQ under extreme disk pressure. If remaining space drops to `min_free_disk_gb`, the DLQ permanently deletes the oldest pending chunks to prevent disk-full crashes.
+The eviction strategy used by the DLQ under extreme disk pressure. If remaining space drops to `min_free_disk_gb`, the DLQ permanently deletes the oldest pending chunks to prevent disk-full crashes, while strictly preserving lean metadata tasks.
 _Avoid_: Disk quota, auto-delete, purge strategy
+
+**Task Retention Policy**:
+The per-task lifecycle rule (`delete_on_success`) governing whether `UploadWorker` unlinks the local file post-upload (video segments, chat chunks, final stream teardown metadata, orphaned crash reconciliation) or retains it locally (intermediate live stream metadata snapshots).
+_Avoid_: File deleter, delete flag, cleanup policy
+
+**Strict Directory Emptiness**:
+The invariant enforced by directory cleanup routines and `SessionCustodian` requiring a session folder to contain exactly zero entries (`read_dir().count() == 0`) before removal, eliminating heuristic file-name sniffing.
+_Avoid_: Empty check, heuristic delete, metadata purge
 
 **Post-Recording Consolidation**:
 The post-processing task that losslessly merges and remuxes remote video chunks (`.ts` to `.mp4`) and deduplicates chat logs (`.jsonl`) entirely over the network with a strictly bounded memory footprint, circumventing local disk usage.
 _Avoid_: Cloud merge, remote stitch, post-processing script
 
 **Lean Metadata Snapshot**:
-The flat JSON Lines event format (`metadata.jsonl`) recording essential stream lifecycle and classification state with monotonic offsets, omitting volatile viewer telemetry and static CDN thumbnail URLs.
+The flat JSON Lines event format (`metadata.jsonl`) recording essential stream lifecycle and classification state with monotonic offsets, synchronized via the unified upload DLQ pipeline and omitting volatile viewer telemetry and static CDN thumbnail URLs.
 _Avoid_: Metadata diff, delta log, stream telemetry
 
 **Live Stream Source**:
