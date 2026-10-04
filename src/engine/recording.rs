@@ -144,10 +144,6 @@ impl RecordingSession {
         Self { params }
     }
 
-    pub fn custodian(&self) -> &Arc<SessionCustodian> {
-        &self.params.custodian
-    }
-
     pub fn spawn(params: RecordingSessionParams) -> tokio::task::JoinHandle<()> {
         Self::new(params).run()
     }
@@ -989,7 +985,10 @@ mod tests {
         };
 
         let session = RecordingSession::new(params);
-        assert_eq!(Arc::as_ptr(session.custodian()), Arc::as_ptr(&custodian));
+        assert_eq!(
+            Arc::as_ptr(&session.params.custodian),
+            Arc::as_ptr(&custodian)
+        );
 
         let session_state = crate::engine::session::ActiveSessionState::new(
             "2026-10-04_120000".to_string(),
