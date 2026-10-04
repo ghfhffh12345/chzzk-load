@@ -13,6 +13,7 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
 pub mod cleanup;
+pub mod custodian;
 pub mod reconciliation;
 pub mod recording;
 pub mod registry;
@@ -22,6 +23,7 @@ pub use cleanup::{
     cleanup_empty_session_dirs, cleanup_empty_session_dirs_bounded,
     cleanup_empty_session_dirs_excluding, cleanup_session_dir_if_empty,
 };
+pub use custodian::{SessionCustodian, SessionTrackState};
 pub use reconciliation::{ReconciliationReport, reconcile_orphaned_sessions};
 pub use recording::{RecordingSession, RecordingSessionParams};
 pub use registry::{
