@@ -25,7 +25,8 @@ use chzzk_load::engine::{
 };
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::uploader::{
-    BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend, UploadTask, broadcast_identifier,
+    BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend, UploadTask, UploadWorker,
+    broadcast_identifier,
 };
 
 use common::mock_source::{make_close_detail, make_open_detail, make_restricted_detail};
@@ -923,7 +924,9 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(20);
-    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+    let worker_handle =
+        UploadWorker::spawn(Some(mock_backend.clone()), event_tx.clone(), upload_rx);
 
     let orchestrator =
         EngineOrchestrator::new(settings, mock, Some(mock_backend.clone()), event_tx);
@@ -953,6 +956,8 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
 
     // Poll 2: Streamer changed title to "Updated Stream Title? Playing Now?"
     orchestrator.poll_channels_once(&upload_tx).await;
+    drop(upload_tx);
+    worker_handle.await.unwrap();
 
     // Verify backend received metadata.jsonl upload
     let uploads = mock_backend.uploads.lock().await;
@@ -1020,7 +1025,9 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
-    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+    let worker_handle =
+        UploadWorker::spawn(Some(mock_backend.clone()), event_tx.clone(), upload_rx);
 
     let orchestrator =
         EngineOrchestrator::new(settings, mock, Some(mock_backend.clone()), event_tx);
@@ -1065,6 +1072,8 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
 
     // Poll 2: Streamer changed title to "Updated Stream Title? Playing Now?"
     orchestrator.poll_channels_once(&upload_tx).await;
+    drop(upload_tx);
+    worker_handle.await.unwrap();
 
     let uploads = mock_backend.uploads.lock().await;
     assert_eq!(uploads.len(), 1);
@@ -1217,7 +1226,9 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
 
     let mock_backend = Arc::new(MockUploadBackend::default());
     let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(20);
-    let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
+    let (upload_tx, upload_rx) = mpsc::channel::<UploadTask>(10);
+    let worker_handle =
+        UploadWorker::spawn(Some(mock_backend.clone()), event_tx.clone(), upload_rx);
 
     let orchestrator =
         EngineOrchestrator::new(settings, mock, Some(mock_backend.clone()), event_tx);
@@ -1249,6 +1260,8 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
 
     // Poll 2: Channel metadata changes to Game + Watch Party
     orchestrator.poll_channels_once(&upload_tx).await;
+    drop(upload_tx);
+    worker_handle.await.unwrap();
 
     let uploads = mock_backend.uploads.lock().await;
     assert_eq!(uploads.len(), 1);

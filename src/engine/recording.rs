@@ -248,30 +248,22 @@ impl RecordingSession {
                     .await;
             }
 
-            if let Some(ref backend) = backend_opt {
-                let backend = backend.clone();
-                let remote_dir = session_folder_name.clone();
-                let metadata_path = metadata_path.clone();
-                let event_tx_clone = event_tx.clone();
-                let channel_id_clone = channel_id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = backend
-                        .upload_file(&metadata_path, &remote_dir, Box::new(|_, _, _| {}))
-                        .await
-                    {
-                        let _ = event_tx_clone
-                            .send(AppEvent::Log(LogEntry::rec(format!(
-                                "[{channel_id_clone}] Failed to upload initial 'metadata.jsonl': {e}"
-                            ))))
-                            .await;
-                    } else {
-                        let _ = event_tx_clone
-                            .send(AppEvent::Log(LogEntry::rec(format!(
-                                "[{channel_id_clone}] Uploaded initial 'metadata.jsonl'"
-                            ))))
-                            .await;
-                    }
-                });
+            if backend_opt.is_some() {
+                let task = UploadTask::metadata(
+                    channel_id.clone(),
+                    session_folder_name.clone(),
+                    session_folder_name.clone(),
+                    metadata_path.clone(),
+                    info.streamer_name.clone(),
+                    false,
+                );
+                if let Err(e) = upload_tx.send(task).await {
+                    let _ = event_tx
+                        .send(AppEvent::Log(LogEntry::warn(format!(
+                            "[{channel_id}] Failed to enqueue initial 'metadata.jsonl': {e}"
+                        ))))
+                        .await;
+                }
             }
 
             let (chat_sealed_tx, mut chat_sealed_rx) = tokio::sync::mpsc::channel::<PathBuf>(32);
@@ -562,48 +554,40 @@ impl RecordingSession {
                 .map(|s| s.format_metadata_jsonl())
                 .unwrap_or_default();
 
-            let upload_metadata_fut = async {
-                if !metadata_jsonl.is_empty()
-                    && let Some(ref backend) = backend_opt
-                {
-                    match backend
-                        .upload_file(&metadata_path, &session_folder_name, Box::new(|_, _, _| {}))
-                        .await
-                    {
-                        Ok(_) => {
-                            let _ =
-                                crate::uploader::unlink_local_file_with_retry(&metadata_path).await;
-                            let _ = event_tx
-                                .send(AppEvent::Log(LogEntry::rec(format!(
-                                    "Uploaded 'metadata.jsonl' for {channel_id}"
-                                ))))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = event_tx
-                                .send(AppEvent::Log(LogEntry::warn(format!(
-                                    "Failed to upload 'metadata.jsonl' for {channel_id}: {e}"
-                                ))))
-                                .await;
-                        }
+            if !metadata_jsonl.is_empty() {
+                let _ = tokio::fs::write(&metadata_path, &metadata_jsonl).await;
+            }
+
+            if backend_opt.is_some() {
+                if metadata_path.exists() {
+                    let task = UploadTask::metadata(
+                        channel_id.clone(),
+                        session_folder_name.clone(),
+                        session_folder_name.clone(),
+                        metadata_path.clone(),
+                        info.streamer_name.clone(),
+                        true,
+                    );
+                    if let Err(e) = upload_tx.send(task).await {
+                        let _ = event_tx
+                            .send(AppEvent::Log(LogEntry::warn(format!(
+                                "[{channel_id}] Failed to enqueue final 'metadata.jsonl': {e}"
+                            ))))
+                            .await;
                     }
-                } else if no_chunks_saved && backend_opt.is_none() {
-                    let _ = crate::uploader::unlink_local_file_with_retry(&metadata_path).await;
                 }
-            };
+            } else if no_chunks_saved {
+                let _ = crate::uploader::unlink_local_file_with_retry(&metadata_path).await;
+            }
 
-            let teardown_chat_fut = async {
-                if let Some(mut chat_handle) = chat_task
-                    && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
-                        .await
-                        .is_err()
-                {
-                    chat_handle.abort();
-                }
-                let _ = tokio::time::timeout(Duration::from_secs(2), chat_forward_handle).await;
-            };
-
-            tokio::join!(upload_metadata_fut, teardown_chat_fut);
+            if let Some(mut chat_handle) = chat_task
+                && tokio::time::timeout(Duration::from_secs(5), &mut chat_handle)
+                    .await
+                    .is_err()
+            {
+                chat_handle.abort();
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(2), chat_forward_handle).await;
 
             registry.finish_recording(&channel_id, info.live_id);
 
@@ -1019,6 +1003,78 @@ mod tests {
         assert!(custodian.active_paths().is_empty());
         assert!(custodian.tracked_state(&session_dir).is_none());
         assert!(!session_dir.exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_recording_session_enqueues_initial_metadata_snapshot_on_start() {
+        use crate::chzzk::models_metadata::StreamMetadataState;
+        use crate::chzzk::source::MockLiveStreamSource;
+        use crate::uploader::MockUploadBackend;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_rs_meta_start_{}", rand::random::<u32>()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let (upload_tx, mut upload_rx) = mpsc::channel(10);
+        let (event_tx, _event_rx) = mpsc::channel(20);
+        let registry = ChannelLifecycleRegistry::new();
+        let cancel_token = CancellationToken::new();
+        let mut settings = Settings::default();
+        settings.general.recordings_dir = temp_dir.to_str().unwrap().to_string();
+        let chzzk = Arc::new(MockLiveStreamSource::new());
+        let backend = Arc::new(MockUploadBackend::new());
+
+        let info = LiveStreamInfo {
+            channel_id: "test_chan_meta_start".to_string(),
+            live_id: Some(11223),
+            streamer_name: "MetaStartStreamer".to_string(),
+            title: "MetaStartTitle".to_string(),
+            hls_url: "http://127.0.0.1:0/dummy.m3u8".to_string(),
+            chat_channel_id: None,
+            metadata: StreamMetadataState::default(),
+        };
+
+        let params = RecordingSessionParams {
+            channel_id: "test_chan_meta_start".to_string(),
+            info,
+            upload_tx,
+            settings,
+            backend: Some(backend),
+            chzzk,
+            event_tx,
+            registry: registry.clone(),
+            cancel_token: cancel_token.clone(),
+            ffmpeg_bin: Some("nonexistent_bin_fail".to_string()),
+            custodian: Arc::new(SessionCustodian::without_events()),
+        };
+
+        let session_state = crate::engine::session::ActiveSessionState::new(
+            "2026-10-04_120000".to_string(),
+            "MetaStartStreamer".to_string(),
+            None,
+            StreamMetadataState::default(),
+        );
+        registry.start_recording(
+            "test_chan_meta_start",
+            session_state,
+            cancel_token.child_token(),
+        );
+
+        let handle = RecordingSession::spawn(params);
+        let _ = handle.await;
+
+        let task = upload_rx
+            .try_recv()
+            .expect("initial metadata must be enqueued");
+        assert_eq!(task.channel_id, "test_chan_meta_start");
+        assert_eq!(task.chunk_name, "metadata.jsonl");
+        assert!(task.is_metadata());
+        assert!(
+            !task.delete_on_success,
+            "initial metadata must have delete_on_success: false"
+        );
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

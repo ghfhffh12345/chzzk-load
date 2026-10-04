@@ -1159,3 +1159,108 @@ async fn test_orchestrator_shutdown_purges_custodian_draining_directories() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_recording_session_enqueues_initial_and_final_metadata_snapshots() {
+    use chzzk_load::engine::{
+        ActiveSessionState, ChannelLifecycleRegistry, RecordingSession, RecordingSessionParams,
+    };
+    use chzzk_load::uploader::MockUploadBackend;
+    use tokio_util::sync::CancellationToken;
+
+    let mock_bin = get_mock_ffmpeg_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_rs_lifecycle_meta_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let (upload_tx, mut upload_rx) = mpsc::channel(10);
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(50);
+    let registry = ChannelLifecycleRegistry::new();
+    let cancel_token = CancellationToken::new();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            record_chat: false,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig::with_alias(
+            "chan_meta_life",
+            "MetaLifeStreamer",
+        )],
+        ..Default::default()
+    };
+
+    let chzzk = Arc::new(MockLiveStreamSource::new());
+    let backend = Arc::new(MockUploadBackend::new());
+
+    let info = LiveStreamInfo {
+        channel_id: "chan_meta_life".to_string(),
+        live_id: Some(888222),
+        streamer_name: "MetaLifeStreamer".to_string(),
+        title: "Life Title".to_string(),
+        hls_url: "http://127.0.0.1:0/dummy.m3u8".to_string(),
+        chat_channel_id: None,
+        metadata: chzzk_load::chzzk::models_metadata::StreamMetadataState {
+            live_title: "Life Title".to_string(),
+            live_id: Some(888222),
+            ..Default::default()
+        },
+    };
+
+    let params = RecordingSessionParams {
+        channel_id: "chan_meta_life".to_string(),
+        info,
+        upload_tx,
+        settings,
+        backend: Some(backend),
+        chzzk,
+        event_tx,
+        registry: registry.clone(),
+        cancel_token: cancel_token.clone(),
+        ffmpeg_bin: Some(mock_bin.to_string_lossy().to_string()),
+        custodian: Arc::new(SessionCustodian::without_events()),
+    };
+
+    let session_state = ActiveSessionState::new(
+        "2026-10-04_180000".to_string(),
+        "MetaLifeStreamer".to_string(),
+        None,
+        chzzk_load::chzzk::models_metadata::StreamMetadataState::default(),
+    );
+    registry.start_recording("chan_meta_life", session_state, cancel_token.child_token());
+
+    let handle = RecordingSession::spawn(params);
+
+    // Initial metadata snapshot must be enqueued with delete_on_success: false
+    let task_initial = tokio::time::timeout(std::time::Duration::from_secs(2), upload_rx.recv())
+        .await
+        .expect("initial metadata task timed out")
+        .expect("channel closed");
+    assert_eq!(task_initial.channel_id, "chan_meta_life");
+    assert_eq!(task_initial.chunk_name, "metadata.jsonl");
+    assert!(task_initial.is_metadata());
+    assert!(
+        !task_initial.delete_on_success,
+        "Initial metadata snapshot must be retained (delete_on_success: false)"
+    );
+
+    // Cancel session to trigger stream conclusion
+    cancel_token.cancel();
+    let _ = handle.await;
+
+    // Final metadata snapshot must be enqueued with delete_on_success: true
+    let task_final = tokio::time::timeout(std::time::Duration::from_secs(2), upload_rx.recv())
+        .await
+        .expect("final metadata task timed out")
+        .expect("channel closed");
+    assert_eq!(task_final.channel_id, "chan_meta_life");
+    assert_eq!(task_final.chunk_name, "metadata.jsonl");
+    assert!(task_final.is_metadata());
+    assert!(
+        task_final.delete_on_success,
+        "Final metadata snapshot must be unlinked (delete_on_success: true)"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

@@ -478,3 +478,87 @@ async fn test_reconciliation_dispatches_to_upload_worker_and_recovers_via_dlq() 
     let uploads = mock_backend.uploads.lock().await;
     assert_eq!(uploads.len(), 2, "Expected 2 uploaded files in backend");
 }
+
+#[tokio::test]
+async fn test_reconciliation_enqueues_orphaned_metadata_after_media_chunks() {
+    let guard = TempDirGuard::new("test_reconcile_meta");
+    let session_dir = guard
+        .path()
+        .join("[2026-10-01_1000] [TestStreamer] TestStreamer - Title");
+    fs::create_dir_all(&session_dir).expect("failed to create session directory");
+
+    let chunk0 = session_dir.join("chunk_0000.ts");
+    let chat0 = session_dir.join("chat_0000.jsonl");
+    let chunk1 = session_dir.join("chunk_0001.ts");
+    let meta = session_dir.join("metadata.jsonl");
+
+    fs::write(&chunk0, vec![0u8; 1024]).expect("write chunk 0");
+    fs::write(&chat0, vec![0u8; 256]).expect("write chat 0");
+    fs::write(&chunk1, vec![0u8; 512]).expect("write chunk 1 (tail)");
+    fs::write(&meta, b"{\"event\":\"start\",\"stream_offset_ms\":0}\n").expect("write metadata");
+
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(100);
+    let (event_tx, mut _event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let settings = Settings {
+        channels: vec![ChannelConfig::with_alias("test_channel", "TestStreamer")],
+        ..Default::default()
+    };
+
+    let report = reconcile_orphaned_sessions(guard.path(), &upload_tx, &event_tx, &settings).await;
+
+    // chunk 0, chat 0, and metadata.jsonl should be enqueued (3 tasks), chunk 1 quarantined
+    assert_eq!(report.orphaned_sessions_scanned, 1);
+    assert_eq!(report.chunks_enqueued, 3);
+    assert_eq!(report.chunks_quarantined, 1);
+    assert!(session_dir.join("chunk_0001.ts.quarantine").exists());
+
+    let mut tasks = Vec::new();
+    while let Ok(task) = upload_rx.try_recv() {
+        tasks.push(task);
+    }
+    assert_eq!(tasks.len(), 3);
+    assert_eq!(tasks[0].chunk_name, "chunk_0000.ts");
+    assert_eq!(tasks[1].chunk_name, "chat_0000.jsonl");
+    assert_eq!(tasks[2].chunk_name, "metadata.jsonl");
+    assert!(tasks[2].is_metadata());
+    assert!(
+        tasks[2].delete_on_success,
+        "Orphaned metadata must be enqueued with delete_on_success: true"
+    );
+}
+
+#[tokio::test]
+async fn test_reconciliation_enqueues_orphaned_metadata_when_chunks_already_purged() {
+    let guard = TempDirGuard::new("test_reconcile_meta_only");
+    let session_dir = guard
+        .path()
+        .join("[2026-10-01_1000] [TestStreamer] TestStreamer - Title");
+    fs::create_dir_all(&session_dir).expect("failed to create session directory");
+
+    let meta = session_dir.join("metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\",\"stream_offset_ms\":0}\n").expect("write metadata");
+
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(100);
+    let (event_tx, mut _event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let settings = Settings {
+        channels: vec![ChannelConfig::with_alias("test_channel", "TestStreamer")],
+        ..Default::default()
+    };
+
+    let report = reconcile_orphaned_sessions(guard.path(), &upload_tx, &event_tx, &settings).await;
+
+    assert_eq!(report.orphaned_sessions_scanned, 1);
+    assert_eq!(report.chunks_enqueued, 1);
+    assert_eq!(report.chunks_quarantined, 0);
+
+    let mut tasks = Vec::new();
+    while let Ok(task) = upload_rx.try_recv() {
+        tasks.push(task);
+    }
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].chunk_name, "metadata.jsonl");
+    assert!(tasks[0].is_metadata());
+    assert!(tasks[0].delete_on_success);
+}

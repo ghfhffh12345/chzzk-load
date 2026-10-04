@@ -24,7 +24,9 @@ pub use cleanup::{
     cleanup_empty_session_dirs_excluding, cleanup_session_dir_if_empty,
 };
 pub use custodian::{SessionCustodian, SessionTrackState};
-pub use reconciliation::{ReconciliationReport, reconcile_orphaned_sessions};
+pub use reconciliation::{
+    ReconciliationReport, reconcile_orphaned_sessions, reconcile_orphaned_sessions_with_custodian,
+};
 pub use recording::{RecordingSession, RecordingSessionParams};
 pub use registry::{
     ChannelLifecycleKind, ChannelLifecycleRegistry, ChannelLifecycleState, PollAction,
@@ -410,44 +412,34 @@ impl EngineOrchestrator {
                                 let _ = tokio::fs::write(&metadata_path, &full_jsonl).await;
                             }
 
-                            // 2. Synchronize to cloud storage
-                            if let Some(backend) = self.backend.as_ref() {
-                                let res = backend
-                                    .upload_file(
-                                        &metadata_path,
-                                        &remote_dir,
-                                        Box::new(|_, _, _| {}),
-                                    )
-                                    .await;
-                                match res {
-                                    Ok(_) => {
-                                        let channel_id = &channel.id;
-                                        let _ = self
-                                            .event_tx
-                                            .send(AppEvent::Log(LogEntry::rec(format!(
-                                                "[{channel_id}] Stream metadata changed. Updated 'metadata.jsonl'"
-                                            ))))
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        let channel_id = &channel.id;
-                                        let _ = self
-                                            .event_tx
-                                            .send(AppEvent::Log(LogEntry::warn(format!(
-                                                "[{channel_id}] Failed to update 'metadata.jsonl': {e}"
-                                            ))))
-                                            .await;
-                                    }
+                            // 2. Synchronize to cloud storage via non-blocking upload queue
+                            if self.backend.is_some() {
+                                let task = UploadTask::metadata(
+                                    channel.id.clone(),
+                                    remote_dir.clone(),
+                                    remote_dir.clone(),
+                                    metadata_path,
+                                    display_name.clone(),
+                                    false,
+                                );
+                                if let Err(e) = upload_tx.send(task).await {
+                                    let channel_id = &channel.id;
+                                    let _ = self
+                                        .event_tx
+                                        .send(AppEvent::Log(LogEntry::warn(format!(
+                                            "[{channel_id}] Failed to enqueue 'metadata.jsonl' snapshot: {e}"
+                                        ))))
+                                        .await;
                                 }
-                            } else {
-                                let channel_id = &channel.id;
-                                let _ = self
-                                    .event_tx
-                                    .send(AppEvent::Log(LogEntry::rec(format!(
-                                        "[{channel_id}] Stream metadata changed. Updated 'metadata.jsonl'"
-                                    ))))
-                                    .await;
                             }
+
+                            let channel_id = &channel.id;
+                            let _ = self
+                                .event_tx
+                                .send(AppEvent::Log(LogEntry::rec(format!(
+                                    "[{channel_id}] Stream metadata changed. Updated 'metadata.jsonl'"
+                                ))))
+                                .await;
 
                             if title_changed {
                                 let _ = self
@@ -606,11 +598,12 @@ impl EngineOrchestrator {
         // Startup Crash Reconciliation: If cloud backend is active, reconcile orphaned chunks from prior runs
         if self.backend.is_some() {
             let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
-            let report = reconcile_orphaned_sessions(
+            let report = reconcile_orphaned_sessions_with_custodian(
                 &recordings_base,
                 &upload_tx,
                 &self.event_tx,
                 &self.settings,
+                Some(&self.custodian),
             )
             .await;
             if report.chunks_enqueued > 0 || report.chunks_quarantined > 0 {
@@ -835,6 +828,106 @@ pub mod tests {
         consumer_handle.await.expect("join");
         // Without backend, file is not deleted by consumer (remains local)
         assert!(chunk_file.exists());
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_poll_metadata_change_enqueues_retained_metadata_task() {
+        use crate::chzzk::models::LiveDetail;
+        use crate::chzzk::models_metadata::StreamMetadataState;
+        use crate::chzzk::source::MockLiveStreamSource;
+        use crate::config::{ChannelConfig, GeneralConfig};
+        use crate::uploader::MockUploadBackend;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_orch_meta_enqueue_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let settings = Settings {
+            general: GeneralConfig {
+                recordings_dir: temp_dir.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+            channels: vec![ChannelConfig {
+                id: "chan_enq".to_string(),
+                alias: Some("EnqStreamer".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let source = MockLiveStreamSource::new();
+        let make_info = |title: &str| {
+            LiveDetail::Open(LiveStreamInfo {
+                channel_id: "chan_enq".to_string(),
+                live_id: Some(33333),
+                streamer_name: "EnqStreamer".to_string(),
+                title: title.to_string(),
+                hls_url: "https://mock/master.m3u8".to_string(),
+                chat_channel_id: None,
+                metadata: StreamMetadataState {
+                    live_title: title.to_string(),
+                    live_id: Some(33333),
+                    channel_id: "chan_enq".to_string(),
+                    channel_name: "EnqStreamer".to_string(),
+                    ..Default::default()
+                },
+            })
+        };
+        source.enqueue_channel_states(
+            "chan_enq",
+            vec![make_info("Initial Title"), make_info("Updated Title")],
+        );
+
+        let chzzk = Arc::new(source);
+        let mock_backend = Arc::new(MockUploadBackend::new());
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+        let (upload_tx, mut upload_rx) = tokio::sync::mpsc::channel(10);
+
+        let orchestrator =
+            EngineOrchestrator::new(settings, chzzk, Some(mock_backend.clone()), event_tx);
+
+        // Pre-register active session
+        let initial_meta = StreamMetadataState {
+            live_id: Some(33333),
+            channel_id: "chan_enq".to_string(),
+            channel_name: "EnqStreamer".to_string(),
+            live_title: "Initial Title".to_string(),
+            ..Default::default()
+        };
+        orchestrator.register_active_session(
+            "chan_enq",
+            ActiveSessionState::new(
+                "2026-10-04_150000".to_string(),
+                "EnqStreamer".to_string(),
+                Some("EnqStreamer".to_string()),
+                initial_meta,
+            ),
+        );
+
+        // Poll 1: unchanged title
+        orchestrator.poll_channels_once(&upload_tx).await;
+        assert!(upload_rx.try_recv().is_err());
+
+        // Poll 2: title changed -> must enqueue UploadTask::metadata with delete_on_success: false
+        orchestrator.poll_channels_once(&upload_tx).await;
+
+        let task = upload_rx
+            .try_recv()
+            .expect("metadata upload task must be enqueued");
+        assert_eq!(task.channel_id, "chan_enq");
+        assert_eq!(task.chunk_name, "metadata.jsonl");
+        assert!(task.is_metadata());
+        assert!(
+            !task.delete_on_success,
+            "Poll metadata change must retain file (delete_on_success: false)"
+        );
+
+        // Crucially, mock_backend.uploads should NOT have been called directly by poll_channels_once (zero synchronous child process / upload in poll loop)
+        assert!(
+            mock_backend.uploads.lock().await.is_empty(),
+            "poll_channels_once must not synchronously execute upload"
+        );
+
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }
