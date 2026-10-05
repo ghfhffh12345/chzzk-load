@@ -98,6 +98,10 @@ cargo build --release
 
 ## Agent skills
 
+### Rust tasks
+
+Proactively use the `rust-pro` skill whenever handling Rust-related tasks. See `.agents/skills/rust-pro/SKILL.md`.
+
 ### Issue tracker
 
 GitHub issues via `gh` CLI. See `docs/agents/issue-tracker.md`.
