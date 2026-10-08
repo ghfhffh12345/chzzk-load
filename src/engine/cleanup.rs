@@ -7,46 +7,7 @@ use std::time::Duration;
 /// Returns `Ok(true)` if the directory was removed, `Ok(false)` if it contained any files
 /// or was preserved, or `Err(e)` on I/O error.
 pub async fn cleanup_session_dir_if_empty(session_dir: &Path) -> std::io::Result<bool> {
-    if !session_dir.exists() || !session_dir.is_dir() {
-        return Ok(false);
-    }
-
-    let mut sub_entries = match tokio::fs::read_dir(session_dir).await {
-        Ok(rd) => rd,
-        Err(e) => return Err(e),
-    };
-
-    if sub_entries.next_entry().await?.is_some() {
-        // Directory contains at least one entry - preserve it strictly.
-        return Ok(false);
-    }
-
-    let mut remove_dir_res = tokio::fs::remove_dir(session_dir).await;
-    let mut attempts = 0;
-    while let Err(ref e) = remove_dir_res {
-        if attempts >= 5 || e.kind() == std::io::ErrorKind::NotFound {
-            break;
-        }
-        let raw_os = e.raw_os_error();
-        let is_transient_lock = raw_os == Some(145) // ERROR_DIR_NOT_EMPTY (pending unlinks)
-            || raw_os == Some(32) // ERROR_SHARING_VIOLATION
-            || raw_os == Some(5)  // ERROR_ACCESS_DENIED
-            || e.kind() == std::io::ErrorKind::PermissionDenied;
-
-        if is_transient_lock {
-            attempts += 1;
-            tokio::time::sleep(Duration::from_millis(20 * attempts)).await;
-            remove_dir_res = tokio::fs::remove_dir(session_dir).await;
-        } else {
-            break;
-        }
-    }
-
-    if remove_dir_res.is_ok() || !session_dir.exists() {
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    crate::engine::SessionCustodian::purge_dir_if_empty(session_dir).await
 }
 
 /// Cleans up strictly empty session directories inside the recordings directory,
