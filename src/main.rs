@@ -18,7 +18,7 @@ use chzzk_load::chzzk::client::ChzzkClient;
 use chzzk_load::chzzk::source::LiveStreamSource;
 use chzzk_load::cli::Cli;
 use chzzk_load::config::Settings;
-use chzzk_load::engine::EngineOrchestrator;
+use chzzk_load::engine::{EngineOrchestrator, SessionCustodian};
 use chzzk_load::tui::app::App;
 use chzzk_load::tui::ui::draw_ui;
 use chzzk_load::tui::{AppEvent, LogEntry, TuiOutcome};
@@ -204,7 +204,10 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // Clean up empty stream session folders inside local recordings directory on shutdown
-            let _ = EngineOrchestrator::cleanup_empty_session_dirs(&recordings_base).await;
+            let _ = orchestrator
+                .custodian()
+                .sweep_unmanaged(&recordings_base)
+                .await;
 
             Ok(())
         }
@@ -221,11 +224,8 @@ async fn escalate_force_exit(
     orch_handle.abort();
 
     // 2. Execute a rapid empty directory cleanup (<500ms)
-    let _ = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
-        recordings_base,
-        Duration::from_millis(500),
-    )
-    .await;
+    let _ = SessionCustodian::sweep_empty_dirs_bounded(recordings_base, Duration::from_millis(500))
+        .await;
 
     // 3. Restore console code page and terminal raw mode (safety guard)
     let _ = disable_raw_mode();

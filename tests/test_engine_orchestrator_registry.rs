@@ -1264,3 +1264,173 @@ async fn test_recording_session_enqueues_initial_and_final_metadata_snapshots() 
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_orchestrator_custodian_accessor() {
+    let settings = Settings::default();
+    let chzzk = Arc::new(MockLiveStreamSource::new());
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
+    let custodian = Arc::new(SessionCustodian::without_events());
+    let orchestrator =
+        EngineOrchestrator::new(settings, chzzk, None, event_tx).with_custodian(custodian.clone());
+
+    let test_path = std::path::PathBuf::from("/test/active/session");
+    orchestrator
+        .custodian()
+        .register_active(&test_path, "chan_test", "TestStreamer");
+    assert!(custodian.active_paths().contains(&test_path));
+}
+
+#[tokio::test]
+async fn test_poll_channels_once_stream_closed_does_not_sweep_unmanaged_dirs() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_poll_no_sweep_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let unmanaged_empty = temp_dir.join("2026-10-08_unmanaged_empty");
+    std::fs::create_dir_all(&unmanaged_empty).unwrap();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_closed".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let source = MockLiveStreamSource::new()
+        .with_channel_state("chan_closed", make_close_detail(Some("ClosedStreamer")));
+
+    let chzzk = Arc::new(source);
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(10);
+
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    // The unmanaged empty directory must NOT be swept during poll_channels_once
+    assert!(
+        unmanaged_empty.exists(),
+        "poll_channels_once must not perform redundant sweeps of unmanaged empty directories"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_run_periodic_tick_invokes_custodian_sweep() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_tick_sweep_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let unmanaged_empty = temp_dir.join("2026-10-08_tick_empty");
+    std::fs::create_dir_all(&unmanaged_empty).unwrap();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 1,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_idle".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let source = MockLiveStreamSource::new()
+        .with_channel_state("chan_idle", make_close_detail(Some("IdleStreamer")));
+
+    let chzzk = Arc::new(source);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+    let orch_clone = orchestrator.clone();
+
+    let run_handle = tokio::spawn(async move {
+        orch_clone.run().await;
+    });
+
+    // Wait for periodic tick sweep
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if !unmanaged_empty.exists() {
+            break;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), event_rx.recv()).await;
+    }
+
+    assert!(
+        !unmanaged_empty.exists(),
+        "Periodic tick in run() must invoke custodian sweep_unmanaged"
+    );
+
+    orchestrator.cancel();
+    let _ = run_handle.await;
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_run_shutdown_barrier_invokes_custodian_sweep() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_orch_shutdown_sweep_{}",
+        rand::random::<u32>()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_idle".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let source = MockLiveStreamSource::new()
+        .with_channel_state("chan_idle", make_close_detail(Some("IdleStreamer")));
+
+    let chzzk = Arc::new(source);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+    let orch_clone = orchestrator.clone();
+
+    let run_handle = tokio::spawn(async move {
+        orch_clone.run().await;
+    });
+
+    // Wait for initial poll to complete
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv()).await;
+
+    // Create an unmanaged empty directory after initial poll
+    let unmanaged_empty = temp_dir.join("2026-10-08_shutdown_empty");
+    std::fs::create_dir_all(&unmanaged_empty).unwrap();
+    assert!(unmanaged_empty.exists());
+
+    // Cancel orchestrator to trigger shutdown barrier
+    orchestrator.cancel();
+    let shutdown_res = tokio::time::timeout(std::time::Duration::from_secs(3), run_handle).await;
+    assert!(
+        shutdown_res.is_ok(),
+        "Engine shutdown must complete cleanly"
+    );
+
+    // The unmanaged empty directory must have been swept during shutdown barrier
+    assert!(
+        !unmanaged_empty.exists(),
+        "Shutdown barrier in run() must invoke custodian sweep_unmanaged"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
