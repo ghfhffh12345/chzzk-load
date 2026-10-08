@@ -6,9 +6,11 @@ use common::mock_rclone::get_mock_rclone_bin;
 
 use chzzk_load::chzzk::models_chat::RecordedChatMessage;
 use chzzk_load::consolidation::chat::{
-    ChatDeduplicator, DEFAULT_CHAT_DEDUP_WINDOW_MS, consolidate_chat,
+    ChatDeduplicator, DEFAULT_CHAT_DEDUP_WINDOW_MS, cleanup_staged_chat, consolidate_chat,
+    finalize_staged_chat,
 };
 use chzzk_load::consolidation::manifest::{ConsolidationChunk, TargetLocation};
+use tokio_util::sync::CancellationToken;
 
 fn make_msg(time_ms: u64, user_id_hash: Option<&str>, content: &str) -> RecordedChatMessage {
     RecordedChatMessage {
@@ -183,7 +185,8 @@ async fn test_consolidate_chat_local_pipeline_success() {
     ];
 
     let target = TargetLocation::Local(temp_dir.clone());
-    let stats = consolidate_chat(&target, &chunks, false, None)
+    let cancel_token = CancellationToken::new();
+    let stats = consolidate_chat(&target, &chunks, false, None, cancel_token)
         .await
         .expect("consolidate_chat should succeed");
 
@@ -192,8 +195,24 @@ async fn test_consolidate_chat_local_pipeline_success() {
     assert_eq!(stats.emitted_messages, 4);
     assert_eq!(stats.malformed_messages, 0);
 
-    // Verify consolidated.jsonl exists and has 4 lines
+    // Verify .part exists and final does NOT exist prior to finalization
+    let part_path = temp_dir.join("consolidated.jsonl.part");
     let final_path = temp_dir.join("consolidated.jsonl");
+    assert!(
+        part_path.exists(),
+        "consolidated.jsonl.part must exist before finalize_staged_chat"
+    );
+    assert!(
+        !final_path.exists(),
+        "consolidated.jsonl must not exist before finalize_staged_chat"
+    );
+
+    // Atomically finalize staged chat
+    finalize_staged_chat(&target, None)
+        .await
+        .expect("finalize_staged_chat should succeed");
+
+    // Verify consolidated.jsonl exists and has 4 lines
     assert!(final_path.exists(), "consolidated.jsonl must exist");
     let final_content = fs::read_to_string(&final_path).unwrap();
     let lines: Vec<&str> = final_content.lines().collect();
@@ -208,7 +227,6 @@ async fn test_consolidate_chat_local_pipeline_success() {
     assert_eq!(lines[3], line4);
 
     // Verify .part file does NOT remain
-    let part_path = temp_dir.join("consolidated.jsonl.part");
     assert!(
         !part_path.exists(),
         "consolidated.jsonl.part must not remain"
@@ -242,8 +260,9 @@ async fn test_consolidate_chat_local_pipeline_abort_cleanup_on_error() {
     }];
 
     let target = TargetLocation::Local(temp_dir.clone());
+    let cancel_token = CancellationToken::new();
     // Strict mode = true causes error on malformed line
-    let result = consolidate_chat(&target, &chunks, true, None).await;
+    let result = consolidate_chat(&target, &chunks, true, None, cancel_token).await;
     assert!(
         result.is_err(),
         "Should fail on malformed JSON in strict mode"
@@ -302,17 +321,40 @@ async fn test_consolidate_chat_remote_pipeline_success() {
     let mock_bin = get_mock_rclone_bin().to_string_lossy().to_string();
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
     let remote_target = TargetLocation::Remote(format!("mock_remote:{remote_dir_str}"));
+    let cancel_token = CancellationToken::new();
 
-    let stats = consolidate_chat(&remote_target, &chunks, false, Some(&mock_bin))
-        .await
-        .expect("Remote consolidate_chat should succeed");
+    let stats = consolidate_chat(
+        &remote_target,
+        &chunks,
+        false,
+        Some(&mock_bin),
+        cancel_token,
+    )
+    .await
+    .expect("Remote consolidate_chat should succeed");
 
     assert_eq!(stats.total_messages, 4);
     assert_eq!(stats.deduplicated_messages, 1);
     assert_eq!(stats.emitted_messages, 3);
 
-    // Verify consolidated.jsonl was created and finalized in the remote location
+    // Verify .part was created and final file does not exist yet
+    let part_path = temp_dir.join("consolidated.jsonl.part");
     let final_path = temp_dir.join("consolidated.jsonl");
+    assert!(
+        part_path.exists(),
+        "Remote .part file must exist before finalization"
+    );
+    assert!(
+        !final_path.exists(),
+        "Remote final file must not exist before finalization"
+    );
+
+    // Atomically finalize staged chat
+    finalize_staged_chat(&remote_target, Some(&mock_bin))
+        .await
+        .expect("Remote finalize_staged_chat should succeed");
+
+    // Verify consolidated.jsonl was created and finalized in the remote location
     assert!(final_path.exists(), "Remote consolidated.jsonl must exist");
     let final_content = fs::read_to_string(&final_path).unwrap();
     let lines: Vec<&str> = final_content.lines().collect();
@@ -322,7 +364,6 @@ async fn test_consolidate_chat_remote_pipeline_success() {
     assert_eq!(lines[2], line3);
 
     // Verify .part was cleaned up
-    let part_path = temp_dir.join("consolidated.jsonl.part");
     assert!(!part_path.exists(), "Part file must be moved/removed");
 
     // Verify original chunks are intact
@@ -355,9 +396,11 @@ async fn test_consolidate_chat_remote_pipeline_abort_cleanup_on_error() {
     let mock_bin = get_mock_rclone_bin().to_string_lossy().to_string();
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
     let remote_target = TargetLocation::Remote(format!("mock_remote:{remote_dir_str}"));
+    let cancel_token = CancellationToken::new();
 
     // Strict mode = true causes error on malformed line
-    let result = consolidate_chat(&remote_target, &chunks, true, Some(&mock_bin)).await;
+    let result =
+        consolidate_chat(&remote_target, &chunks, true, Some(&mock_bin), cancel_token).await;
     assert!(result.is_err(), "Strict mode must fail on malformed JSON");
 
     // Verify .part file was deleted
@@ -377,6 +420,78 @@ async fn test_consolidate_chat_remote_pipeline_abort_cleanup_on_error() {
     // Verify original chunk remains untouched
     assert!(chunk0_path.exists());
     assert_eq!(fs::read_to_string(&chunk0_path).unwrap(), chunk0_content);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_consolidate_chat_cooperative_cancellation() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_cons_chat_cancel_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0_path = temp_dir.join("chat_0000.jsonl");
+    let line1 = make_json_line(1_000, Some("u1"), "cancellation test message");
+    let chunk0_content = format!("{line1}\n");
+    fs::write(&chunk0_path, &chunk0_content).unwrap();
+
+    let chunks = vec![ConsolidationChunk {
+        index: 0,
+        name: "chat_0000.jsonl".to_string(),
+        size: chunk0_content.len() as u64,
+    }];
+
+    let target = TargetLocation::Local(temp_dir.clone());
+    let cancel_token = CancellationToken::new();
+    cancel_token.cancel(); // Pre-cancelled to trigger cancellation branch immediately
+
+    let result = consolidate_chat(&target, &chunks, false, None, cancel_token).await;
+    assert!(
+        result.is_err(),
+        "Cancelled chat consolidation must fail with error"
+    );
+
+    let part_path = temp_dir.join("consolidated.jsonl.part");
+    assert!(
+        !part_path.exists(),
+        "Part file must be deleted upon cancellation"
+    );
+
+    let final_path = temp_dir.join("consolidated.jsonl");
+    assert!(
+        !final_path.exists(),
+        "Final file must not be created upon cancellation"
+    );
+
+    assert!(chunk0_path.exists(), "Original chunk must remain untouched");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_staged_chat_cleanup_local() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_cons_chat_cleanup_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let staged_file = temp_dir.join("consolidated.jsonl.part");
+    let chunk0 = temp_dir.join("chat_0000.jsonl");
+
+    tokio::fs::write(&staged_file, b"partial-chat-content")
+        .await
+        .unwrap();
+    tokio::fs::write(&chunk0, b"original-chat-0").await.unwrap();
+
+    let target = TargetLocation::Local(temp_dir.clone());
+    cleanup_staged_chat(&target, None)
+        .await
+        .expect("Cleanup of staged chat file should succeed");
+
+    assert!(
+        !staged_file.exists(),
+        ".part file must be removed on cleanup"
+    );
+    assert!(chunk0.exists(), "Original chunk must be strictly preserved");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
