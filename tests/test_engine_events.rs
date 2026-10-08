@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chzzk_load::chzzk::models::LiveDetail;
 use chzzk_load::chzzk::models_metadata::StreamMetadataState;
 use chzzk_load::chzzk::source::MockLiveStreamSource;
-use chzzk_load::config::{ChannelConfig, Settings};
+use chzzk_load::config::{ChannelConfig, GeneralConfig, Settings};
 use chzzk_load::engine::{
     ActiveSessionState, ChannelLifecycleState, EngineOrchestrator, RestrictionReason,
     SessionCustodian,
@@ -2787,7 +2787,7 @@ async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_e
     ));
 
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
-    // Poll channel once while orchestrator is running
+    // Poll channel once and invoke custodian sweep to clean unmanaged empty session folder
     orchestrator.poll_channels_once(&upload_tx).await;
     orchestrator
         .custodian()
@@ -2797,10 +2797,123 @@ async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_e
 
     assert!(
         !empty_session_dir.exists(),
-        "Empty session directory must be deleted after stream ends during normal polling"
+        "Empty session directory must be cleaned up by custodian unmanaged sweep after broadcast ends"
     );
 
     assert_log_emitted(&mut event_rx, "empty session folder");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_run_periodic_tick_invokes_custodian_sweep() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_orch_tick_sweep_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let unmanaged_empty = temp_dir.join("2026-10-08_tick_empty");
+    fs::create_dir_all(&unmanaged_empty).unwrap();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 1,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_idle".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let source = MockLiveStreamSource::new()
+        .with_channel_state("chan_idle", make_close_detail(Some("IdleStreamer")));
+
+    let chzzk = Arc::new(source);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+    let orch_clone = orchestrator.clone();
+
+    let run_handle = tokio::spawn(async move {
+        orch_clone.run().await;
+    });
+
+    // Wait for periodic tick sweep
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        if !unmanaged_empty.exists() {
+            break;
+        }
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), event_rx.recv()).await;
+    }
+
+    assert!(
+        !unmanaged_empty.exists(),
+        "Periodic tick in run() must invoke custodian sweep_unmanaged"
+    );
+
+    orchestrator.cancel();
+    let _ = run_handle.await;
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_run_shutdown_barrier_invokes_custodian_sweep() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_orch_shutdown_sweep_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            poll_interval_seconds: 60,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_idle".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let source = MockLiveStreamSource::new()
+        .with_channel_state("chan_idle", make_close_detail(Some("IdleStreamer")));
+
+    let chzzk = Arc::new(source);
+    let (event_tx, mut event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let orchestrator = Arc::new(EngineOrchestrator::new(settings, chzzk, None, event_tx));
+    let orch_clone = orchestrator.clone();
+
+    let run_handle = tokio::spawn(async move {
+        orch_clone.run().await;
+    });
+
+    // Wait for initial poll to complete
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv()).await;
+
+    // Create an unmanaged empty directory after initial poll
+    let unmanaged_empty = temp_dir.join("2026-10-08_shutdown_empty");
+    fs::create_dir_all(&unmanaged_empty).unwrap();
+    assert!(unmanaged_empty.exists());
+
+    // Cancel orchestrator to trigger shutdown barrier
+    orchestrator.cancel();
+    let shutdown_res = tokio::time::timeout(std::time::Duration::from_secs(3), run_handle).await;
+    assert!(
+        shutdown_res.is_ok(),
+        "Engine shutdown must complete cleanly"
+    );
+
+    // The unmanaged empty directory must have been swept during shutdown barrier
+    assert!(
+        !unmanaged_empty.exists(),
+        "Shutdown barrier in run() must invoke custodian sweep_unmanaged"
+    );
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

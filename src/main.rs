@@ -203,12 +203,6 @@ async fn main() -> anyhow::Result<()> {
                 escalate_force_exit(&orchestrator, &orch_handle, &recordings_base).await;
             }
 
-            // Clean up empty stream session folders inside local recordings directory on shutdown
-            let _ = orchestrator
-                .custodian()
-                .sweep_unmanaged(&recordings_base)
-                .await;
-
             Ok(())
         }
     }
