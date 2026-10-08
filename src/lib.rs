@@ -2,6 +2,7 @@ pub mod app_path;
 pub mod chzzk;
 pub mod cli;
 pub mod config;
+pub mod consolidation;
 pub mod disk;
 pub mod engine;
 pub mod recorder;
