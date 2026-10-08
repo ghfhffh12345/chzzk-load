@@ -495,3 +495,20 @@ async fn test_staged_chat_cleanup_local() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_delete_remote_file_exit_code_4_ignored_silently() {
+    let mock_bin = get_mock_rclone_bin();
+    let temp_dir = std::env::temp_dir().join(format!("test_del_rem_4_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let nonexistent = temp_dir.join("never_created.jsonl.part");
+    let nonexistent_str = nonexistent.to_string_lossy().replace('\\', "/");
+    let remote_path = format!("remote:{nonexistent_str}");
+
+    // Should complete cleanly without panic or error when file doesn't exist (mock_rclone exits with 4)
+    chzzk_load::consolidation::chat::delete_remote_file(mock_bin.to_str().unwrap(), &remote_path)
+        .await;
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

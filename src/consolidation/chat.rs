@@ -489,6 +489,9 @@ pub async fn consolidate_chat_remote(
 }
 
 /// Helper function to safely delete a remote file via `rclone deletefile`.
+///
+/// Exit code 4 in rclone denotes "directory or object not found", which is
+/// treated as a silent no-op (identical to local `io::ErrorKind::NotFound`).
 pub async fn delete_remote_file(bin: &str, remote_path: &str) {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.kill_on_drop(true);
@@ -499,6 +502,10 @@ pub async fn delete_remote_file(bin: &str, remote_path: &str) {
 
     if let Ok(output) = cmd.output().await {
         if !output.status.success() {
+            // Exit code 4: object not found (already deleted or never staged)
+            if output.status.code() == Some(4) {
+                return;
+            }
             let stderr = String::from_utf8_lossy(&output.stderr);
             eprintln!(
                 "[WARN] rclone deletefile for '{}' returned status {}: {}",

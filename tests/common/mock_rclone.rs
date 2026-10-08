@@ -110,6 +110,10 @@ fn main() {
         "deletefile" => {
             let target = &args[2];
             let local_path = resolve_path(target);
+            if !std::path::Path::new(&local_path).exists() {
+                eprintln!("mock error: {} is a directory or doesn't exist: object not found", local_path);
+                std::process::exit(4);
+            }
             let _ = std::fs::remove_file(&local_path);
             std::process::exit(0);
         }
