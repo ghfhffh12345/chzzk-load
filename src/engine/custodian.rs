@@ -20,20 +20,6 @@ pub enum SessionTrackState {
 }
 
 impl SessionTrackState {
-    pub fn channel_id(&self) -> &str {
-        match self {
-            Self::Active { channel_id, .. } | Self::Draining { channel_id, .. } => channel_id,
-        }
-    }
-
-    pub fn streamer_name(&self) -> &str {
-        match self {
-            Self::Active { streamer_name, .. } | Self::Draining { streamer_name, .. } => {
-                streamer_name
-            }
-        }
-    }
-
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Active { .. })
     }
@@ -47,6 +33,47 @@ impl SessionTrackState {
 struct CustodianInner {
     sessions: HashMap<PathBuf, SessionTrackState>,
     in_flight_purges: HashSet<PathBuf>,
+}
+
+impl CustodianInner {
+    fn is_active_or_in_flight(&self, path: &Path, canonical: &Path) -> bool {
+        let is_active = matches!(
+            self.sessions.get(path),
+            Some(SessionTrackState::Active { .. })
+        ) || matches!(
+            self.sessions.get(canonical),
+            Some(SessionTrackState::Active { .. })
+        );
+        let in_flight =
+            self.in_flight_purges.contains(path) || self.in_flight_purges.contains(canonical);
+        is_active || in_flight
+    }
+
+    fn release_purge(&mut self, path: &Path, canonical: Option<&Path>, purged: bool) -> bool {
+        self.in_flight_purges.remove(path);
+        if let Some(c) = canonical {
+            self.in_flight_purges.remove(c);
+        }
+        if !purged {
+            return false;
+        }
+        let mut removed = false;
+        if let Some(state) = self.sessions.get(path) {
+            if state.is_draining() {
+                self.sessions.remove(path);
+                removed = true;
+            }
+        }
+        if let Some(c) = canonical {
+            if let Some(state) = self.sessions.get(c) {
+                if state.is_draining() {
+                    self.sessions.remove(c);
+                    removed = true;
+                }
+            }
+        }
+        removed
+    }
 }
 
 /// Thread-safe coordinator managing recording session directory lifecycles.
@@ -177,17 +204,26 @@ impl SessionCustodian {
 
             if is_transient_lock {
                 attempts += 1;
-                tokio::time::sleep(Duration::from_millis(20 * attempts)).await;
+                tokio::time::sleep(Duration::from_millis(std::cmp::min(
+                    100,
+                    20 * (1 << (attempts - 1)),
+                )))
+                .await;
                 remove_dir_res = tokio::fs::remove_dir(session_dir).await;
             } else {
                 break;
             }
         }
 
-        if remove_dir_res.is_ok() || !session_dir.exists() {
-            Ok(true)
-        } else {
-            Ok(false)
+        match remove_dir_res {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                if !session_dir.exists() {
+                    Ok(true)
+                } else {
+                    Err(e)
+                }
+            }
         }
     }
 
@@ -214,12 +250,7 @@ impl SessionCustodian {
 
         if !session_dir.exists() {
             let mut guard = self.inner.lock().unwrap();
-            guard.in_flight_purges.remove(session_dir);
-            if let Some(state) = guard.sessions.get(session_dir) {
-                if state.is_draining() {
-                    guard.sessions.remove(session_dir);
-                }
-            }
+            guard.release_purge(session_dir, None, true);
             return Ok(false);
         }
 
@@ -227,21 +258,7 @@ impl SessionCustodian {
 
         let should_log = {
             let mut guard = self.inner.lock().unwrap();
-            guard.in_flight_purges.remove(session_dir);
-            if matches!(cleanup_res, Ok(true)) {
-                if let Some(state) = guard.sessions.get(session_dir) {
-                    if state.is_draining() {
-                        guard.sessions.remove(session_dir);
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
+            guard.release_purge(session_dir, None, matches!(cleanup_res, Ok(true)))
         };
 
         match cleanup_res {
@@ -329,12 +346,11 @@ impl SessionCustodian {
 
             let should_skip = {
                 let mut guard = self.inner.lock().unwrap();
-                if guard.in_flight_purges.contains(&path)
-                    || guard.in_flight_purges.contains(&canonical_path)
-                {
+                if guard.is_active_or_in_flight(&path, &canonical_path) {
                     true
                 } else {
                     guard.in_flight_purges.insert(path.clone());
+                    guard.in_flight_purges.insert(canonical_path.clone());
                     false
                 }
             };
@@ -346,24 +362,8 @@ impl SessionCustodian {
 
             let was_purged = {
                 let mut guard = self.inner.lock().unwrap();
-                guard.in_flight_purges.remove(&path);
-                guard.in_flight_purges.remove(&canonical_path);
-                match purge_res {
-                    Ok(true) => {
-                        if let Some(state) = guard.sessions.get(&path) {
-                            if state.is_draining() {
-                                guard.sessions.remove(&path);
-                            }
-                        }
-                        if let Some(state) = guard.sessions.get(&canonical_path) {
-                            if state.is_draining() {
-                                guard.sessions.remove(&canonical_path);
-                            }
-                        }
-                        true
-                    }
-                    _ => false,
-                }
+                guard.release_purge(&path, Some(&canonical_path), matches!(purge_res, Ok(true)));
+                matches!(purge_res, Ok(true))
             };
 
             if was_purged {
@@ -927,6 +927,34 @@ mod tests {
         assert!(
             !unmanaged_empty_dir.exists(),
             "Unmanaged empty directory must be deleted"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&base_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_sweep_unmanaged_skips_in_flight_purges_and_dynamically_active() {
+        let custodian = SessionCustodian::without_events();
+        let base_dir = std::env::temp_dir().join(format!(
+            "test_custodian_sweep_inflight_{}",
+            rand::random::<u32>()
+        ));
+        tokio::fs::create_dir_all(&base_dir).await.unwrap();
+
+        let dir_in_flight = base_dir.join("in_flight_empty");
+        tokio::fs::create_dir_all(&dir_in_flight).await.unwrap();
+
+        // Simulate an in-flight purge already underway
+        {
+            let mut guard = custodian.inner.lock().unwrap();
+            guard.in_flight_purges.insert(dir_in_flight.clone());
+        }
+
+        let swept = custodian.sweep_unmanaged(&base_dir).await.unwrap();
+        assert_eq!(swept, 0, "In-flight purge directory must not be swept");
+        assert!(
+            dir_in_flight.exists(),
+            "Directory marked in-flight must be preserved"
         );
 
         let _ = tokio::fs::remove_dir_all(&base_dir).await;
