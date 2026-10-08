@@ -14,7 +14,7 @@ This document is the authoritative standard for code review under the `/code-rev
   - *Resolution*: Initialize unit tests with `#[tokio::test(start_paused = true)]` or invoke `tokio::time::pause()` to advance time deterministically via `tokio::time::advance()`.
 - **Shared Subprocess Mocking**: Never invoke `rustc` or recompile dummy executables inline inside individual test bodies.
   - *Hard Violation*: Inline dummy process compilation or duplicate C-ABI `atexit` temporary directory handlers.
-  - *Resolution*: Import and reuse the shared mock fixture via `mod common; use common::mock_ffmpeg::get_mock_ffmpeg_bin;`.
+  - *Resolution*: Import and reuse shared mock fixtures via `mod common; use common::mock_ffmpeg::get_mock_ffmpeg_bin;` or `use common::mock_rclone::get_mock_rclone_bin;`, registering mock paths via `common::register_mock_temp_dir`.
 - **Shared Asynchronous Test Listeners**: Encapsulate recurring background notification loops (such as `drain_notify` driving `SessionCustodian::try_purge_drained`) into reusable test helper functions rather than duplicating ad-hoc spawned loops across individual test cases.
   - *Code Smell (Duplicated Code)*: Re-implementing identical background signal listeners (`tokio::spawn(async move { loop { notify.notified().await; ... } })`) across multiple integration tests.
   - *Resolution*: Factor background signal listeners into a shared test helper (such as `spawn_drain_purge_listener(custodian, drain_notify)`) within the test file or `tests/common/`.
@@ -36,6 +36,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Safe Multiplexing in `tokio::select!`**: Branch future expressions evaluate eagerly on every loop tick before guards (`if <cond> =>`) are evaluated.
   - *Hard Violation*: Calling `.unwrap()` or executing fallible logic in a `tokio::select!` branch future expression (e.g. `_ = sleep_until(deadline.unwrap()), if deadline.is_some() =>`).
   - *Resolution*: Defer evaluation inside an `async` block that yields `std::future::pending().await` when inactive (e.g., `async { match deadline { Some(d) => sleep_until(d).await, None => std::future::pending().await } }`).
+- **Two-Stage Atomic Staging Pattern**: Concurrently joined worker pipelines (such as video and chat consolidation) must exclusively stream to temporary `.part` staging files. Destination file finalization must occur at the outer orchestrator seam only after zero-exit status of all active futures (e.g. via `tokio::try_join!`), preserving clean abort invariants if any concurrent task fails.
+  - *Hard Violation*: Individual worker tasks or futures self-finalizing (`rename`, `moveto`) `.part` files into final destination paths prior to orchestrator join synchronization.
+  - *Resolution*: Confine worker futures to reading sources and generating `.part` files. Perform destination renaming and finalization at the caller orchestrator seam after all worker tasks succeed, and purge `.part` files upon abort or failure.
 
 ---
 
