@@ -22,6 +22,7 @@ use chzzk_load::chzzk::source::MockLiveStreamSource;
 use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::engine::{
     ActiveSessionState, ChannelLifecycleState, EngineOrchestrator, RestrictionReason,
+    SessionCustodian,
 };
 use chzzk_load::tui::event::{AppEvent, LogEntry};
 use chzzk_load::uploader::{
@@ -1311,7 +1312,9 @@ async fn test_cleanup_empty_session_dirs_removes_empty_and_preserves_non_empty()
     fs::write(non_empty_dir.join("chunk_0000.ts"), b"test_stream_data").unwrap();
     fs::write(&regular_file, b"standalone file").unwrap();
 
-    let removed = EngineOrchestrator::cleanup_empty_session_dirs(&temp_dir)
+    let custodian = SessionCustodian::without_events();
+    let removed = custodian
+        .sweep_unmanaged(&temp_dir)
         .await
         .expect("cleanup should succeed");
 
@@ -1331,7 +1334,8 @@ async fn test_cleanup_empty_session_dirs_removes_empty_and_preserves_non_empty()
 
     // Calling on non-existent directory should return Ok(0) safely
     let non_existent = temp_dir.join("does_not_exist");
-    let removed_none = EngineOrchestrator::cleanup_empty_session_dirs(&non_existent)
+    let removed_none = custodian
+        .sweep_unmanaged(&non_existent)
         .await
         .expect("nonexistent dir should return Ok(0)");
     assert_eq!(removed_none, 0);
@@ -2730,10 +2734,11 @@ async fn test_cleanup_empty_session_dirs_excluding_active_preserves_active_sessi
     fs::create_dir_all(&non_empty_dir).unwrap();
     fs::write(non_empty_dir.join("chunk_0000.ts"), b"data").unwrap();
 
-    let mut active_set = std::collections::HashSet::new();
-    active_set.insert(active_chan.to_string());
+    let custodian = SessionCustodian::without_events();
+    custodian.register_active(&active_dir, active_chan, "ActiveStreamer");
 
-    let removed = EngineOrchestrator::cleanup_empty_session_dirs_excluding(&temp_dir, &active_set)
+    let removed = custodian
+        .sweep_unmanaged(&temp_dir)
         .await
         .expect("cleanup should succeed");
 
@@ -2784,6 +2789,11 @@ async fn test_running_orchestrator_cleans_empty_session_folder_after_broadcast_e
     let (upload_tx, _upload_rx) = mpsc::channel::<UploadTask>(10);
     // Poll channel once while orchestrator is running
     orchestrator.poll_channels_once(&upload_tx).await;
+    orchestrator
+        .custodian()
+        .sweep_unmanaged(&temp_dir)
+        .await
+        .expect("sweep should succeed");
 
     assert!(
         !empty_session_dir.exists(),
