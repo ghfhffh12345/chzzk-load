@@ -475,7 +475,7 @@ async fn test_orchestrator_cleanup_empty_session_dirs_bounded() {
         .await
         .unwrap();
 
-    let cleaned = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
+    let cleaned = SessionCustodian::sweep_empty_dirs_bounded(
         &temp_dir,
         std::time::Duration::from_millis(500),
     )
@@ -559,7 +559,7 @@ async fn test_orchestrator_grace_period_timeout_escalation() {
     assert!(orchestrator.cancel_token().is_cancelled());
 
     // 2. Perform bounded empty directory cleanup (<500ms)
-    let cleaned = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
+    let cleaned = SessionCustodian::sweep_empty_dirs_bounded(
         &temp_dir,
         std::time::Duration::from_millis(500),
     )
