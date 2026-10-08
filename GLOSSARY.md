@@ -57,8 +57,16 @@ The invariant enforced exclusively by `SessionCustodian` requiring a session fol
 _Avoid_: Empty check, heuristic delete, metadata purge
 
 **Post-Recording Consolidation**:
-The post-processing task that losslessly merges and remuxes remote video chunks (`.ts` to `.mp4`) and deduplicates chat logs (`.jsonl`) entirely over the network with a strictly bounded memory footprint, circumventing local disk usage.
+The batch post-processing task that losslessly merges and remuxes fragmented video chunks (`.ts` to `.mp4`) and deduplicates chat logs (`.jsonl`) entirely over network pipes or local files with a strictly bounded memory footprint, circumventing local disk staging.
 _Avoid_: Cloud merge, remote stitch, post-processing script
+
+**Staged Remote Part**:
+Temporary upload targets (`consolidated.mp4.part`, `consolidated.jsonl.part`) holding in-flight network consolidation streams until full process exit verification, preventing corrupt partial files upon unexpected failure.
+_Avoid_: Temp file, incomplete download, partial upload
+
+**Sliding-Window Chat Deduplication**:
+The bounded time-window algorithm that identifies and eliminates duplicate live chat messages across chunk boundaries using monotonic message timestamps and identity tuples while maintaining $O(1)$ memory consumption.
+_Avoid_: Chat filter, message dedup cache, hash set
 
 **Lean Metadata Snapshot**:
 The flat JSON Lines event format (`metadata.jsonl`) recording essential stream lifecycle and classification state with monotonic offsets, synchronized via the unified upload DLQ pipeline and omitting volatile viewer telemetry and static CDN thumbnail URLs.
