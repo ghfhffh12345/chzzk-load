@@ -77,6 +77,8 @@ fn test_build_ffmpeg_remux_args_contains_required_flags() {
     assert!(args.contains(&"mp4".to_string()));
     assert!(args.contains(&"-fflags".to_string()));
     assert!(args.contains(&"+genpts+discardcorrupt".to_string()));
+    assert!(args.contains(&"-bsf:a".to_string()));
+    assert!(args.contains(&"aac_adtstoasc".to_string()));
 
     // Verify progress telemetry flags
     assert!(args.contains(&"-progress".to_string()));
@@ -325,8 +327,14 @@ async fn test_consolidate_video_local_with_real_ffmpeg() {
             "lavfi",
             "-i",
             "testsrc=duration=0.5:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=0.5",
             "-c:v",
             "libx264",
+            "-c:a",
+            "aac",
             "-f",
             "mpegts",
             chunk0.to_str().unwrap(),
@@ -342,8 +350,14 @@ async fn test_consolidate_video_local_with_real_ffmpeg() {
             "lavfi",
             "-i",
             "testsrc=duration=0.5:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=0.5",
             "-c:v",
             "libx264",
+            "-c:a",
+            "aac",
             "-f",
             "mpegts",
             chunk1.to_str().unwrap(),

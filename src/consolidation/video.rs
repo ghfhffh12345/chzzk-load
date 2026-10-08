@@ -59,6 +59,7 @@ pub fn resolve_ffmpeg_bin(override_bin: Option<&str>) -> String {
 ///
 /// Implements ADR 0009 and Ticket #24:
 /// - `-c copy`: Lossless stream-copy without transcoding
+/// - `-bsf:a aac_adtstoasc`: Converts ADTS AAC headers to AudioSpecificConfig (ASC) for MP4 container
 /// - `-progress pipe:2`: Emits progress telemetry lines to stderr
 /// - `-movflags frag_keyframe+empty_moov`: Fragmented MP4 for live streaming writes
 /// - `-f mp4`: MPEG-4 container
@@ -79,6 +80,8 @@ pub fn build_ffmpeg_remux_args() -> Vec<String> {
         "pipe:0".to_string(),
         "-c".to_string(),
         "copy".to_string(),
+        "-bsf:a".to_string(),
+        "aac_adtstoasc".to_string(),
         "-movflags".to_string(),
         "frag_keyframe+empty_moov".to_string(),
         "-f".to_string(),
@@ -168,15 +171,7 @@ pub async fn cleanup_staged_video(
         TargetLocation::Remote(remote_base) => {
             let staged = join_remote_path(remote_base, "consolidated.mp4.part");
             let bin = resolve_rclone_bin(rclone_bin);
-
-            let mut cmd = Command::new(&bin);
-            cmd.kill_on_drop(true);
-            cmd.stdin(Stdio::null());
-            cmd.stdout(Stdio::null());
-            cmd.stderr(Stdio::piped());
-            cmd.arg("deletefile").arg(&staged);
-
-            let _ = cmd.output().await;
+            super::chat::delete_remote_file(&bin, &staged).await;
             Ok(())
         }
     }
