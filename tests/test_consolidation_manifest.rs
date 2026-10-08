@@ -2,11 +2,16 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::manifest::{
     ChunkGap, RawManifestEntry, TargetLocation, build_manifest_from_entries, detect_index_gaps,
     discover_manifest, is_remote_path, parse_chat_chunk_index, parse_rclone_lsjson,
     parse_video_chunk_index,
 };
+use chzzk_load::consolidation::{delete_original_chunks, run_consolidation};
+
+mod common;
+use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 
 #[test]
 fn test_target_location_path_resolution() {
@@ -411,8 +416,10 @@ fn test_cli_binary_smoke_consolidate_execution() {
     let meta = temp_dir.join("metadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
+    let mock_bin = get_mock_ffmpeg_bin();
     let bin_path = env!("CARGO_BIN_EXE_chzzk-load");
     let output = Command::new(bin_path)
+        .env("CHZZK_LOAD_FFMPEG_BIN", mock_bin)
         .arg("consolidate")
         .arg(temp_dir.to_str().unwrap())
         .output()
@@ -431,6 +438,270 @@ fn test_cli_binary_smoke_consolidate_execution() {
         stdout.contains("1 video chunk(s)"),
         "Stdout should count 1 video chunk: {stdout}"
     );
+
+    assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    unsafe {
+        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", mock_bin);
+    }
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_run_cons_both_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("run_consolidation should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+    assert!(summary.has_metadata);
+    assert!(
+        summary.video_result.is_some(),
+        "Video result must be present"
+    );
+    assert!(summary.chat_stats.is_some(), "Chat stats must be present");
+
+    // Output files exist
+    assert!(
+        temp_dir.join("consolidated.mp4").exists(),
+        "consolidated.mp4 must exist"
+    );
+    assert!(
+        temp_dir.join("consolidated.jsonl").exists(),
+        "consolidated.jsonl must exist"
+    );
+
+    // Original chunks deleted when keep_original is false
+    assert!(!chunk0.exists(), "Original chunk_0000.ts must be deleted");
+    assert!(!chat0.exists(), "Original chat_0000.jsonl must be deleted");
+
+    // metadata.jsonl preserved
+    assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_run_consolidation_keep_original_flag() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    unsafe {
+        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", mock_bin);
+    }
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_run_cons_keep_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: true,
+        overwrite: false,
+        strict: false,
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("run_consolidation should succeed");
+
+    assert!(summary.video_result.is_some());
+    assert!(summary.chat_stats.is_some());
+
+    // Original chunks must remain when keep_original is true
+    assert!(chunk0.exists(), "chunk_0000.ts must remain intact");
+    assert!(chat0.exists(), "chat_0000.jsonl must remain intact");
+    assert!(meta.exists(), "metadata.jsonl must remain intact");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_run_consolidation_single_media_video_only() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    unsafe {
+        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", mock_bin);
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("test_run_cons_vo_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("Video-only consolidation should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 0);
+    assert!(summary.video_result.is_some());
+    assert!(summary.chat_stats.is_none());
+    assert!(temp_dir.join("consolidated.mp4").exists());
+    assert!(!temp_dir.join("consolidated.jsonl").exists());
+    assert!(!chunk0.exists());
+    assert!(meta.exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_run_consolidation_single_media_chat_only() {
+    let temp_dir = std::env::temp_dir().join(format!("test_run_cons_co_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("Chat-only consolidation should succeed");
+
+    assert_eq!(summary.video_chunks_count, 0);
+    assert_eq!(summary.chat_chunks_count, 1);
+    assert!(summary.video_result.is_none());
+    assert!(summary.chat_stats.is_some());
+    assert!(!temp_dir.join("consolidated.mp4").exists());
+    assert!(temp_dir.join("consolidated.jsonl").exists());
+    assert!(!chat0.exists());
+    assert!(meta.exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_delete_original_chunks_never_deletes_metadata() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_del_chunks_meta_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, b"video chunk").unwrap();
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    fs::write(&chat0, b"chat chunk").unwrap();
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"precious metadata").unwrap();
+
+    let target = TargetLocation::Local(temp_dir.clone());
+    let v_chunks = vec![chzzk_load::consolidation::manifest::ConsolidationChunk {
+        index: 0,
+        name: "chunk_0000.ts".to_string(),
+        size: 11,
+    }];
+    let c_chunks = vec![chzzk_load::consolidation::manifest::ConsolidationChunk {
+        index: 0,
+        name: "chat_0000.jsonl".to_string(),
+        size: 10,
+    }];
+
+    delete_original_chunks(&target, &v_chunks, &c_chunks)
+        .await
+        .expect("delete_original_chunks should succeed");
+
+    assert!(!chunk0.exists(), "video chunk must be deleted");
+    assert!(!chat0.exists(), "chat chunk must be deleted");
+    assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_delete_original_chunks_remote_preserves_metadata() {
+    let mock_rclone = common::mock_rclone::get_mock_rclone_bin()
+        .to_string_lossy()
+        .to_string();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_del_chunks_rem_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, b"video chunk").unwrap();
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    fs::write(&chat0, b"chat chunk").unwrap();
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"precious metadata").unwrap();
+
+    let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
+    let target = TargetLocation::Remote(format!("remote:{remote_dir_str}"));
+    let v_chunks = vec![chzzk_load::consolidation::manifest::ConsolidationChunk {
+        index: 0,
+        name: "chunk_0000.ts".to_string(),
+        size: 11,
+    }];
+    let c_chunks = vec![chzzk_load::consolidation::manifest::ConsolidationChunk {
+        index: 0,
+        name: "chat_0000.jsonl".to_string(),
+        size: 10,
+    }];
+
+    chzzk_load::consolidation::delete_original_chunks_with_bin(
+        &target,
+        &v_chunks,
+        &c_chunks,
+        Some(&mock_rclone),
+    )
+    .await
+    .expect("delete_original_chunks_with_bin remote should succeed");
+
+    assert!(!chunk0.exists(), "remote video chunk must be deleted");
+    assert!(!chat0.exists(), "remote chat chunk must be deleted");
+    assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
