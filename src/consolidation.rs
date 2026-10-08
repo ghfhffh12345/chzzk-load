@@ -1,9 +1,15 @@
 pub mod manifest;
+pub mod video;
 
 pub use manifest::{
     ChunkGap, ConsolidationChunk, ConsolidationManifest, RawManifestEntry, TargetLocation,
     build_manifest_from_entries, detect_index_gaps, discover_manifest, discover_manifest_with_bin,
     is_remote_path, parse_chat_chunk_index, parse_video_chunk_index, resolve_rclone_bin,
+};
+pub use video::{
+    VideoConsolidationOptions, VideoConsolidationResult, build_ffmpeg_remux_args,
+    build_ffmpeg_remux_command, cleanup_staged_video, consolidate_video, feed_video_chunks,
+    finalize_staged_video, join_remote_path, rename_local_file_with_retry, resolve_ffmpeg_bin,
 };
 
 use crate::cli::ConsolidateArgs;
