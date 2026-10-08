@@ -7,3 +7,4 @@ settings.toml
 !.agents/skills/
 .agents/skills/*
 !.agents/skills/rust-pro/
+.worktrees/

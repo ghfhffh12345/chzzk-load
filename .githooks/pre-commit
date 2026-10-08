@@ -5,4 +5,16 @@ set -e
 cargo fmt --check
 RUSTFLAGS="-D warnings" cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
+# Pre-build fast unit test binaries to isolate test execution time from compiler linking latency
+cargo test --no-run --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state
+
+# Enforce fast unit test tier execution budget (< 3s total runtime)
+START_TIME=$(date +%s)
 cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state
+END_TIME=$(date +%s)
+
+ELAPSED=$((END_TIME - START_TIME))
+if [ "$ELAPSED" -gt 3 ]; then
+  echo "Pre-commit error: fast unit test tier exceeded 3s execution budget (${ELAPSED}s elapsed)" >&2
+  exit 1
+fi

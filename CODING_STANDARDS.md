@@ -57,8 +57,11 @@ This document is the authoritative standard for code review under the `/code-rev
 
 ## 5. Filesystem Invariants & Windows OS Safety
 
-- **Windows Transient Lock & Unlink Resilience**: All filesystem deletion routines operating on child process outputs (`upload_file_and_delete`) or directory unlinks (`cleanup_session_dir_if_empty`) must implement bounded exponential backoff retries handling `ERROR_SHARING_VIOLATION` (32), `ERROR_ACCESS_DENIED` (5), and `ERROR_DIR_NOT_EMPTY` (145), and treat `ErrorKind::NotFound` as success.
+- **Windows Transient Lock & Unlink Resilience**: All filesystem deletion routines operating on child process outputs (`unlink_local_file_with_retry`) or directory unlinks (`SessionCustodian::purge_dir_if_empty`) must implement bounded exponential backoff retries handling `ERROR_SHARING_VIOLATION` (32), `ERROR_ACCESS_DENIED` (5), and `ERROR_DIR_NOT_EMPTY` (145), and treat `ErrorKind::NotFound` as success.
   - *Hard Violation*: Single-attempt `tokio::fs::remove_file` or `remove_dir` immediately following child process termination or file deletion.
-  - *Resolution*: Retry up to 5–10 attempts with exponential backoff (20ms–200ms) before returning an I/O error, allowing background Windows antivirus and filesystem filter drivers to release locks.
+  - *Resolution*: Retry up to 5–10 attempts with exponential backoff using the standard formula `Duration::from_millis(std::cmp::min(max_ms, base_ms * (1 << (attempt - 1))))` (20ms–200ms) before returning an I/O error, allowing background Windows antivirus and filesystem filter drivers to release locks.
+- **No Silent Directory Cleanup Error Suppression**: Directory purge routines (`SessionCustodian::purge_dir_if_empty`, `try_purge`) must distinguish between non-empty preserved directories (`Ok(false)`) and filesystem I/O failures.
+  - *Hard Violation*: Silently suppressing or swallowing unrecovered non-transient I/O errors (e.g. returning `Ok(false)` on `tokio::fs::remove_dir` or `read_dir` failures) during directory cleanup.
+  - *Resolution*: Unrecovered non-transient I/O errors must be propagated (`Err(e)`) after bounded retry exhaustion rather than silently returning `Ok(false)`.
 - **External Subprocess Hermeticity**: Integration tests invoking real external binaries (`rclone`, `ffmpeg`) must guard execution behind an availability check (e.g. `ensure_rclone_available()`, `ensure_ffmpeg_available()`) to prevent environment-dependent test failures in lightweight runner environments. External live network streams or credentials must be marked `#[ignore]`.
 
