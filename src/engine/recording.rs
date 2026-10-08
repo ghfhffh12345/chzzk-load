@@ -16,6 +16,7 @@ use crate::engine::session::ActiveSessionState;
 use crate::recorder::ffmpeg::{FfmpegEvent, FfmpegExit, FfmpegSession};
 use crate::recorder::watcher::SegmentWatcher;
 use crate::tui::event::{AppEvent, LogEntry};
+use crate::uploader::worker::unlink_local_file_with_retry;
 use crate::uploader::{UploadBackend, UploadTask, broadcast_identifier};
 
 /// Parameters required to spawn a `RecordingSession`.
@@ -496,7 +497,7 @@ impl RecordingSession {
                 if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
                     while let Ok(Some(entry)) = rd.next_entry().await {
                         if entry.file_name() != "metadata.jsonl" {
-                            let _ = tokio::fs::remove_file(entry.path()).await;
+                            let _ = unlink_local_file_with_retry(&entry.path()).await;
                         }
                     }
                 }

@@ -6,6 +6,7 @@ use crate::config::Settings;
 use crate::recorder::watcher::parse_chunk_index;
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::UploadTask;
+use crate::uploader::worker::rename_local_file_with_retry;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ReconciliationReport {
@@ -44,7 +45,10 @@ async fn quarantine_chunk(
     event_tx: &Sender<AppEvent>,
 ) -> bool {
     let quarantine_path = path.with_extension(format!("{ext}.quarantine"));
-    if tokio::fs::rename(path, &quarantine_path).await.is_ok() {
+    if rename_local_file_with_retry(path, &quarantine_path)
+        .await
+        .is_ok()
+    {
         let reason = if is_empty {
             "empty"
         } else {

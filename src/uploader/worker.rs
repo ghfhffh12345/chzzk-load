@@ -234,10 +234,10 @@ async fn enforce_dlq_disk_eviction(
     let paired = resolve_paired_paths(&oldest_task.chunk_path);
 
     if paired.ts_path.exists() {
-        let _ = tokio::fs::remove_file(&paired.ts_path).await;
+        let _ = unlink_local_file_with_retry(&paired.ts_path).await;
     }
     if paired.jsonl_path.exists() {
-        let _ = tokio::fs::remove_file(&paired.jsonl_path).await;
+        let _ = unlink_local_file_with_retry(&paired.jsonl_path).await;
     }
 
     // Prune envelopes from DLQ
@@ -275,6 +275,7 @@ async fn enforce_dlq_disk_eviction(
 /// Unlinks a local file upon successful upload with bounded exponential backoff retries
 /// handling transient Windows sharing violations (32), access denied (5), and permission errors,
 /// treating NotFound as success.
+#[allow(clippy::disallowed_methods)]
 pub async fn unlink_local_file_with_retry(path: &Path) -> std::io::Result<()> {
     let mut remove_res = tokio::fs::remove_file(path).await;
     let mut attempts: usize = 0;
@@ -314,6 +315,7 @@ pub async fn unlink_local_file_with_retry(path: &Path) -> std::io::Result<()> {
 /// Renames a local file with bounded exponential backoff retries handling transient
 /// Windows sharing violations (32), access denied errors (5), directory not empty (145),
 /// and permission denied errors.
+#[allow(clippy::disallowed_methods)]
 pub async fn rename_local_file_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut rename_res = tokio::fs::rename(from, to).await;
     let mut attempts: usize = 0;

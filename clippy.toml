@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "tokio::fs::remove_file", reason = "Use unlink_local_file_with_retry for Windows transient lock resilience (§5 CODING_STANDARDS.md)" },
+    { path = "tokio::fs::rename", reason = "Use rename_local_file_with_retry for Windows transient lock resilience (§5 CODING_STANDARDS.md)" },
+]

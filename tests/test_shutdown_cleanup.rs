@@ -11,6 +11,7 @@ use chzzk_load::config::{ChannelConfig, Settings};
 use chzzk_load::engine::EngineOrchestrator;
 use chzzk_load::tui::event::AppEvent;
 use chzzk_load::uploader::UploadBackend;
+use chzzk_load::uploader::worker::unlink_local_file_with_retry;
 
 mod common;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
@@ -216,7 +217,7 @@ async fn test_rclone_copyto_remove_file() {
         let status = child.wait().await.unwrap();
         assert!(status.success());
 
-        tokio::fs::remove_file(&chunk_path)
+        unlink_local_file_with_retry(&chunk_path)
             .await
             .unwrap_or_else(|e| {
                 panic!("Iteration {i}: remove_file failed: {e}");

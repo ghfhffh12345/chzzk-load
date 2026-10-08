@@ -410,6 +410,7 @@ impl Default for SessionCustodian {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::uploader::worker::unlink_local_file_with_retry;
 
     #[tokio::test]
     async fn test_active_directory_is_strictly_protected_from_deletion() {
@@ -523,7 +524,7 @@ mod tests {
         );
 
         // Once metadata.jsonl is removed (simulating confirmed upload & unlink), it is purged
-        tokio::fs::remove_file(&meta_file).await.unwrap();
+        unlink_local_file_with_retry(&meta_file).await.unwrap();
         let purged_a_empty = custodian.try_purge(&dir_a).await.unwrap();
         assert!(purged_a_empty, "Strictly empty directory must be purged");
         assert!(!dir_a.exists(), "Purged directory must not exist on disk");
@@ -770,7 +771,7 @@ mod tests {
                 .unwrap()
         );
         assert!(session_dir.exists());
-        tokio::fs::remove_file(&chunk_file).await.unwrap();
+        unlink_local_file_with_retry(&chunk_file).await.unwrap();
 
         // 2. Directory with chat log (.jsonl)
         let chat_file = session_dir.join("chat_0000.jsonl");
@@ -783,7 +784,7 @@ mod tests {
                 .unwrap()
         );
         assert!(session_dir.exists());
-        tokio::fs::remove_file(&chat_file).await.unwrap();
+        unlink_local_file_with_retry(&chat_file).await.unwrap();
 
         // 3. Directory with metadata.jsonl
         let meta_file = session_dir.join("metadata.jsonl");
@@ -796,7 +797,7 @@ mod tests {
                 .unwrap()
         );
         assert!(session_dir.exists());
-        tokio::fs::remove_file(&meta_file).await.unwrap();
+        unlink_local_file_with_retry(&meta_file).await.unwrap();
 
         // 4. Strictly empty directory is successfully purged
         assert!(
