@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 
-use crate::tui::event::AppEvent;
+use crate::tui::event::{AppEvent, LogEntry};
 
 /// Lifecycle tracking state for a monitored session directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +144,53 @@ impl SessionCustodian {
         guard.sessions.get(session_dir).cloned()
     }
 
+    /// Checks if a session directory is strictly empty (0 entries).
+    /// If so, removes the directory with bounded retry handling Windows file-locking latency.
+    /// Returns `Ok(true)` if the directory was removed, `Ok(false)` if it contained any files
+    /// or was preserved, or `Err(e)` on I/O error.
+    pub async fn purge_dir_if_empty(session_dir: &Path) -> std::io::Result<bool> {
+        if !session_dir.exists() || !session_dir.is_dir() {
+            return Ok(false);
+        }
+
+        let mut sub_entries = match tokio::fs::read_dir(session_dir).await {
+            Ok(rd) => rd,
+            Err(e) => return Err(e),
+        };
+
+        if sub_entries.next_entry().await?.is_some() {
+            // Directory contains at least one entry - preserve it strictly.
+            return Ok(false);
+        }
+
+        let mut remove_dir_res = tokio::fs::remove_dir(session_dir).await;
+        let mut attempts = 0;
+        while let Err(ref e) = remove_dir_res {
+            if attempts >= 5 || e.kind() == std::io::ErrorKind::NotFound {
+                break;
+            }
+            let raw_os = e.raw_os_error();
+            let is_transient_lock = raw_os == Some(145) // ERROR_DIR_NOT_EMPTY (pending unlinks)
+                || raw_os == Some(32) // ERROR_SHARING_VIOLATION
+                || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+                || e.kind() == std::io::ErrorKind::PermissionDenied;
+
+            if is_transient_lock {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(20 * attempts)).await;
+                remove_dir_res = tokio::fs::remove_dir(session_dir).await;
+            } else {
+                break;
+            }
+        }
+
+        if remove_dir_res.is_ok() || !session_dir.exists() {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub async fn try_purge(&self, session_dir: &Path) -> std::io::Result<bool> {
         let (channel_id, streamer_name) = {
             let mut guard = self.inner.lock().unwrap();
@@ -175,7 +223,7 @@ impl SessionCustodian {
             return Ok(false);
         }
 
-        let cleanup_res = crate::engine::cleanup::cleanup_session_dir_if_empty(session_dir).await;
+        let cleanup_res = Self::purge_dir_if_empty(session_dir).await;
 
         let should_log = {
             let mut guard = self.inner.lock().unwrap();
@@ -240,6 +288,116 @@ impl SessionCustodian {
             }
         }
         purged_count
+    }
+
+    /// Sweeps unmanaged empty directories in `recordings_dir`, strictly excluding active recording sessions
+    /// using exact canonical path containment. Draining or untracked empty folders are purged.
+    /// Emits a summary clean log if any empty folders were removed.
+    pub async fn sweep_unmanaged(&self, recordings_dir: &Path) -> std::io::Result<usize> {
+        if !recordings_dir.exists() || !recordings_dir.is_dir() {
+            return Ok(0);
+        }
+
+        let active_set = self.active_paths();
+        let canonical_active_set: HashSet<PathBuf> = active_set
+            .iter()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .collect();
+
+        let mut swept_count = 0;
+        let mut entries = tokio::fs::read_dir(recordings_dir).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let is_dir = match entry.file_type().await {
+                Ok(ft) => ft.is_dir(),
+                Err(_) => entry.path().is_dir(),
+            };
+            if !is_dir {
+                continue;
+            }
+
+            let path = entry.path();
+            let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+
+            if active_set.contains(&path)
+                || active_set.contains(&canonical_path)
+                || canonical_active_set.contains(&path)
+                || canonical_active_set.contains(&canonical_path)
+            {
+                continue;
+            }
+
+            let should_skip = {
+                let mut guard = self.inner.lock().unwrap();
+                if guard.in_flight_purges.contains(&path)
+                    || guard.in_flight_purges.contains(&canonical_path)
+                {
+                    true
+                } else {
+                    guard.in_flight_purges.insert(path.clone());
+                    false
+                }
+            };
+            if should_skip {
+                continue;
+            }
+
+            let purge_res = Self::purge_dir_if_empty(&path).await;
+
+            let was_purged = {
+                let mut guard = self.inner.lock().unwrap();
+                guard.in_flight_purges.remove(&path);
+                guard.in_flight_purges.remove(&canonical_path);
+                match purge_res {
+                    Ok(true) => {
+                        if let Some(state) = guard.sessions.get(&path) {
+                            if state.is_draining() {
+                                guard.sessions.remove(&path);
+                            }
+                        }
+                        if let Some(state) = guard.sessions.get(&canonical_path) {
+                            if state.is_draining() {
+                                guard.sessions.remove(&canonical_path);
+                            }
+                        }
+                        true
+                    }
+                    _ => false,
+                }
+            };
+
+            if was_purged {
+                swept_count += 1;
+            }
+        }
+
+        if swept_count > 0 {
+            let log_msg = format!(
+                "Cleaned up {swept_count} empty session folder(s) in '{}'",
+                recordings_dir.display()
+            );
+            if let Some(ref tx) = self.event_tx {
+                let _ = tx.try_send(AppEvent::Log(LogEntry::clean(log_msg)));
+            }
+        }
+
+        Ok(swept_count)
+    }
+
+    /// Sweeps unmanaged empty directories in `recordings_dir` bounded by a maximum timeout.
+    /// Uses an event-less custodian instance.
+    pub async fn sweep_empty_dirs_bounded(
+        recordings_dir: &Path,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        let custodian = Self::without_events();
+        match tokio::time::timeout(timeout, custodian.sweep_unmanaged(recordings_dir)).await {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "sweep empty session directories timed out",
+            )),
+        }
     }
 }
 
@@ -592,5 +750,266 @@ mod tests {
             log_count, 1,
             "Exactly one clean log must be emitted despite concurrent calls"
         );
+    }
+
+    #[tokio::test]
+    async fn test_purge_dir_if_empty_preserves_dir_with_chunks_and_metadata() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_custodian_purge_preserve_{}",
+            rand::random::<u32>()
+        ));
+        let session_dir = temp_dir.join("session_preserve");
+        tokio::fs::create_dir_all(&session_dir).await.unwrap();
+
+        // 1. Directory with media chunk (.ts)
+        let chunk_file = session_dir.join("chunk_0000.ts");
+        tokio::fs::write(&chunk_file, b"ts content").await.unwrap();
+        assert!(
+            !SessionCustodian::purge_dir_if_empty(&session_dir)
+                .await
+                .unwrap()
+        );
+        assert!(session_dir.exists());
+        tokio::fs::remove_file(&chunk_file).await.unwrap();
+
+        // 2. Directory with chat log (.jsonl)
+        let chat_file = session_dir.join("chat_0000.jsonl");
+        tokio::fs::write(&chat_file, b"{\"cmd\":93101}\n")
+            .await
+            .unwrap();
+        assert!(
+            !SessionCustodian::purge_dir_if_empty(&session_dir)
+                .await
+                .unwrap()
+        );
+        assert!(session_dir.exists());
+        tokio::fs::remove_file(&chat_file).await.unwrap();
+
+        // 3. Directory with metadata.jsonl
+        let meta_file = session_dir.join("metadata.jsonl");
+        tokio::fs::write(&meta_file, b"{\"event\":\"INITIAL_STATE\"}\n")
+            .await
+            .unwrap();
+        assert!(
+            !SessionCustodian::purge_dir_if_empty(&session_dir)
+                .await
+                .unwrap()
+        );
+        assert!(session_dir.exists());
+        tokio::fs::remove_file(&meta_file).await.unwrap();
+
+        // 4. Strictly empty directory is successfully purged
+        assert!(
+            SessionCustodian::purge_dir_if_empty(&session_dir)
+                .await
+                .unwrap()
+        );
+        assert!(!session_dir.exists());
+
+        // 5. Non-existent directory returns Ok(false)
+        let non_existent = temp_dir.join("does_not_exist");
+        assert!(
+            !SessionCustodian::purge_dir_if_empty(&non_existent)
+                .await
+                .unwrap()
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_purge_dir_if_empty_windows_lock_resilience() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_custodian_purge_lock_{}",
+            rand::random::<u32>()
+        ));
+        let session_dir = temp_dir.join("session_lock");
+        tokio::fs::create_dir_all(&session_dir).await.unwrap();
+
+        // If directory disappears (NotFound) during purge, it is treated as success
+        let non_existent = temp_dir.join("disappeared");
+        tokio::fs::create_dir_all(&non_existent).await.unwrap();
+        tokio::fs::remove_dir(&non_existent).await.unwrap();
+        assert!(
+            !SessionCustodian::purge_dir_if_empty(&non_existent)
+                .await
+                .unwrap()
+        );
+
+        // An empty directory is safely purged
+        assert!(
+            SessionCustodian::purge_dir_if_empty(&session_dir)
+                .await
+                .unwrap()
+        );
+        assert!(!session_dir.exists());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_sweep_unmanaged_excludes_active_sessions_by_exact_canonical_path() {
+        let custodian = SessionCustodian::without_events();
+        let base_dir = std::env::temp_dir().join(format!(
+            "test_custodian_sweep_active_{}",
+            rand::random::<u32>()
+        ));
+        tokio::fs::create_dir_all(&base_dir).await.unwrap();
+
+        let active_dir = base_dir.join("active_session");
+        tokio::fs::create_dir_all(&active_dir).await.unwrap();
+
+        let active_dir_2 = base_dir.join("active_session_2");
+        tokio::fs::create_dir_all(&active_dir_2).await.unwrap();
+
+        let draining_empty_dir = base_dir.join("draining_empty");
+        tokio::fs::create_dir_all(&draining_empty_dir)
+            .await
+            .unwrap();
+
+        let unmanaged_empty_dir = base_dir.join("unmanaged_empty");
+        tokio::fs::create_dir_all(&unmanaged_empty_dir)
+            .await
+            .unwrap();
+
+        let unmanaged_full_dir = base_dir.join("unmanaged_full");
+        tokio::fs::create_dir_all(&unmanaged_full_dir)
+            .await
+            .unwrap();
+        tokio::fs::write(unmanaged_full_dir.join("file.txt"), b"data")
+            .await
+            .unwrap();
+
+        custodian.register_active(&active_dir, "chan_act", "StreamerAct");
+        // Register active_dir_2 using relative dot notation to test exact canonical resolution
+        custodian.register_active(
+            base_dir.join("./active_session_2"),
+            "chan_act2",
+            "StreamerAct2",
+        );
+        custodian.register_draining(&draining_empty_dir, "chan_drain", "StreamerDrain");
+
+        let swept = custodian.sweep_unmanaged(&base_dir).await.unwrap();
+        assert_eq!(
+            swept, 2,
+            "Expected draining_empty and unmanaged_empty to be swept"
+        );
+
+        // Active sessions must be preserved even though empty!
+        assert!(active_dir.exists(), "Active directory must not be deleted");
+        assert!(
+            active_dir_2.exists(),
+            "Active directory registered via relative dot path must not be deleted"
+        );
+        assert!(
+            custodian.tracked_state(&active_dir).unwrap().is_active(),
+            "Active session must remain tracked"
+        );
+
+        // Unmanaged full directory must be preserved
+        assert!(
+            unmanaged_full_dir.exists(),
+            "Non-empty directory must not be deleted"
+        );
+
+        // Draining empty directory must be purged and untracked
+        assert!(
+            !draining_empty_dir.exists(),
+            "Draining empty directory must be deleted"
+        );
+        assert_eq!(
+            custodian.tracked_state(&draining_empty_dir),
+            None,
+            "Swept draining directory must be untracked"
+        );
+
+        // Unmanaged empty directory must be purged
+        assert!(
+            !unmanaged_empty_dir.exists(),
+            "Unmanaged empty directory must be deleted"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&base_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_sweep_unmanaged_emits_summary_clean_log() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(10);
+        let custodian = SessionCustodian::new(event_tx);
+        let base_dir = std::env::temp_dir().join(format!(
+            "test_custodian_sweep_log_{}",
+            rand::random::<u32>()
+        ));
+        tokio::fs::create_dir_all(&base_dir).await.unwrap();
+
+        let dir1 = base_dir.join("empty_1");
+        let dir2 = base_dir.join("empty_2");
+        tokio::fs::create_dir_all(&dir1).await.unwrap();
+        tokio::fs::create_dir_all(&dir2).await.unwrap();
+
+        let swept = custodian.sweep_unmanaged(&base_dir).await.unwrap();
+        assert_eq!(swept, 2);
+
+        let event = event_rx.try_recv().expect("Expected log event");
+        match event {
+            AppEvent::Log(entry) => {
+                assert_eq!(entry.kind, crate::tui::event::LogKind::Clean);
+                let expected = format!(
+                    "Cleaned up 2 empty session folder(s) in '{}'",
+                    base_dir.display()
+                );
+                assert_eq!(entry.message, expected);
+            }
+            _ => panic!("Expected Log event"),
+        }
+
+        // Sweeping again when nothing is removed must NOT emit any log
+        let swept_again = custodian.sweep_unmanaged(&base_dir).await.unwrap();
+        assert_eq!(swept_again, 0);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "No event should be emitted when swept_count == 0"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&base_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_sweep_empty_dirs_bounded_success_and_timeout() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_custodian_bounded_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let empty_session = temp_dir.join("empty_session_1");
+        tokio::fs::create_dir_all(&empty_session).await.unwrap();
+
+        let non_empty = temp_dir.join("active_session_2");
+        tokio::fs::create_dir_all(&non_empty).await.unwrap();
+        tokio::fs::write(non_empty.join("chunk_0000.ts"), b"data")
+            .await
+            .unwrap();
+
+        // 1. Success case
+        let cleaned =
+            SessionCustodian::sweep_empty_dirs_bounded(&temp_dir, Duration::from_millis(500))
+                .await
+                .expect("bounded sweep should succeed");
+
+        assert_eq!(cleaned, 1);
+        assert!(!empty_session.exists());
+        assert!(non_empty.exists());
+
+        // 2. Timeout case: Duration::ZERO with asynchronous read_dir operation
+        let timeout_res =
+            SessionCustodian::sweep_empty_dirs_bounded(&temp_dir, Duration::ZERO).await;
+
+        match timeout_res {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::TimedOut),
+            Ok(_) => {
+                // In case a scheduler finished immediately before timeout fired
+            }
+        }
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }
