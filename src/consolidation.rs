@@ -140,8 +140,9 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
             cancel_token.clone(),
         );
 
-        match tokio::try_join!(video_fut, chat_fut) {
-            Ok((v_res, c_res)) => {
+        let (video_res, chat_res) = tokio::join!(video_fut, chat_fut);
+        match (video_res, chat_res) {
+            (Ok(v_res), Ok(c_res)) => {
                 // Both pipelines completed with zero-exit: atomically finalize both .part files
                 let finalize_res = async {
                     finalize_staged_video(&manifest.target, None).await?;
@@ -157,12 +158,35 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
                 }
                 (Some(v_res), Some(c_res))
             }
-            Err(err) => {
+            (Err(v_err), Ok(_)) => {
                 cancel_token.cancel();
-                // Clean up both .part files; original chunks remain untouched
                 let _ = cleanup_staged_video(&manifest.target, None).await;
                 let _ = cleanup_staged_chat(&manifest.target, None).await;
-                return Err(err);
+                return Err(v_err);
+            }
+            (Ok(_), Err(c_err)) => {
+                cancel_token.cancel();
+                let _ = cleanup_staged_video(&manifest.target, None).await;
+                let _ = cleanup_staged_chat(&manifest.target, None).await;
+                return Err(c_err);
+            }
+            (Err(v_err), Err(c_err)) => {
+                cancel_token.cancel();
+                let _ = cleanup_staged_video(&manifest.target, None).await;
+                let _ = cleanup_staged_chat(&manifest.target, None).await;
+
+                let v_is_cancel = is_cancellation_error(&v_err);
+                let c_is_cancel = is_cancellation_error(&c_err);
+
+                let primary_err = match (v_is_cancel, c_is_cancel) {
+                    (false, true) => v_err,
+                    (true, false) => c_err,
+                    (false, false) => anyhow::anyhow!(
+                        "Dual consolidation pipeline failure: video error: {v_err:#}; chat error: {c_err:#}"
+                    ),
+                    (true, true) => v_err,
+                };
+                return Err(primary_err);
             }
         }
     } else if has_video {
@@ -254,4 +278,9 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
         chat_stats,
         video_result,
     })
+}
+
+fn is_cancellation_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("cancelled by cooperative cancellation token")
 }

@@ -781,3 +781,44 @@ async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_prese
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_run_consolidation_video_failure_surfaces_video_error_not_chat_cancellation() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_run_cons_vid_fail_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    // Invalid video chunk causes ffmpeg to fail
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, b"not valid mpegts data").unwrap();
+
+    // Valid chat chunk with many lines so chat is actively processing when video fails
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    let mut chat_content = String::with_capacity(1024 * 1024);
+    for i in 0..20_000 {
+        chat_content.push_str(&format!(
+            "{{\"time_ms\":{},\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello {}\",\"raw\":{{}}}}\n",
+            i * 100, i
+        ));
+    }
+    fs::write(&chat0, chat_content.as_bytes()).unwrap();
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+    };
+
+    let result = run_consolidation(args).await;
+    assert!(result.is_err(), "Consolidation must fail on video failure");
+    let err_str = format!("{:#}", result.err().unwrap());
+    assert!(
+        !err_str.contains("Chat consolidation cancelled by cooperative cancellation token"),
+        "Primary video error must not be masked by chat cancellation token! Got: {err_str}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
