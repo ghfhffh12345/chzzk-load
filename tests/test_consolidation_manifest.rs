@@ -152,24 +152,18 @@ fn test_contiguity_gap_detection() {
     assert_eq!(gaps, vec![ChunkGap { start: 2, end: 2 }]);
     assert_eq!(gaps[0].format(), "2");
 
-    // 3. Missing leading chunk 0
+    // 3. Leading chunk > 0 is NOT considered a gap (Issue #22)
     let gaps_leading = detect_index_gaps(&[1, 2, 3]);
-    assert_eq!(gaps_leading, vec![ChunkGap { start: 0, end: 0 }]);
-    assert_eq!(gaps_leading[0].format(), "0");
+    assert_eq!(gaps_leading, Vec::<ChunkGap>::new());
 
     // 4. Multiple missing gaps and ranges
     let gaps_multi = detect_index_gaps(&[1, 4, 5, 8]);
     assert_eq!(
         gaps_multi,
-        vec![
-            ChunkGap { start: 0, end: 0 },
-            ChunkGap { start: 2, end: 3 },
-            ChunkGap { start: 6, end: 7 },
-        ]
+        vec![ChunkGap { start: 2, end: 3 }, ChunkGap { start: 6, end: 7 },]
     );
-    assert_eq!(gaps_multi[0].format(), "0");
-    assert_eq!(gaps_multi[1].format(), "2-3");
-    assert_eq!(gaps_multi[2].format(), "6-7");
+    assert_eq!(gaps_multi[0].format(), "2-3");
+    assert_eq!(gaps_multi[1].format(), "6-7");
 }
 
 #[test]
@@ -702,6 +696,88 @@ async fn test_delete_original_chunks_remote_preserves_metadata() {
     assert!(!chunk0.exists(), "remote video chunk must be deleted");
     assert!(!chat0.exists(), "remote chat chunk must be deleted");
     assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_canonical_join_remote_path() {
+    use chzzk_load::consolidation::join_remote_path;
+    // Trailing colon (root remote) should not insert leading slash
+    assert_eq!(
+        join_remote_path("remote:", "chunk_0000.ts"),
+        "remote:chunk_0000.ts"
+    );
+    assert_eq!(
+        join_remote_path("remote:", "/chunk_0000.ts"),
+        "remote:chunk_0000.ts"
+    );
+    // Standard bucket path
+    assert_eq!(
+        join_remote_path("remote:bucket", "chunk_0000.ts"),
+        "remote:bucket/chunk_0000.ts"
+    );
+    assert_eq!(
+        join_remote_path("remote:bucket/", "/chunk_0000.ts"),
+        "remote:bucket/chunk_0000.ts"
+    );
+    assert_eq!(
+        join_remote_path("remote:bucket/sub", "consolidated.mp4"),
+        "remote:bucket/sub/consolidated.mp4"
+    );
+}
+
+#[tokio::test]
+async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_preserves_chunks() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_run_cons_fail_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    // Malformed chat message in strict mode causes chat pipeline to fail
+    fs::write(&chat0, b"not valid json\n").unwrap();
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: false,
+        overwrite: false,
+        strict: true,
+    };
+
+    let result = run_consolidation(args).await;
+    assert!(
+        result.is_err(),
+        "Strict consolidation must fail on malformed JSON"
+    );
+
+    // Verify .part files are cleaned up
+    assert!(
+        !temp_dir.join("consolidated.mp4.part").exists(),
+        "Video part file must be cleaned up on failure"
+    );
+    assert!(
+        !temp_dir.join("consolidated.jsonl.part").exists(),
+        "Chat part file must be cleaned up on failure"
+    );
+
+    // Verify final targets are NOT created
+    assert!(!temp_dir.join("consolidated.mp4").exists());
+    assert!(!temp_dir.join("consolidated.jsonl").exists());
+
+    // Verify original chunks are completely preserved
+    assert!(
+        chunk0.exists(),
+        "Original chunk_0000.ts must be preserved on failure"
+    );
+    assert!(
+        chat0.exists(),
+        "Original chat_0000.jsonl must be preserved on failure"
+    );
+    assert!(meta.exists(), "metadata.jsonl must be preserved");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

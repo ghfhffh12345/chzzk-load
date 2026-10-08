@@ -2,17 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static MOCK_BIN: OnceLock<PathBuf> = OnceLock::new();
-static MOCK_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-unsafe extern "C" {
-    fn atexit(cb: extern "C" fn()) -> std::ffi::c_int;
-}
-
-extern "C" fn cleanup_mock_bin() {
-    if let Some(dir) = MOCK_DIR.get() {
-        let _ = std::fs::remove_dir_all(dir);
-    }
-}
 
 /// Provides a shared mock rclone binary for remote subprocess pipeline testing.
 ///
@@ -32,10 +21,7 @@ pub fn get_mock_rclone_bin() -> &'static Path {
         let temp_dir =
             std::env::temp_dir().join(format!("test_mock_rclone_{}", rand::random::<u32>()));
         std::fs::create_dir_all(&temp_dir).unwrap();
-        let _ = MOCK_DIR.set(temp_dir.clone());
-        unsafe {
-            atexit(cleanup_mock_bin);
-        }
+        super::register_mock_temp_dir(temp_dir.clone());
         let bin_path = temp_dir.join(if cfg!(windows) {
             "mock_rclone.exe"
         } else {

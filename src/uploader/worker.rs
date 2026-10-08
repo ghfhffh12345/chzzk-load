@@ -285,6 +285,7 @@ pub async fn unlink_local_file_with_retry(path: &Path) -> std::io::Result<()> {
         let raw_os = e.raw_os_error();
         let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
             || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+            || raw_os == Some(145) // ERROR_DIR_NOT_EMPTY
             || e.kind() == std::io::ErrorKind::PermissionDenied;
 
         if is_transient_lock {
@@ -308,6 +309,40 @@ pub async fn unlink_local_file_with_retry(path: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// Renames a local file with bounded exponential backoff retries handling transient
+/// Windows sharing violations (32), access denied errors (5), directory not empty (145),
+/// and permission denied errors.
+pub async fn rename_local_file_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
+    let mut rename_res = tokio::fs::rename(from, to).await;
+    let mut attempts: usize = 0;
+    while let Err(ref e) = rename_res {
+        if attempts >= 10 {
+            break;
+        }
+        let raw_os = e.raw_os_error();
+        let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
+            || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+            || raw_os == Some(145) // ERROR_DIR_NOT_EMPTY
+            || e.kind() == std::io::ErrorKind::PermissionDenied;
+
+        if is_transient_lock {
+            attempts += 1;
+            let backoff_ms = std::cmp::min(
+                20u64.saturating_mul(
+                    1u64.checked_shl(attempts.saturating_sub(1) as u32)
+                        .unwrap_or(u64::MAX),
+                ),
+                200,
+            );
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            rename_res = tokio::fs::rename(from, to).await;
+        } else {
+            break;
+        }
+    }
+    rename_res
 }
 
 /// Background upload worker managing per-channel FIFO serialization,

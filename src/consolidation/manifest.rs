@@ -79,6 +79,18 @@ pub fn is_remote_path(s: &str) -> bool {
     false
 }
 
+/// Joins a remote base path with a child path or filename without duplicate slashes,
+/// respecting rclone root bucket colons (e.g. `remote:` -> `remote:child`).
+pub fn join_remote_path(remote_base: &str, child: &str) -> String {
+    let trimmed_base = remote_base.trim_end_matches('/');
+    let trimmed_child = child.trim_start_matches('/');
+    if trimmed_base.ends_with(':') {
+        format!("{trimmed_base}{trimmed_child}")
+    } else {
+        format!("{trimmed_base}/{trimmed_child}")
+    }
+}
+
 /// Represents a single discovered chunk (video or chat) with numeric index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsolidationChunk {
@@ -126,20 +138,15 @@ pub fn parse_chat_chunk_index(name: &str) -> Option<u32> {
     index_str.parse::<u32>().ok()
 }
 
-/// Detects gaps in sorted chunk indices, including missing initial chunk 0 and gaps between adjacent chunks.
+/// Detects gaps between consecutive intermediate chunk indices (Issue #22).
+///
+/// Leading chunks starting at index > 0 are not flagged as gaps.
 pub fn detect_index_gaps(indices: &[u32]) -> Vec<ChunkGap> {
     let mut gaps = Vec::new();
     if indices.is_empty() {
         return gaps;
     }
-    // Check missing initial chunk 0
-    if indices[0] > 0 {
-        gaps.push(ChunkGap {
-            start: 0,
-            end: indices[0] - 1,
-        });
-    }
-    // Check gaps between consecutive chunks
+    // Check gaps between consecutive intermediate chunks
     for window in indices.windows(2) {
         let prev = window[0];
         let next = window[1];
@@ -244,52 +251,9 @@ pub fn build_manifest_from_entries(
         ));
     }
 
-    // Sequence contiguity validation:
-    // Video chunks
-    if !video_chunks.is_empty() {
-        let video_indices: Vec<u32> = video_chunks.iter().map(|c| c.index).collect();
-        let gaps = detect_index_gaps(&video_indices);
-        if !gaps.is_empty() {
-            let gap_str = gaps
-                .iter()
-                .map(|g| g.format())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let msg = format!("Video chunk sequence has gap(s): missing chunk(s) {gap_str}");
-            if strict {
-                return Err(anyhow::anyhow!(
-                    "Contiguity validation failed for {}: {msg}",
-                    target.raw()
-                ));
-            } else {
-                eprintln!("[WARN] {msg}");
-                warnings.push(msg);
-            }
-        }
-    }
-
-    // Chat chunks
-    if !chat_chunks.is_empty() {
-        let chat_indices: Vec<u32> = chat_chunks.iter().map(|c| c.index).collect();
-        let gaps = detect_index_gaps(&chat_indices);
-        if !gaps.is_empty() {
-            let gap_str = gaps
-                .iter()
-                .map(|g| g.format())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let msg = format!("Chat chunk sequence has gap(s): missing chunk(s) {gap_str}");
-            if strict {
-                return Err(anyhow::anyhow!(
-                    "Contiguity validation failed for {}: {msg}",
-                    target.raw()
-                ));
-            } else {
-                eprintln!("[WARN] {msg}");
-                warnings.push(msg);
-            }
-        }
-    }
+    // Sequence contiguity validation
+    validate_chunk_contiguity("Video", &video_chunks, &target, strict, &mut warnings)?;
+    validate_chunk_contiguity("Chat", &chat_chunks, &target, strict, &mut warnings)?;
 
     Ok(ConsolidationManifest {
         target,
@@ -300,6 +264,39 @@ pub fn build_manifest_from_entries(
         pre_existing_chat,
         warnings,
     })
+}
+
+/// Helper to validate sequence contiguity for a set of discovered chunks.
+fn validate_chunk_contiguity(
+    media_name: &str,
+    chunks: &[ConsolidationChunk],
+    target: &TargetLocation,
+    strict: bool,
+    warnings: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    let indices: Vec<u32> = chunks.iter().map(|c| c.index).collect();
+    let gaps = detect_index_gaps(&indices);
+    if !gaps.is_empty() {
+        let gap_str = gaps
+            .iter()
+            .map(|g| g.format())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let msg = format!("{media_name} chunk sequence has gap(s): missing chunk(s) {gap_str}");
+        if strict {
+            return Err(anyhow::anyhow!(
+                "Contiguity validation failed for {}: {msg}",
+                target.raw()
+            ));
+        } else {
+            eprintln!("[WARN] {msg}");
+            warnings.push(msg);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Clone)]

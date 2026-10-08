@@ -6,7 +6,11 @@ use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use crate::chzzk::models_chat::RecordedChatMessage;
-use crate::consolidation::manifest::{ConsolidationChunk, TargetLocation, resolve_rclone_bin};
+use crate::consolidation::manifest::{
+    ConsolidationChunk, TargetLocation, join_remote_path, resolve_rclone_bin,
+};
+use crate::uploader::{rename_local_file_with_retry, unlink_local_file_with_retry};
+use tokio_util::sync::CancellationToken;
 
 /// Default sliding window duration for chat deduplication: 10 seconds (10,000 ms).
 pub const DEFAULT_CHAT_DEDUP_WINDOW_MS: u64 = 10_000;
@@ -170,52 +174,123 @@ impl ChatDeduplicator {
     }
 }
 
-/// Helper function to join a remote base path with a filename, respecting rclone bucket syntax.
-pub fn join_remote_path(remote_base: &str, file_name: &str) -> String {
-    let base = remote_base.trim_end_matches('/');
-    if base.ends_with(':') {
-        format!("{base}{file_name}")
-    } else {
-        format!("{base}/{file_name}")
+/// Atomically finalizes the staged `consolidated.jsonl.part` into `consolidated.jsonl`.
+///
+/// In local mode: unlinks any pre-existing destination and renames with Windows retry logic.
+/// In remote mode: executes `rclone moveto <staged> <final>`.
+pub async fn finalize_staged_chat(
+    target: &TargetLocation,
+    rclone_bin: Option<&str>,
+) -> anyhow::Result<()> {
+    match target {
+        TargetLocation::Local(dir) => {
+            let part_path = dir.join("consolidated.jsonl.part");
+            let final_path = dir.join("consolidated.jsonl");
+            let _ = unlink_local_file_with_retry(&final_path).await;
+            rename_local_file_with_retry(&part_path, &final_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to atomically rename {} to {}",
+                        part_path.display(),
+                        final_path.display()
+                    )
+                })?;
+            Ok(())
+        }
+        TargetLocation::Remote(remote_base) => {
+            let bin = resolve_rclone_bin(rclone_bin);
+            let remote_part_path = join_remote_path(remote_base, "consolidated.jsonl.part");
+            let remote_final_path = join_remote_path(remote_base, "consolidated.jsonl");
+
+            let mut move_cmd = tokio::process::Command::new(&bin);
+            move_cmd.kill_on_drop(true);
+            move_cmd.stdin(std::process::Stdio::null());
+            move_cmd.stdout(std::process::Stdio::piped());
+            move_cmd.stderr(std::process::Stdio::piped());
+            move_cmd
+                .arg("moveto")
+                .arg(&remote_part_path)
+                .arg(&remote_final_path);
+
+            let move_output = move_cmd.output().await.with_context(|| {
+                format!("Failed to execute '{bin} moveto {remote_part_path} {remote_final_path}'")
+            })?;
+
+            if !move_output.status.success() {
+                let stderr = String::from_utf8_lossy(&move_output.stderr);
+                anyhow::bail!(
+                    "rclone moveto failed with status {}: {}",
+                    move_output.status,
+                    stderr.trim()
+                );
+            }
+            Ok(())
+        }
     }
 }
 
-/// Consolidates chat chunks for a recording session into a single deduplicated `consolidated.jsonl`.
+/// Deletes the temporary staged `consolidated.jsonl.part` if present upon error or abort.
 ///
-/// Supports both local directories and remote rclone paths. Employs staged atomic finalization
-/// (`consolidated.jsonl.part` -> `consolidated.jsonl`) and clean abort cleanup. Original chat chunks
-/// are left untouched.
+/// In local mode: unlinks `consolidated.jsonl.part` with retry (treating NotFound as success).
+/// In remote mode: executes `rclone deletefile <staged>`.
+pub async fn cleanup_staged_chat(
+    target: &TargetLocation,
+    rclone_bin: Option<&str>,
+) -> anyhow::Result<()> {
+    match target {
+        TargetLocation::Local(dir) => {
+            let part_path = dir.join("consolidated.jsonl.part");
+            let _ = unlink_local_file_with_retry(&part_path).await;
+            Ok(())
+        }
+        TargetLocation::Remote(remote_base) => {
+            let bin = resolve_rclone_bin(rclone_bin);
+            let remote_part_path = join_remote_path(remote_base, "consolidated.jsonl.part");
+            delete_remote_file(&bin, &remote_part_path).await;
+            Ok(())
+        }
+    }
+}
+
+/// Consolidates chat chunks for a recording session into a staged deduplicated `consolidated.jsonl.part`.
+///
+/// Supports both local directories and remote rclone paths. Employs staged streaming write
+/// into `consolidated.jsonl.part` without final rename, allowing atomic two-stage finalization
+/// in `run_consolidation`. Original chat chunks are left untouched.
 pub async fn consolidate_chat(
     target: &TargetLocation,
     chat_chunks: &[ConsolidationChunk],
     strict: bool,
     rclone_bin: Option<&str>,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<ChatConsolidationStats> {
     if chat_chunks.is_empty() {
         return Ok(ChatConsolidationStats::default());
     }
 
     match target {
-        TargetLocation::Local(dir) => consolidate_chat_local(dir, chat_chunks, strict).await,
+        TargetLocation::Local(dir) => {
+            consolidate_chat_local(dir, chat_chunks, strict, cancel_token).await
+        }
         TargetLocation::Remote(remote_base) => {
-            consolidate_chat_remote(remote_base, chat_chunks, strict, rclone_bin).await
+            consolidate_chat_remote(remote_base, chat_chunks, strict, rclone_bin, cancel_token)
+                .await
         }
     }
 }
 
-/// Consolidates local chat chunks into `consolidated.jsonl` via staged `.part` file.
+/// Consolidates local chat chunks into staged `consolidated.jsonl.part`.
 pub async fn consolidate_chat_local(
     dir: &Path,
     chat_chunks: &[ConsolidationChunk],
     strict: bool,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<ChatConsolidationStats> {
     let part_path = dir.join("consolidated.jsonl.part");
-    let final_path = dir.join("consolidated.jsonl");
 
     // Clean up any stale .part file from previous aborted runs
-    if part_path.exists() {
-        let _ = tokio::fs::remove_file(&part_path).await;
-    }
+    let _ = unlink_local_file_with_retry(&part_path).await;
 
     let mut deduplicator = ChatDeduplicator::new(DEFAULT_CHAT_DEDUP_WINDOW_MS, strict);
 
@@ -226,6 +301,9 @@ pub async fn consolidate_chat_local(
         let mut writer = tokio::io::BufWriter::new(part_file);
 
         for chunk in chat_chunks {
+            if cancel_token.is_cancelled() {
+                anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");
+            }
             let chunk_path = dir.join(&chunk.name);
             let file = tokio::fs::File::open(&chunk_path)
                 .await
@@ -234,6 +312,9 @@ pub async fn consolidate_chat_local(
             let mut line = String::new();
 
             loop {
+                if cancel_token.is_cancelled() {
+                    anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");
+                }
                 line.clear();
                 let bytes_read = reader.read_line(&mut line).await.with_context(|| {
                     format!(
@@ -257,42 +338,37 @@ pub async fn consolidate_chat_local(
         drop(writer);
 
         Ok::<(), anyhow::Error>(())
-    }
-    .await;
+    };
 
-    if let Err(err) = stream_res {
+    let outcome = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow::anyhow!("Chat consolidation cancelled by cooperative cancellation token"))
+        }
+        res = stream_res => res,
+    };
+
+    if let Err(err) = outcome {
+        cancel_token.cancel();
         // Clean up staged .part file on failure; original chunks remain untouched
-        let _ = tokio::fs::remove_file(&part_path).await;
+        let _ = unlink_local_file_with_retry(&part_path).await;
         return Err(err);
     }
 
-    // Atomic finalization: rename .part to final target
-    if final_path.exists() {
-        let _ = tokio::fs::remove_file(&final_path).await;
-    }
-    tokio::fs::rename(&part_path, &final_path)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to atomically rename {} to {}",
-                part_path.display(),
-                final_path.display()
-            )
-        })?;
-
+    // Do NOT rename to consolidated.jsonl here!
+    // Staged output is retained in consolidated.jsonl.part for atomic two-stage finalization.
     Ok(deduplicator.into_stats())
 }
 
-/// Consolidates remote chat chunks via pure streaming (`rclone cat` -> deduplication -> `rclone rcat`).
+/// Consolidates remote chat chunks via pure streaming into staged `consolidated.jsonl.part`.
 pub async fn consolidate_chat_remote(
     remote_base: &str,
     chat_chunks: &[ConsolidationChunk],
     strict: bool,
     rclone_bin: Option<&str>,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<ChatConsolidationStats> {
     let bin = resolve_rclone_bin(rclone_bin);
     let remote_part_path = join_remote_path(remote_base, "consolidated.jsonl.part");
-    let remote_final_path = join_remote_path(remote_base, "consolidated.jsonl");
 
     let mut deduplicator = ChatDeduplicator::new(DEFAULT_CHAT_DEDUP_WINDOW_MS, strict);
 
@@ -315,6 +391,9 @@ pub async fn consolidate_chat_remote(
 
     let stream_res = async {
         for chunk in chat_chunks {
+            if cancel_token.is_cancelled() {
+                anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");
+            }
             let chunk_remote_path = join_remote_path(remote_base, &chunk.name);
             let mut cat_cmd = tokio::process::Command::new(&bin);
             cat_cmd.kill_on_drop(true);
@@ -335,6 +414,10 @@ pub async fn consolidate_chat_remote(
             let mut line = String::new();
 
             loop {
+                if cancel_token.is_cancelled() {
+                    let _ = cat_child.kill().await;
+                    anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");
+                }
                 line.clear();
                 let bytes_read = reader.read_line(&mut line).await.with_context(|| {
                     format!("Failed to read line from rclone cat {chunk_remote_path}")
@@ -384,39 +467,24 @@ pub async fn consolidate_chat_remote(
         }
 
         Ok::<(), anyhow::Error>(())
-    }
-    .await;
+    };
 
-    if let Err(err) = stream_res {
+    let outcome = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow::anyhow!("Chat consolidation cancelled by cooperative cancellation token"))
+        }
+        res = stream_res => res,
+    };
+
+    if let Err(err) = outcome {
+        cancel_token.cancel();
         // Error abort cleanup: remove remote .part file, leave original chunks untouched
         delete_remote_file(&bin, &remote_part_path).await;
         return Err(err);
     }
 
-    // Atomic finalization: rclone moveto <part> <final>
-    let mut move_cmd = tokio::process::Command::new(&bin);
-    move_cmd.kill_on_drop(true);
-    move_cmd.stdin(std::process::Stdio::null());
-    move_cmd.stdout(std::process::Stdio::piped());
-    move_cmd.stderr(std::process::Stdio::piped());
-    move_cmd
-        .arg("moveto")
-        .arg(&remote_part_path)
-        .arg(&remote_final_path);
-
-    let move_output = move_cmd.output().await.with_context(|| {
-        format!("Failed to execute '{bin} moveto {remote_part_path} {remote_final_path}'")
-    })?;
-
-    if !move_output.status.success() {
-        let stderr = String::from_utf8_lossy(&move_output.stderr);
-        anyhow::bail!(
-            "rclone moveto failed with status {}: {}",
-            move_output.status,
-            stderr.trim()
-        );
-    }
-
+    // Do NOT call rclone moveto here!
+    // Staged output is retained in consolidated.jsonl.part for atomic two-stage finalization.
     Ok(deduplicator.into_stats())
 }
 

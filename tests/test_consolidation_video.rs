@@ -7,6 +7,7 @@ use chzzk_load::consolidation::video::{
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use tokio_util::sync::CancellationToken;
 
 fn ensure_ffmpeg_available() -> bool {
     let bin = std::env::var("CHZZK_LOAD_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
@@ -76,6 +77,10 @@ fn test_build_ffmpeg_remux_args_contains_required_flags() {
     assert!(args.contains(&"mp4".to_string()));
     assert!(args.contains(&"-fflags".to_string()));
     assert!(args.contains(&"+genpts+discardcorrupt".to_string()));
+
+    // Verify progress telemetry flags
+    assert!(args.contains(&"-progress".to_string()));
+    assert!(args.contains(&"pipe:2".to_string()));
 
     // Verify stdin input and stdout pipe destination
     assert!(args.contains(&"-i".to_string()));
@@ -243,10 +248,16 @@ async fn test_feed_video_chunks_missing_file_errors() {
 async fn test_consolidate_video_empty_chunks_noop() {
     let temp_dir = create_temp_test_dir("test_consolidate_empty");
     let target = TargetLocation::Local(temp_dir.clone());
+    let cancel_token = CancellationToken::new();
 
-    let result = consolidate_video(&target, &[], &VideoConsolidationOptions::default())
-        .await
-        .expect("Empty chunks consolidation should succeed as a no-op");
+    let result = consolidate_video(
+        &target,
+        &[],
+        &VideoConsolidationOptions::default(),
+        cancel_token,
+    )
+    .await
+    .expect("Empty chunks consolidation should succeed as a no-op");
 
     assert_eq!(result.chunks_processed, 0);
     assert_eq!(result.bytes_written, 0);
@@ -274,8 +285,9 @@ async fn test_consolidate_video_failure_cleans_up_part_and_preserves_chunks() {
     // Use an invalid binary to guarantee failure
     let options =
         VideoConsolidationOptions::default().with_ffmpeg_bin("nonexistent_ffmpeg_bin_xyz");
+    let cancel_token = CancellationToken::new();
 
-    let err = consolidate_video(&target, &chunks, &options)
+    let err = consolidate_video(&target, &chunks, &options, cancel_token)
         .await
         .expect_err("Consolidation with nonexistent ffmpeg binary must fail");
 
@@ -358,20 +370,33 @@ async fn test_consolidate_video_local_with_real_ffmpeg() {
 
     let target = TargetLocation::Local(temp_dir.clone());
     let options = VideoConsolidationOptions::default();
+    let cancel_token = CancellationToken::new();
 
-    let result = consolidate_video(&target, &chunks, &options)
+    let result = consolidate_video(&target, &chunks, &options, cancel_token)
         .await
         .expect("Consolidation with real ffmpeg must succeed");
 
     assert_eq!(result.chunks_processed, 2);
     assert!(result.bytes_written > 0);
 
+    let part_mp4 = temp_dir.join("consolidated.mp4.part");
     let final_mp4 = temp_dir.join("consolidated.mp4");
-    assert!(final_mp4.exists(), "Final consolidated.mp4 must exist");
     assert!(
-        !temp_dir.join("consolidated.mp4.part").exists(),
-        "Staged .part file must be renamed"
+        part_mp4.exists(),
+        "Staged .part file must exist before finalization"
     );
+    assert!(
+        !final_mp4.exists(),
+        "Final consolidated.mp4 must not exist before finalization"
+    );
+
+    // Atomically finalize staged video
+    finalize_staged_video(&target, None)
+        .await
+        .expect("finalize_staged_video must succeed");
+
+    assert!(final_mp4.exists(), "Final consolidated.mp4 must exist");
+    assert!(!part_mp4.exists(), "Staged .part file must be renamed");
     assert!(
         chunk0.exists() && chunk1.exists(),
         "Original chunks must remain untouched during video consolidation"
@@ -528,21 +553,37 @@ async fn test_consolidate_video_remote_with_rclone() {
 
     let target = TargetLocation::Remote(format!("{remote_name}:{remote_dir_str}"));
     let options = VideoConsolidationOptions::default();
+    let cancel_token = CancellationToken::new();
 
-    let result = consolidate_video(&target, &chunks, &options)
+    let result = consolidate_video(&target, &chunks, &options, cancel_token)
         .await
         .expect("Remote video consolidation should succeed");
 
     assert_eq!(result.chunks_processed, 2);
     assert!(result.bytes_written > 0);
 
+    let part_mp4 = temp_dir.join("consolidated.mp4.part");
     let final_mp4 = temp_dir.join("consolidated.mp4");
+    assert!(
+        part_mp4.exists(),
+        "Staged .part file must exist on remote before finalization"
+    );
+    assert!(
+        !final_mp4.exists(),
+        "Final file must not exist on remote before finalization"
+    );
+
+    // Atomically finalize staged video on remote
+    finalize_staged_video(&target, None)
+        .await
+        .expect("Remote finalize_staged_video must succeed");
+
     assert!(
         final_mp4.exists(),
         "Final consolidated.mp4 must exist on remote"
     );
     assert!(
-        !temp_dir.join("consolidated.mp4.part").exists(),
+        !part_mp4.exists(),
         "Staged .part file must be removed/renamed"
     );
     assert!(
@@ -584,8 +625,9 @@ async fn test_consolidate_video_remote_failure_cleans_up_part() {
     let target = TargetLocation::Remote(format!("{remote_name}:{remote_dir_str}"));
     let options =
         VideoConsolidationOptions::default().with_ffmpeg_bin("nonexistent_ffmpeg_bin_abc");
+    let cancel_token = CancellationToken::new();
 
-    let err = consolidate_video(&target, &chunks, &options)
+    let err = consolidate_video(&target, &chunks, &options, cancel_token)
         .await
         .expect_err("Remote consolidation with invalid ffmpeg must fail");
 
@@ -597,6 +639,47 @@ async fn test_consolidate_video_remote_failure_cleans_up_part() {
     assert!(
         chunk0.exists(),
         "Original chunk must remain untouched after remote failure"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_consolidate_video_cooperative_cancellation() {
+    let temp_dir = create_temp_test_dir("test_cons_vid_cancel");
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    tokio::fs::write(&chunk0, b"video-cancellation-chunk")
+        .await
+        .unwrap();
+
+    let chunks = vec![ConsolidationChunk {
+        index: 0,
+        name: "chunk_0000.ts".to_string(),
+        size: 24,
+    }];
+
+    let target = TargetLocation::Local(temp_dir.clone());
+    let options = VideoConsolidationOptions::default();
+    let cancel_token = CancellationToken::new();
+    cancel_token.cancel(); // Cancel immediately prior to execution
+
+    let result = consolidate_video(&target, &chunks, &options, cancel_token).await;
+    assert!(
+        result.is_err(),
+        "Cancelled video consolidation must fail with error"
+    );
+
+    assert!(
+        !temp_dir.join("consolidated.mp4.part").exists(),
+        "Staged .part file must be cleaned up on cancellation"
+    );
+    assert!(
+        !temp_dir.join("consolidated.mp4").exists(),
+        "Final file must not exist on cancellation"
+    );
+    assert!(
+        chunk0.exists(),
+        "Original chunk must remain untouched on cancellation"
     );
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
