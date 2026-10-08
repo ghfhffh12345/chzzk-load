@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser};
 use std::process::Command;
 
-use chzzk_load::cli::Cli;
+use chzzk_load::cli::{Cli, Commands, ConsolidateArgs};
 use chzzk_load::config::{ChannelConfig, Settings};
 
 #[test]
@@ -321,4 +321,73 @@ id = "dummy_chan_123"
     let _ = child.kill();
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_cli_consolidate_subcommand_parsing() {
+    // 1. Basic path with defaults
+    let cli = Cli::try_parse_from(["chzzk-load", "consolidate", "recordings/my_stream"])
+        .expect("Parsing basic consolidate command should succeed");
+    assert_eq!(
+        cli.command,
+        Some(Commands::Consolidate(ConsolidateArgs {
+            path: "recordings/my_stream".to_string(),
+            keep_original: false,
+            overwrite: false,
+            strict: false,
+        }))
+    );
+
+    // 2. Full flags enabled
+    let cli_full = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "remote:bucket/path",
+        "--keep-original",
+        "--overwrite",
+        "--strict",
+    ])
+    .expect("Parsing consolidate command with all flags should succeed");
+    assert_eq!(
+        cli_full.command,
+        Some(Commands::Consolidate(ConsolidateArgs {
+            path: "remote:bucket/path".to_string(),
+            keep_original: true,
+            overwrite: true,
+            strict: true,
+        }))
+    );
+
+    // 3. Binary smoke --help contains consolidate subcommand
+    let bin_path = env!("CARGO_BIN_EXE_chzzk-load");
+    let output = Command::new(bin_path)
+        .arg("--help")
+        .output()
+        .expect("Failed to execute chzzk-load --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("consolidate"),
+        "Top-level --help must list consolidate subcommand: {stdout}"
+    );
+
+    // 4. Binary smoke consolidate --help
+    let sub_output = Command::new(bin_path)
+        .args(["consolidate", "--help"])
+        .output()
+        .expect("Failed to execute chzzk-load consolidate --help");
+    assert!(sub_output.status.success());
+    let sub_stdout = String::from_utf8_lossy(&sub_output.stdout);
+    assert!(
+        sub_stdout.contains("--keep-original"),
+        "Subcommand help must contain --keep-original: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--overwrite"),
+        "Subcommand help must contain --overwrite: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--strict"),
+        "Subcommand help must contain --strict: {sub_stdout}"
+    );
 }

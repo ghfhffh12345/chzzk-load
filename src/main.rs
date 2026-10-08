@@ -29,6 +29,12 @@ async fn main() -> anyhow::Result<()> {
     let _console_guard = chzzk_load::tui::ConsoleCodePageGuard::init();
 
     let args = Cli::parse();
+
+    if let Some(chzzk_load::cli::Commands::Consolidate(consolidate_args)) = args.command {
+        chzzk_load::consolidation::run_consolidation(consolidate_args).await?;
+        return Ok(());
+    }
+
     let is_headless = args.headless || !std::io::stdout().is_terminal();
 
     // Register panic hook to restore terminal on panic (only if TUI was enabled)

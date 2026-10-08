@@ -21,4 +21,36 @@ pub struct Cli {
         help = "Run in headless console mode without TUI dashboard (alias: --no-tui, auto-enabled when stdout is not a TTY)"
     )]
     pub headless: bool,
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+}
+
+#[derive(clap::Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum Commands {
+    #[command(about = "Consolidate recorded video and chat chunks into unified files")]
+    Consolidate(ConsolidateArgs),
+}
+
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
+pub struct ConsolidateArgs {
+    #[arg(help = "Local directory or remote rclone path to recording session")]
+    pub path: String,
+
+    #[arg(
+        long,
+        help = "Retain original video and chat chunks after successful consolidation"
+    )]
+    pub keep_original: bool,
+
+    #[arg(
+        long,
+        help = "Overwrite existing consolidated.mp4 or consolidated.jsonl files"
+    )]
+    pub overwrite: bool,
+
+    #[arg(
+        long,
+        help = "Abort consolidation if chunk gaps or malformed entries are encountered"
+    )]
+    pub strict: bool,
 }
