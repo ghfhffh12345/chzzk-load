@@ -5,24 +5,18 @@ use crate::config::Settings;
 use crate::tui::event::{AppEvent, LogEntry};
 use crate::uploader::{UploadBackend, UploadTask, UploadWorker};
 use chrono::Local;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 
-pub mod cleanup;
 pub mod custodian;
 pub mod reconciliation;
 pub mod recording;
 pub mod registry;
 pub mod session;
-
-pub use cleanup::{
-    cleanup_empty_session_dirs, cleanup_empty_session_dirs_bounded,
-    cleanup_empty_session_dirs_excluding, cleanup_session_dir_if_empty,
-};
 pub use custodian::{SessionCustodian, SessionTrackState};
 pub use reconciliation::{
     ReconciliationReport, reconcile_orphaned_sessions, reconcile_orphaned_sessions_with_custodian,
@@ -145,6 +139,10 @@ impl EngineOrchestrator {
         self
     }
 
+    pub fn custodian(&self) -> &SessionCustodian {
+        &self.custodian
+    }
+
     pub fn with_drain_notify(mut self, drain_notify: Arc<tokio::sync::Notify>) -> Self {
         self.drain_notify = drain_notify;
         self
@@ -214,28 +212,6 @@ impl EngineOrchestrator {
         concurrency: usize,
     ) -> tokio::task::JoinHandle<()> {
         UploadWorker::spawn_with_concurrency(backend_opt, event_tx, upload_rx, concurrency)
-    }
-
-    pub async fn cleanup_empty_session_dirs_excluding(
-        recordings_dir: &Path,
-        active_dirs: &HashSet<String>,
-    ) -> std::io::Result<usize> {
-        cleanup_empty_session_dirs_excluding(recordings_dir, active_dirs).await
-    }
-
-    pub async fn cleanup_empty_session_dirs(recordings_dir: &Path) -> std::io::Result<usize> {
-        cleanup_empty_session_dirs(recordings_dir).await
-    }
-
-    pub async fn cleanup_empty_session_dirs_bounded(
-        recordings_dir: &Path,
-        timeout: Duration,
-    ) -> std::io::Result<usize> {
-        cleanup_empty_session_dirs_bounded(recordings_dir, timeout).await
-    }
-
-    pub async fn cleanup_session_dir_if_empty(session_dir: &Path) -> std::io::Result<bool> {
-        cleanup_session_dir_if_empty(session_dir).await
     }
 
     pub fn spawn_recording_session(
@@ -527,28 +503,6 @@ impl EngineOrchestrator {
                                     .await;
                             }
 
-                            let recordings_base =
-                                resolve_path(Path::new(&self.settings.general.recordings_dir));
-                            let active_dirs = {
-                                let sessions = self.registry.active_sessions();
-                                sessions.values().map(|s| s.folder_name()).collect()
-                            };
-                            if let Ok(count) = Self::cleanup_empty_session_dirs_excluding(
-                                &recordings_base,
-                                &active_dirs,
-                            )
-                            .await
-                                && count > 0
-                            {
-                                let _ = self
-                                    .event_tx
-                                    .send(AppEvent::Log(LogEntry::clean(format!(
-                                        "Cleaned up {count} empty session folder(s) in '{}'",
-                                        recordings_base.display()
-                                    ))))
-                                    .await;
-                            }
-
                             let _ = self
                                 .event_tx
                                 .send(AppEvent::ChannelUpdate {
@@ -633,24 +587,7 @@ impl EngineOrchestrator {
 
                 let recordings_base =
                     resolve_path(Path::new(&self.settings.general.recordings_dir));
-                let active_dirs: HashSet<String> = self
-                    .registry
-                    .active_sessions()
-                    .values()
-                    .map(|s| s.folder_name())
-                    .collect();
-
-                if let Ok(count) =
-                    Self::cleanup_empty_session_dirs_excluding(&recordings_base, &active_dirs).await
-                    && count > 0
-                {
-                    let _ = self
-                        .event_tx
-                        .try_send(AppEvent::Log(LogEntry::clean(format!(
-                            "Cleaned up {count} empty session folder(s) in '{}'",
-                            recordings_base.display()
-                        ))));
-                }
+                let _ = self.custodian.sweep_unmanaged(&recordings_base).await;
 
                 next_poll = tokio::time::Instant::now() + poll_interval;
             }
@@ -704,23 +641,7 @@ impl EngineOrchestrator {
 
         // 4. Clean up any empty stream session folders inside the local recordings directory
         let recordings_base = resolve_path(Path::new(&self.settings.general.recordings_dir));
-        match Self::cleanup_empty_session_dirs(&recordings_base).await {
-            Ok(count) if count > 0 => {
-                let _ = self
-                    .event_tx
-                    .try_send(AppEvent::Log(LogEntry::clean(format!(
-                        "Cleaned up {} empty session folder(s) in '{}'",
-                        count,
-                        recordings_base.display()
-                    ))));
-            }
-            Ok(_) => {}
-            Err(e) => {
-                let _ = self.event_tx.try_send(AppEvent::Log(LogEntry::warn(format!(
-                    "Failed to clean up empty session folders: {e}"
-                ))));
-            }
-        }
+        let _ = self.custodian.sweep_unmanaged(&recordings_base).await;
 
         let _ = self.event_tx.try_send(AppEvent::Log(LogEntry::info(
             "Engine graceful shutdown complete.",

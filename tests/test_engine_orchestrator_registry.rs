@@ -475,7 +475,7 @@ async fn test_orchestrator_cleanup_empty_session_dirs_bounded() {
         .await
         .unwrap();
 
-    let cleaned = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
+    let cleaned = SessionCustodian::sweep_empty_dirs_bounded(
         &temp_dir,
         std::time::Duration::from_millis(500),
     )
@@ -559,7 +559,7 @@ async fn test_orchestrator_grace_period_timeout_escalation() {
     assert!(orchestrator.cancel_token().is_cancelled());
 
     // 2. Perform bounded empty directory cleanup (<500ms)
-    let cleaned = EngineOrchestrator::cleanup_empty_session_dirs_bounded(
+    let cleaned = SessionCustodian::sweep_empty_dirs_bounded(
         &temp_dir,
         std::time::Duration::from_millis(500),
     )
@@ -1260,6 +1260,63 @@ async fn test_recording_session_enqueues_initial_and_final_metadata_snapshots() 
     assert!(
         task_final.delete_on_success,
         "Final metadata snapshot must be unlinked (delete_on_success: true)"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_orchestrator_custodian_accessor() {
+    let settings = Settings::default();
+    let chzzk = Arc::new(MockLiveStreamSource::new());
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
+    let custodian = Arc::new(SessionCustodian::without_events());
+    let orchestrator =
+        EngineOrchestrator::new(settings, chzzk, None, event_tx).with_custodian(custodian.clone());
+
+    let test_path = std::path::PathBuf::from("/test/active/session");
+    orchestrator
+        .custodian()
+        .register_active(&test_path, "chan_test", "TestStreamer");
+    assert!(custodian.active_paths().contains(&test_path));
+}
+
+#[tokio::test]
+async fn test_poll_channels_once_stream_closed_does_not_sweep_unmanaged_dirs() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_poll_no_sweep_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let unmanaged_empty = temp_dir.join("2026-10-08_unmanaged_empty");
+    std::fs::create_dir_all(&unmanaged_empty).unwrap();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig {
+            id: "chan_closed".to_string(),
+            alias: None,
+        }],
+        ..Default::default()
+    };
+
+    let source = MockLiveStreamSource::new()
+        .with_channel_state("chan_closed", make_close_detail(Some("ClosedStreamer")));
+
+    let chzzk = Arc::new(source);
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let (upload_tx, _upload_rx) = mpsc::channel(10);
+
+    let orchestrator = EngineOrchestrator::new(settings, chzzk, None, event_tx);
+
+    orchestrator.poll_channels_once(&upload_tx).await;
+
+    // The unmanaged empty directory must NOT be swept during poll_channels_once
+    assert!(
+        unmanaged_empty.exists(),
+        "poll_channels_once must not perform redundant sweeps of unmanaged empty directories"
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);

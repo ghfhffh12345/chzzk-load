@@ -17,7 +17,7 @@ The state machine coordinator that manages channel transitions, cooldown windows
 _Avoid_: Engine state, channel manager, session store
 
 **Session Custodian**:
-The lifecycle coordinator that tracks recording session directories across active capture and draining phases, safely purging empty or quiescent session folders once in-flight chunk uploads complete under strict directory emptiness.
+The lifecycle coordinator that tracks recording session directories across active capture and draining phases, safely purging empty or quiescent session folders once in-flight chunk uploads complete, and sweeping unmanaged empty directories under strict directory emptiness.
 _Avoid_: Folder cleaner, directory manager, session cleaner, purge service
 
 **Cooldown Window**:
@@ -53,7 +53,7 @@ The per-task lifecycle rule (`delete_on_success`) governing whether `UploadWorke
 _Avoid_: File deleter, delete flag, cleanup policy
 
 **Strict Directory Emptiness**:
-The invariant enforced by directory cleanup routines and `SessionCustodian` requiring a session folder to contain exactly zero entries (`read_dir().count() == 0`) before removal, eliminating heuristic file-name sniffing.
+The invariant enforced exclusively by `SessionCustodian` requiring a session folder to contain exactly zero entries (`read_dir().count() == 0`) before removal, eliminating heuristic file-name sniffing.
 _Avoid_: Empty check, heuristic delete, metadata purge
 
 **Post-Recording Consolidation**:
