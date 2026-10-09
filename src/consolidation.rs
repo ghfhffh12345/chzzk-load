@@ -21,9 +21,11 @@ pub use manifest::{
     resolve_rclone_bin,
 };
 pub use video::{
-    VideoConsolidationOptions, VideoConsolidationResult, VideoProgressTelemetry,
+    ConcatScriptGuard, VideoConsolidationOptions, VideoConsolidationResult, VideoProgressTelemetry,
     build_ffmpeg_remux_args, build_ffmpeg_remux_command, cleanup_staged_video, consolidate_video,
-    feed_video_chunks, finalize_staged_video, rename_local_file_with_retry, resolve_ffmpeg_bin,
+    create_temp_concat_script, create_temp_concat_script_in, create_temp_concat_script_in_sync,
+    create_temp_concat_script_sync, escape_concat_path, feed_video_chunks, finalize_staged_video,
+    generate_concat_script, rename_local_file_with_retry, resolve_ffmpeg_bin,
 };
 
 use crate::cli::ConsolidateArgs;

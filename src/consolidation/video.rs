@@ -3,7 +3,9 @@ use super::manifest::{ConsolidationChunk, TargetLocation, resolve_rclone_bin};
 pub use crate::uploader::worker::rename_local_file_with_retry;
 use crate::uploader::worker::unlink_local_file_with_retry;
 use anyhow::Context;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -64,6 +66,163 @@ pub fn resolve_ffmpeg_bin(override_bin: Option<&str>) -> String {
         return bin;
     }
     "ffmpeg".to_string()
+}
+
+/// Escapes and normalizes a file path or URL for use in an FFmpeg concat demuxer script.
+///
+/// Concat demuxer escaping rules:
+/// - Normalizes Windows backslashes `\` to forward slashes `/`.
+/// - Escapes single quotes `'` as `'\\''` so that when wrapped in `'...'` by FFmpeg's
+///   concat demuxer, single quotes are safely closed and escaped.
+/// - Preserves Unicode, Korean streamer names, spaces, brackets, and HTTP URLs cleanly.
+pub fn escape_concat_path(path: &str) -> String {
+    path.replace('\\', "/").replace('\'', r"'\''")
+}
+
+/// Generates the full content of an FFmpeg concat demuxer manifest script from a slice of paths or URLs.
+///
+/// Each entry is escaped via [`escape_concat_path`] and formatted as:
+/// ```text
+/// file '<escaped-path>'
+/// ```
+/// All lines strictly end with `\n`.
+pub fn generate_concat_script<S: AsRef<str>>(entries: &[S]) -> String {
+    let mut script = String::new();
+    for entry in entries {
+        let escaped = escape_concat_path(entry.as_ref());
+        script.push_str("file '");
+        script.push_str(&escaped);
+        script.push_str("'\n");
+    }
+    script
+}
+
+/// RAII guard managing a temporary FFmpeg concat demuxer manifest file on disk.
+///
+/// Automatically removes the temporary file when dropped, unless ownership of the path
+/// is extracted via [`ConcatScriptGuard::into_path`].
+#[derive(Debug)]
+pub struct ConcatScriptGuard {
+    path: PathBuf,
+    active: bool,
+}
+
+impl ConcatScriptGuard {
+    /// Creates a new guard for the given temporary file path.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, active: true }
+    }
+
+    /// Returns the reference to the underlying file path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Defuses the guard and extracts the underlying path without deleting the file.
+    pub fn into_path(mut self) -> PathBuf {
+        self.active = false;
+        self.path.clone()
+    }
+}
+
+impl Drop for ConcatScriptGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+impl AsRef<Path> for ConcatScriptGuard {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for ConcatScriptGuard {
+    type Target = Path;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl std::fmt::Display for ConcatScriptGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.path.display())
+    }
+}
+
+static CONCAT_MANIFEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn generate_unique_concat_script_path(dir: &Path) -> PathBuf {
+    let pid = std::process::id();
+    let counter = CONCAT_MANIFEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    dir.join(format!("concat_{pid}_{now}_{counter}.txt"))
+}
+
+/// Creates a temporary concat script in the specified directory, writing UTF-8 content without BOM.
+///
+/// If writing fails, any partially created file is guaranteed to be cleaned up before returning `Err`.
+pub async fn create_temp_concat_script_in<S: AsRef<str>>(
+    dir: &Path,
+    entries: &[S],
+) -> anyhow::Result<ConcatScriptGuard> {
+    let path = generate_unique_concat_script_path(dir);
+    let guard = ConcatScriptGuard::new(path);
+    let content = generate_concat_script(entries);
+
+    // Writing strictly UTF-8 bytes without BOM.
+    // If write fails, `guard` drops on the `?` error path and unlinks any partial file.
+    tokio::fs::write(guard.path(), content.as_bytes())
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to write concat script to {}",
+                guard.path().display()
+            )
+        })?;
+
+    Ok(guard)
+}
+
+/// Creates a temporary concat script in `std::env::temp_dir()`, writing UTF-8 content without BOM.
+///
+/// If writing fails, any partially created file is guaranteed to be cleaned up before returning `Err`.
+pub async fn create_temp_concat_script<S: AsRef<str>>(
+    entries: &[S],
+) -> anyhow::Result<ConcatScriptGuard> {
+    create_temp_concat_script_in(&std::env::temp_dir(), entries).await
+}
+
+/// Synchronous version of [`create_temp_concat_script_in`].
+pub fn create_temp_concat_script_in_sync<S: AsRef<str>>(
+    dir: &Path,
+    entries: &[S],
+) -> anyhow::Result<ConcatScriptGuard> {
+    let path = generate_unique_concat_script_path(dir);
+    let guard = ConcatScriptGuard::new(path);
+    let content = generate_concat_script(entries);
+
+    std::fs::write(guard.path(), content.as_bytes()).with_context(|| {
+        format!(
+            "Failed to write concat script to {}",
+            guard.path().display()
+        )
+    })?;
+
+    Ok(guard)
+}
+
+/// Synchronous version of [`create_temp_concat_script`].
+pub fn create_temp_concat_script_sync<S: AsRef<str>>(
+    entries: &[S],
+) -> anyhow::Result<ConcatScriptGuard> {
+    create_temp_concat_script_in_sync(&std::env::temp_dir(), entries)
 }
 
 /// Constructs the list of command line arguments for the FFmpeg remuxing process.
