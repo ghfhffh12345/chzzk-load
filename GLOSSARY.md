@@ -60,6 +60,10 @@ _Avoid_: Empty check, heuristic delete, metadata purge
 The batch post-processing task that losslessly merges and remuxes fragmented video chunks (`.ts` to `.mp4`) and deduplicates chat logs (`.jsonl`) entirely over network pipes or local files with a strictly bounded memory footprint, circumventing local disk staging.
 _Avoid_: Cloud merge, remote stitch, post-processing script
 
+**Timestamp Normalization**:
+The batch timeline reconciliation process in Post-Recording Consolidation that resets container start offsets to zero and linearly aligns Presentation Timestamps (PTS) and Decoding Timestamps (DTS) across fragmented chunk boundaries to prevent audio/video desync and playback freezes without video re-encoding.
+_Avoid_: Timestamp reset, clock sync, re-mux timing, timeline patch
+
 **Staged Remote Part**:
 Temporary upload targets (`consolidated.mp4.part`, `consolidated.jsonl.part`) holding in-flight network consolidation streams until full process exit verification, preventing corrupt partial files upon unexpected failure.
 _Avoid_: Temp file, incomplete download, partial upload
