@@ -577,7 +577,60 @@ where
     Ok(total_bytes)
 }
 
-/// Telemetry metrics parsed asynchronously from FFmpeg progress output on stderr (Issue #24).
+fn normalize_status_line(line: &str) -> String {
+    let mut result = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        result.push(c);
+        if c == '=' {
+            while let Some(&next) = chars.peek() {
+                if next.is_whitespace() {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    result
+}
+
+fn parse_size_bytes(v: &str) -> Option<u64> {
+    let v = v.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("n/a") {
+        return None;
+    }
+    if let Ok(num) = v.parse::<u64>() {
+        return Some(num);
+    }
+    let (num_str, mult) = if let Some(s) = v.strip_suffix("kib").or_else(|| v.strip_suffix("KiB")) {
+        (s, 1024u64)
+    } else if let Some(s) = v
+        .strip_suffix("kB")
+        .or_else(|| v.strip_suffix("kb"))
+        .or_else(|| v.strip_suffix("KB"))
+    {
+        (s, 1024u64)
+    } else if let Some(s) = v.strip_suffix("mib").or_else(|| v.strip_suffix("MiB")) {
+        (s, 1024 * 1024u64)
+    } else if let Some(s) = v.strip_suffix("MB").or_else(|| v.strip_suffix("mb")) {
+        (s, 1024 * 1024u64)
+    } else if let Some(s) = v.strip_suffix("gib").or_else(|| v.strip_suffix("GiB")) {
+        (s, 1024 * 1024 * 1024u64)
+    } else if let Some(s) = v.strip_suffix("GB").or_else(|| v.strip_suffix("gb")) {
+        (s, 1024 * 1024 * 1024u64)
+    } else {
+        let s = v.strip_suffix('b').or_else(|| v.strip_suffix('B'))?;
+        (s, 1u64)
+    };
+    num_str
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(mult))
+}
+
+/// Telemetry metrics parsed asynchronously from FFmpeg progress output on stderr (Issue #24, Spec #56, Ticket #60).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct VideoProgressTelemetry {
     pub frame: Option<u64>,
@@ -590,45 +643,61 @@ pub struct VideoProgressTelemetry {
 impl VideoProgressTelemetry {
     pub fn update_from_line(&mut self, line: &str) -> bool {
         let trimmed = line.trim();
-        if let Some((k, v)) = trimmed.split_once('=') {
-            let key = k.trim();
-            let val = v.trim();
-            match key {
-                "frame" => {
-                    if let Ok(num) = val.parse::<u64>() {
-                        self.frame = Some(num);
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        let normalized = normalize_status_line(trimmed);
+        let mut recognized = false;
+
+        for token in normalized.split_whitespace() {
+            if let Some((k, v)) = token.split_once('=') {
+                let key = k.trim();
+                let val = v.trim();
+                match key {
+                    "frame" => {
+                        if let Ok(num) = val.parse::<u64>() {
+                            self.frame = Some(num);
+                        }
+                        recognized = true;
                     }
-                    return true;
-                }
-                "fps" => {
-                    self.fps = Some(val.to_string());
-                    return true;
-                }
-                "out_time" => {
-                    self.out_time = Some(val.to_string());
-                    return true;
-                }
-                "speed" => {
-                    self.speed = Some(val.to_string());
-                    return true;
-                }
-                "total_size" => {
-                    if let Ok(num) = val.parse::<u64>() {
-                        self.total_size = Some(num);
+                    "fps" => {
+                        self.fps = Some(val.to_string());
+                        recognized = true;
                     }
-                    return true;
+                    "out_time" | "time" => {
+                        self.out_time = Some(val.to_string());
+                        recognized = true;
+                    }
+                    "speed" => {
+                        self.speed = Some(val.to_string());
+                        recognized = true;
+                    }
+                    "total_size" => {
+                        if let Ok(num) = val.parse::<u64>() {
+                            self.total_size = Some(num);
+                        }
+                        recognized = true;
+                    }
+                    "size" => {
+                        if let Some(bytes) = parse_size_bytes(val) {
+                            self.total_size = Some(bytes);
+                        }
+                        recognized = true;
+                    }
+                    "progress" | "out_time_us" | "out_time_ms" | "dup_frames" | "drop_frames"
+                    | "bitrate" | "q" | "Lq" | "dup" | "drop" => {
+                        recognized = true;
+                    }
+                    _ if key.starts_with("stream_") => {
+                        recognized = true;
+                    }
+                    _ => {}
                 }
-                "progress" | "out_time_us" | "out_time_ms" | "dup_frames" | "drop_frames"
-                | "bitrate" => {
-                    return true;
-                }
-                _ if key.starts_with("stream_") => {
-                    return true;
-                }
-                _ => {}
             }
         }
-        false
+
+        recognized
     }
 }
 
@@ -721,6 +790,7 @@ pub async fn consolidate_video_local(
         let mut telemetry = VideoProgressTelemetry::default();
         let mut last_speed = None;
         let mut last_chunks_fed = 0usize;
+        let mut last_bytes_fed = 0u64;
 
         while let Ok(Some(line)) = reader.next_line().await {
             if telemetry.update_from_line(&line) {
@@ -739,8 +809,9 @@ pub async fn consolidate_video_local(
                             .round()
                             .min(total_chunks as f64)
                             as usize;
-                        if chunks_fed != last_chunks_fed {
+                        if chunks_fed != last_chunks_fed || total_size != last_bytes_fed {
                             last_chunks_fed = chunks_fed;
+                            last_bytes_fed = total_size;
                             if let Some(ref tx) = stderr_progress_tx {
                                 let _ = tx.send(VideoProgressUpdate::ChunkFed {
                                     chunks_fed,
@@ -883,6 +954,7 @@ pub async fn consolidate_video_remote(
         let mut telemetry = VideoProgressTelemetry::default();
         let mut last_speed = None;
         let mut last_chunks_fed = 0usize;
+        let mut last_bytes_fed = 0u64;
 
         while let Ok(Some(line)) = reader.next_line().await {
             if telemetry.update_from_line(&line) {
@@ -901,8 +973,9 @@ pub async fn consolidate_video_remote(
                             .round()
                             .min(total_chunks as f64)
                             as usize;
-                        if chunks_fed != last_chunks_fed {
+                        if chunks_fed != last_chunks_fed || total_size != last_bytes_fed {
                             last_chunks_fed = chunks_fed;
+                            last_bytes_fed = total_size;
                             if let Some(ref tx) = stderr_progress_tx {
                                 let _ = tx.send(VideoProgressUpdate::ChunkFed {
                                     chunks_fed,

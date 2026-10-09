@@ -7,7 +7,7 @@ use chzzk_load::consolidation::progress::{
     MilestoneTracker, PurgeProgressSnapshot, PurgeProgressUpdate, VideoProgressSnapshot,
     VideoProgressUpdate, format_bytes, format_number_with_commas, format_progress_bar,
 };
-use chzzk_load::consolidation::run_consolidation_with_coordinator;
+use chzzk_load::consolidation::{VideoProgressTelemetry, run_consolidation_with_coordinator};
 
 mod common;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
@@ -552,4 +552,223 @@ async fn test_run_consolidation_with_coordinator_non_interactive_e2e() {
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_video_progress_telemetry_progress_pipe2_key_values() {
+    let mut telemetry = VideoProgressTelemetry::default();
+
+    let pipe2_lines = [
+        "frame=150",
+        "fps=30.00",
+        "stream_0_0_q=-1.0",
+        "bitrate=20615.3kbits/s",
+        "total_size=12582912",
+        "out_time_us=5000000",
+        "out_time_ms=5000000",
+        "out_time=00:00:05.000000",
+        "dup_frames=0",
+        "drop_frames=0",
+        "speed=12.4x",
+        "progress=continue",
+    ];
+
+    for line in pipe2_lines {
+        assert!(
+            telemetry.update_from_line(line),
+            "Line should be recognized as progress telemetry: {line}"
+        );
+    }
+
+    assert_eq!(telemetry.frame, Some(150));
+    assert_eq!(telemetry.fps.as_deref(), Some("30.00"));
+    assert_eq!(telemetry.total_size, Some(12582912));
+    assert_eq!(telemetry.out_time.as_deref(), Some("00:00:05.000000"));
+    assert_eq!(telemetry.speed.as_deref(), Some("12.4x"));
+
+    // Ending progress marker
+    assert!(telemetry.update_from_line("progress=end"));
+}
+
+#[test]
+fn test_video_progress_telemetry_traditional_status_lines() {
+    let mut telemetry = VideoProgressTelemetry::default();
+
+    // Partial traditional status line
+    let line1 = "frame=  100 fps=30 q=-1.0 size=    1024kB";
+    assert!(telemetry.update_from_line(line1));
+    assert_eq!(telemetry.frame, Some(100));
+    assert_eq!(telemetry.fps.as_deref(), Some("30"));
+    assert_eq!(telemetry.total_size, Some(1024 * 1024));
+
+    // Full traditional status line with speed and time
+    let line2 = "frame=  150 fps= 30.0 q=-1.0 size=   12582kB time=00:00:05.00 bitrate=20615.3kbits/s speed=12.4x";
+    assert!(telemetry.update_from_line(line2));
+    assert_eq!(telemetry.frame, Some(150));
+    assert_eq!(telemetry.fps.as_deref(), Some("30.0"));
+    assert_eq!(telemetry.total_size, Some(12582 * 1024));
+    assert_eq!(telemetry.out_time.as_deref(), Some("00:00:05.00"));
+    assert_eq!(telemetry.speed.as_deref(), Some("12.4x"));
+}
+
+#[test]
+fn test_video_progress_telemetry_size_units_and_variations() {
+    let mut telemetry = VideoProgressTelemetry::default();
+
+    assert!(telemetry.update_from_line("size= 512B"));
+    assert_eq!(telemetry.total_size, Some(512));
+
+    assert!(telemetry.update_from_line("size= 1024KiB"));
+    assert_eq!(telemetry.total_size, Some(1024 * 1024));
+
+    assert!(telemetry.update_from_line("size= 50MB"));
+    assert_eq!(telemetry.total_size, Some(50 * 1024 * 1024));
+
+    assert!(telemetry.update_from_line("size= 2GB"));
+    assert_eq!(telemetry.total_size, Some(2 * 1024 * 1024 * 1024));
+
+    // N/A size should be recognized as progress token without overriding valid total_size
+    assert!(telemetry.update_from_line("size=N/A"));
+    assert_eq!(telemetry.total_size, Some(2 * 1024 * 1024 * 1024));
+}
+
+#[test]
+fn test_video_progress_telemetry_ignores_non_progress_logs() {
+    let mut telemetry = VideoProgressTelemetry::default();
+
+    let non_progress_lines = [
+        "",
+        "   ",
+        "[hls @ 0x123] Opening 'http://example.com/live.m3u8' for reading",
+        "[in#0 @ 0xaaaaebdbabe0] Unable to open key file, Server returned 403 Forbidden",
+        "segment 0001 skipping due to encryption error",
+        "Conversion failed!",
+        "[mp4 @ 0x7ffd] Option movflags=+faststart applied",
+    ];
+
+    for line in non_progress_lines {
+        assert!(
+            !telemetry.update_from_line(line),
+            "Non-progress line must return false: '{line}'"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_remux_progress_telemetry_proportional_chunk_mapping() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, true);
+
+    let total_chunks = 5;
+    let total_manifest_bytes = 100_000_000u64; // 100 MB
+
+    let mut session = coordinator.start_media(total_chunks, 0);
+    let v_tx = session.video_sender().unwrap();
+
+    // Simulate lines arriving from FFmpeg -progress pipe:2
+    let progress_events = [
+        (20_000_000u64, "8.5x"),   // 20% -> 1 chunk
+        (40_000_000u64, "11.2x"),  // 40% -> 2 chunks
+        (80_000_000u64, "13.8x"),  // 80% -> 4 chunks
+        (100_000_000u64, "15.0x"), // 100% -> 5 chunks
+    ];
+
+    for (bytes, speed) in progress_events {
+        let chunks_fed = ((bytes as f64 / total_manifest_bytes as f64) * total_chunks as f64)
+            .round()
+            .min(total_chunks as f64) as usize;
+        let _ = v_tx.send(VideoProgressUpdate::Speed(speed.to_string()));
+        let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+            chunks_fed,
+            bytes_fed: bytes,
+        });
+    }
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("[VID]"), "must render [VID]");
+    assert!(text.contains("100%"), "must reach 100%");
+    assert!(text.contains("5/5 chunks"), "must show 5/5 chunks");
+    assert!(
+        text.contains("95.4 MB") || text.contains("100.0 MB") || text.contains("MB"),
+        "must show formatted bytes"
+    );
+    assert!(text.contains("15.0x"), "must render latest speed");
+}
+
+#[tokio::test]
+async fn test_coordinator_interactive_remux_speed_and_progress_rendering() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, true);
+
+    let mut session = coordinator.start_media(10, 0);
+    let v_tx = session.video_sender().unwrap();
+
+    let _ = v_tx.send(VideoProgressUpdate::Speed("12.4x".to_string()));
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 4,
+        bytes_fed: 40_000_000,
+    });
+    let _ = v_tx.send(VideoProgressUpdate::Speed("16.8x".to_string()));
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 8,
+        bytes_fed: 80_000_000,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("[VID]"), "must render [VID] in output");
+    assert!(text.contains("16.8x"), "must display remux speed 16.8x");
+    assert!(text.contains("100%"), "final finish must display 100%");
+    assert!(
+        text.contains('━'),
+        "must contain filled progress bar character"
+    );
+    assert!(
+        text.contains('\x1b'),
+        "must contain ANSI codes in interactive mode"
+    );
+}
+
+#[tokio::test]
+async fn test_coordinator_non_interactive_remux_speed_and_milestones() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let mut session = coordinator.start_media(5, 0);
+    let v_tx = session.video_sender().unwrap();
+
+    let _ = v_tx.send(VideoProgressUpdate::Speed("14.5x".to_string()));
+
+    // Step through 20% intervals
+    for i in 1..=5 {
+        let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+            chunks_fed: i,
+            bytes_fed: (i as u64) * 20_000_000,
+        });
+    }
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(!text.contains('\x1b'), "must NOT contain ANSI escape codes");
+    assert!(!text.contains('\r'), "must NOT contain carriage returns");
+    assert!(
+        text.contains("[INFO] [VID] Consolidation progress: 0%"),
+        "must log initial milestone"
+    );
+    assert!(
+        text.contains("[INFO] [VID] Consolidation progress: 20%"),
+        "must log 20% milestone"
+    );
+    assert!(
+        text.contains("speed: 14.5x"),
+        "must display speed in non-interactive log line"
+    );
+    assert!(
+        text.contains("[INFO] [VID] Consolidation progress: 100%"),
+        "must log 100% milestone"
+    );
 }
