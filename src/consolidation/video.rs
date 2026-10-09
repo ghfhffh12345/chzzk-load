@@ -4,7 +4,7 @@ pub use super::loopback::{
 pub use super::manifest::join_remote_path;
 use super::manifest::{ConsolidationChunk, TargetLocation, resolve_rclone_bin};
 pub use crate::uploader::worker::rename_local_file_with_retry;
-use crate::uploader::worker::unlink_local_file_with_retry;
+use crate::uploader::{unlink_local_file_with_retry, unlink_local_file_with_retry_sync};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -133,33 +133,7 @@ impl Drop for ConcatScriptGuard {
         if !self.active {
             return;
         }
-        let mut remove_res = std::fs::remove_file(&self.path);
-        let mut attempts = 0usize;
-        while let Err(ref e) = remove_res {
-            if attempts >= 5 || e.kind() == std::io::ErrorKind::NotFound {
-                break;
-            }
-            let raw_os = e.raw_os_error();
-            let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
-                || raw_os == Some(5)                   // ERROR_ACCESS_DENIED
-                || raw_os == Some(145)                 // ERROR_DIR_NOT_EMPTY
-                || e.kind() == std::io::ErrorKind::PermissionDenied;
-
-            if is_transient_lock {
-                attempts += 1;
-                let backoff_ms = std::cmp::min(
-                    20u64.saturating_mul(
-                        1u64.checked_shl(attempts.saturating_sub(1) as u32)
-                            .unwrap_or(u64::MAX),
-                    ),
-                    200,
-                );
-                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-                remove_res = std::fs::remove_file(&self.path);
-            } else {
-                break;
-            }
-        }
+        let _ = unlink_local_file_with_retry_sync(&self.path);
     }
 }
 

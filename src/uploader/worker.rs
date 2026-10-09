@@ -272,6 +272,27 @@ async fn enforce_dlq_disk_eviction(
     ))));
 }
 
+#[inline]
+pub(crate) fn is_transient_lock_error(e: &std::io::Error) -> bool {
+    let raw_os = e.raw_os_error();
+    raw_os == Some(32) // ERROR_SHARING_VIOLATION
+        || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+        || raw_os == Some(145) // ERROR_DIR_NOT_EMPTY
+        || e.kind() == std::io::ErrorKind::PermissionDenied
+}
+
+#[inline]
+pub(crate) fn lock_backoff_delay(attempts: usize) -> Duration {
+    let backoff_ms = std::cmp::min(
+        20u64.saturating_mul(
+            1u64.checked_shl(attempts.saturating_sub(1) as u32)
+                .unwrap_or(u64::MAX),
+        ),
+        200,
+    );
+    Duration::from_millis(backoff_ms)
+}
+
 /// Unlinks a local file upon successful upload with bounded exponential backoff retries
 /// handling transient Windows sharing violations (32), access denied (5), and permission errors,
 /// treating NotFound as success.
@@ -283,23 +304,36 @@ pub async fn unlink_local_file_with_retry(path: &Path) -> std::io::Result<()> {
         if attempts >= 10 || e.kind() == std::io::ErrorKind::NotFound {
             break;
         }
-        let raw_os = e.raw_os_error();
-        let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
-            || raw_os == Some(5)  // ERROR_ACCESS_DENIED
-            || raw_os == Some(145) // ERROR_DIR_NOT_EMPTY
-            || e.kind() == std::io::ErrorKind::PermissionDenied;
-
-        if is_transient_lock {
+        if is_transient_lock_error(e) {
             attempts += 1;
-            let backoff_ms = std::cmp::min(
-                20u64.saturating_mul(
-                    1u64.checked_shl(attempts.saturating_sub(1) as u32)
-                        .unwrap_or(u64::MAX),
-                ),
-                200,
-            );
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            tokio::time::sleep(lock_backoff_delay(attempts)).await;
             remove_res = tokio::fs::remove_file(path).await;
+        } else {
+            break;
+        }
+    }
+
+    match remove_res {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Unlinks a local file synchronously with bounded exponential backoff retries
+/// handling transient Windows sharing violations (32), access denied (5), and permission errors,
+/// treating NotFound as success. Suitable for use in synchronous contexts and `Drop` implementations.
+pub fn unlink_local_file_with_retry_sync(path: &Path) -> std::io::Result<()> {
+    let mut remove_res = std::fs::remove_file(path);
+    let mut attempts: usize = 0;
+    while let Err(ref e) = remove_res {
+        if attempts >= 10 || e.kind() == std::io::ErrorKind::NotFound {
+            break;
+        }
+        if is_transient_lock_error(e) {
+            attempts += 1;
+            std::thread::sleep(lock_backoff_delay(attempts));
+            remove_res = std::fs::remove_file(path);
         } else {
             break;
         }
@@ -323,22 +357,9 @@ pub async fn rename_local_file_with_retry(from: &Path, to: &Path) -> std::io::Re
         if attempts >= 10 {
             break;
         }
-        let raw_os = e.raw_os_error();
-        let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
-            || raw_os == Some(5)  // ERROR_ACCESS_DENIED
-            || raw_os == Some(145) // ERROR_DIR_NOT_EMPTY
-            || e.kind() == std::io::ErrorKind::PermissionDenied;
-
-        if is_transient_lock {
+        if is_transient_lock_error(e) {
             attempts += 1;
-            let backoff_ms = std::cmp::min(
-                20u64.saturating_mul(
-                    1u64.checked_shl(attempts.saturating_sub(1) as u32)
-                        .unwrap_or(u64::MAX),
-                ),
-                200,
-            );
-            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            tokio::time::sleep(lock_backoff_delay(attempts)).await;
             rename_res = tokio::fs::rename(from, to).await;
         } else {
             break;
@@ -1149,5 +1170,90 @@ mod tests {
         worker_handle.abort();
         assert!(saw_failed, "UploadFailed event should be emitted on panic");
         assert!(saw_panic_log, "Panic log entry should be emitted");
+    }
+
+    #[test]
+    fn test_unlink_local_file_with_retry_sync_deletes_file() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("chzzk_sync_unlink_del_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("test_file.txt");
+        std::fs::write(&file_path, b"hello world").unwrap();
+        assert!(file_path.exists());
+
+        let res = unlink_local_file_with_retry_sync(&file_path);
+        assert!(
+            res.is_ok(),
+            "unlink_local_file_with_retry_sync failed: {:?}",
+            res.err()
+        );
+        assert!(!file_path.exists(), "file should be deleted");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_unlink_local_file_with_retry_sync_tolerates_not_found() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("chzzk_sync_unlink_nf_{}", rand::random::<u32>()));
+        let nonexistent = temp_dir.join("nonexistent_file.txt");
+
+        let res = unlink_local_file_with_retry_sync(&nonexistent);
+        assert!(
+            res.is_ok(),
+            "unlink_local_file_with_retry_sync must treat NotFound as success: {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
+    fn test_unlink_local_file_with_retry_sync_tolerates_transient_lock() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("chzzk_sync_unlink_lock_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let file_path = temp_dir.join("locked_file.txt");
+        std::fs::write(&file_path, b"locked data").unwrap();
+
+        // Open handle with exclusive sharing restriction on Windows to induce sharing violation
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            opts.share_mode(1); // FILE_SHARE_READ only, omitting FILE_SHARE_DELETE
+        }
+        let lock_file = opts.open(&file_path).unwrap();
+
+        // Release the lock handle after 50ms in a background thread
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(lock_file);
+        });
+
+        let res = unlink_local_file_with_retry_sync(&file_path);
+        assert!(
+            res.is_ok(),
+            "unlink_local_file_with_retry_sync should tolerate transient lock: {:?}",
+            res.err()
+        );
+        assert!(!file_path.exists(), "file must be deleted once unlocked");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_unlink_local_file_with_retry_sync_fails_on_directory() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("chzzk_sync_unlink_dir_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let res = unlink_local_file_with_retry_sync(&temp_dir);
+        assert!(
+            res.is_err(),
+            "unlink_local_file_with_retry_sync must fail when called on directory"
+        );
+        assert!(temp_dir.exists(), "directory must still exist");
+
+        let _ = std::fs::remove_dir(&temp_dir);
     }
 }

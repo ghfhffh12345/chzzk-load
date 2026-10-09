@@ -130,6 +130,39 @@ fn test_concat_script_guard_raii_cleanup_on_drop() {
 }
 
 #[test]
+fn test_concat_script_guard_drop_tolerates_transient_lock() {
+    let temp_dir = create_temp_test_dir("test_guard_transient_lock");
+    let dummy_file = temp_dir.join("locked_manifest.txt");
+    fs::write(&dummy_file, b"file 'chunk_0000.ts'\n").expect("write dummy file");
+    assert!(dummy_file.exists());
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(1); // FILE_SHARE_READ only
+    }
+    let lock_file = opts.open(&dummy_file).expect("open lock file");
+
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(lock_file);
+    });
+
+    {
+        let _guard = ConcatScriptGuard::new(dummy_file.clone());
+    } // guard drops here, invoking unlink_local_file_with_retry_sync
+
+    assert!(
+        !dummy_file.exists(),
+        "ConcatScriptGuard must remove file on drop even if transiently locked"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_concat_script_guard_into_path_defuses_drop() {
     let temp_dir = create_temp_test_dir("test_guard_defuse");
     let dummy_file = temp_dir.join("preserved_manifest.txt");

@@ -7,20 +7,20 @@
 ## 1. Quick Commands
 
 ```bash
-# Check, lint, and format (PowerShell / Bash compatible)
+# Check, lint, and format (PowerShell / Bash compatible; calibrate WaitMsBeforeAsync: 20000 for chained commands)
 cargo check --tests; cargo clippy --tests           # Fast test linter loop (<1s, catch style/import errors before test runs)
 cargo check --all-targets; cargo clippy --all-targets -- -D warnings; cargo fmt --check
 
-# Test suite (Tiered Fast Feedback)
+# Test suite (Tiered Fast Feedback; calibrate WaitMsBeforeAsync: 20000 for suites / chained runs)
 cargo test --test test_cli_smoke                    # CLI & binary startup smoke tests (<1s)
 cargo test --test test_channel_lifecycle_registry   # Fast registry unit tests (<1s)
 cargo test --test test_engine_orchestrator_registry # Typed engine seam unit tests (<1s)
 cargo test --test test_recorder_ffmpeg              # FfmpegSession unit tests (<1s)
 cargo test --test test_recorder_watcher             # FFmpeg watcher unit tests (<1s)
 cargo test --test test_tui_state                    # TUI state unit tests (<1s)
-cargo test --test test_shutdown_cleanup             # Shutdown & cleanup tests (calibrate WaitMsBeforeAsync: 15000)
-cargo test --test test_engine_events <filter>       # Heavy async integration tests (20-25s; calibrate WaitMsBeforeAsync: 15000)
-cargo test                                          # Full test suite (final verification gate)
+cargo test --test test_shutdown_cleanup             # Shutdown & cleanup tests (calibrate WaitMsBeforeAsync: 20000)
+cargo test --test test_engine_events <filter>       # Heavy async integration tests (20-25s; calibrate WaitMsBeforeAsync: 20000)
+cargo test                                          # Full test suite (final verification gate; calibrate WaitMsBeforeAsync: 20000)
 node scripts/test-npm-packages.js                   # Node packaging and CLI launcher suite
 
 # Git commit (triggers .githooks/pre-commit: fmt, check, clippy, fast unit tests; calibrate WaitMsBeforeAsync: 20000)
@@ -34,12 +34,13 @@ cargo build --release
 
 ## 2. Architectural Invariants
 
-### 2.1. Video Recording & FFmpeg (`src/recorder/`)
+### 2.1. Video Recording & FFmpeg (`src/recorder/`, `src/consolidation/`)
 - **Lossless Stream-Copy**: Always use `-c copy` with piped stdin and stderr. Never transcode or re-encode video (`-c:v libx264`).
 - **Clean EOF Termination**: Omit `-reconnect*` flags so natural broadcast end causes instant manifest EOF exit.
 - **P2P/Grid Bypass**: Decode base64 `cdn_url` in `p2pPath`/`p2pPathUrlEncoding` for direct CDN HLS streams.
 - **Binary Resolution**: Respect `CHZZK_LOAD_FFMPEG_BIN` override before falling back to `"ffmpeg"`.
 - **Numeric N+1 Boundary Safety**: In `SegmentWatcher`, seal chunk $N$ only after chunk $N+1$ exists (>0 bytes) or child process exits. Parse chunk numeric index (`chunk_%04d.ts`) rather than array length to prevent false boundary seals during retries.
+- **Post-Recording Consolidation & Concat Demuxer**: When consolidating recorded streams into final MP4 ([ADR 0010](docs/adr/0010-concat-demuxer-timestamp-normalization.md), `src/consolidation/video.rs`), use FFmpeg's concat demuxer (`-f concat -safe 0`) with `-avoid_negative_ts make_zero`. Never feed raw chunk byte streams into `pipe:0`. Local mode produces seekable MP4 with `+faststart`; remote mode streams via an ephemeral read-only HTTP loopback server (`rclone serve http`) into `rclone rcat`. Manage manifest scripts with RAII `ConcatScriptGuard`.
 
 ### 2.2. Live Chat Archiving (`src/chzzk/chat.rs`, `src/recorder/chat_writer.rs`)
 - **Flash-Friendly Batched I/O**: Serialize chat messages directly to in-memory `Vec<u8>` buffers in `ChatWriter`. Flush on dual triggers (500 messages or 64 KB) or periodic timer. Never flush or sync disk per message.
@@ -55,6 +56,7 @@ cargo build --release
 - **Crash Recovery & Reconciliation**: Detect orphaned chunks and `metadata.jsonl` on startup, validate contiguity, enqueue pending files into `upload_tx` (metadata with `delete_on_success: true`), and quarantine partial tail chunks.
 - **Graceful Shutdown Barrier**: Maintain strict exit order: (1) terminate FFmpeg gracefully, (2) seal lingering chunks (`is_stream_finished = true`), (3) await all session tasks, (4) drop `upload_tx`, (5) drain and await `UploadWorker`, and (6) purge empty local session directories. Never invoke folder cleanup before the upload worker finishes in-flight chunk deletions.
 - **Windows File Lock Resilience**: Bounded exponential backoff retries when removing files post-upload (`worker.rs`) or purging directories (`custodian.rs`) to absorb transient Windows sharing violations (32), access denied errors (5), and asynchronous unlink latency (145).
+- **Post-Recording Consolidation Pipeline**: For offline/post-stream consolidation ([ADR 0010](docs/adr/0010-concat-demuxer-timestamp-normalization.md)), consolidate video via concat demuxer and merge chat logs into `chat.jsonl.part` using the two-stage atomic staging pattern. In remote consolidation, stream output to cloud destination via `rclone rcat` over ephemeral HTTP loopback without local staging; upon orchestrator-level success, purge source chunk files atomically using `unlink_local_file_with_retry`.
 
 ### 2.4. Stream Polling & Orchestration (`src/engine/`)
 - **Module Topology**:
@@ -85,7 +87,7 @@ cargo build --release
 - **State Machine Invariant Coverage**: Every channel state transition guard, restriction condition, and cancellation behavior in `ChannelLifecycleRegistry` must have a dedicated zero-overhead unit test in `tests/test_channel_lifecycle_registry.rs`. Never rely exclusively on integration suites to catch lifecycle state regressions.
 - **Ephemeral Port & Directory Isolation**: Tests must never bind hardcoded network ports (use `127.0.0.1:0`) and must isolate all filesystem activity inside `std::env::temp_dir()`. Clean up directories upon test completion.
 - **Cross-Platform Shell Compatibility**: Write command snippets using semicolon statement separators `;` or separate lines rather than Bash-only `&&` operators to ensure compatibility with Windows PowerShell and POSIX shells.
-- **Pre-Commit Hook & Command Calibration**: The repository enforces pre-commit hooks via git `core.hooksPath = .githooks` (`cargo fmt`, `cargo check`, `cargo clippy`, and the 6 fast unit test suites). When running `git commit` via `run_command`, calibrate with `WaitMsBeforeAsync: 20000` so the hook finishes synchronously without unexpected async backgrounding. Similarly, calibrate `WaitMsBeforeAsync: 15000` when executing heavy async integration suites (`test_engine_events`, `test_shutdown_cleanup`) to prevent premature backgrounding near the default 10,000ms threshold. Slower suites run only during `cargo test` as the full verification gate.
+- **Pre-Commit Hook & Command Calibration**: The repository enforces pre-commit hooks via git `core.hooksPath = .githooks` (`cargo fmt`, `cargo check`, `cargo clippy`, and the 6 fast unit test suites). When running `git commit` or executing test suites / chained cargo commands (`test_engine_events`, `test_shutdown_cleanup`, `cargo test`, `cargo check ...; cargo clippy ...`) via `run_command`, calibrate with `WaitMsBeforeAsync: 20000` to prevent premature backgrounding near the default 10,000ms threshold. Slower suites run only during `cargo test` as the full verification gate.
 
 ### 2.8. Tool Economy & Async Execution
 - **Reactive Yielding**: Stop calling tools and yield the turn immediately after launching background commands (`run_command`) or subagents (`invoke_subagent`) when no local work remains. Rely exclusively on reactive environment wakeup messages on task exit or subagent reply. Never poll or loop over `manage_task(Action='status')` or `manage_subagents(Action='list')`, and never set `schedule` timers on active background task IDs (`task-XXX`) since the system automatically notifies and wakes upon task completion.

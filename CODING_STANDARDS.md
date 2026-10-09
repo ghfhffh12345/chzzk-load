@@ -22,6 +22,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **No Test-Convenience Forwarding Shims**: Top-level orchestrators (`EngineOrchestrator`) must expose only real public caller interfaces. Never add public static or instance forwarding shims (*Middle Man* smell) solely to facilitate tests of internal subsystems from external integration tests.
   - *Hard Violation*: Adding public static or instance pass-through shims on `EngineOrchestrator` (e.g. `process_sealed_chunk`, `seal_and_enqueue_chunks`) to test internal subsystem logic from outer integration tests.
   - *Resolution*: The interface is the test surface. Internal subsystem behavior (segment dispatching, WebSocket frames, upload queue tasks) must be tested at its own co-located module seam (e.g., `RecordingSession`, `ChatWriter`, `RcloneBackend`), using unit tests co-located under `#[cfg(test)] mod tests` or dedicated module unit test suites.
+- **No Mock Pollution in Production**: Production runtime pipelines must never synthesize fallback files or fake outcomes to accommodate test mock limitations. Mock fixtures must fully satisfy production contracts; production code must fail strictly on missing artifacts.
+  - *Hard Violation*: Adding conditional fallback branches, dummy file synthesis (e.g., 0-byte placeholders for missing metadata), or mock-accommodating bypasses in production code.
+  - *Resolution*: Enhance subprocess mocks (`mock_ffmpeg.rs`, `mock_rclone.rs`) to faithfully produce all contractually expected files and exit behaviors; ensure production code fails strictly and visibly when required inputs or artifacts are absent.
 
 ---
 
@@ -60,7 +63,7 @@ This document is the authoritative standard for code review under the `/code-rev
 
 ## 5. Filesystem Invariants & Windows OS Safety
 
-- **Windows Transient Lock & Unlink Resilience**: All filesystem deletion routines operating on child process outputs (`unlink_local_file_with_retry`) or directory unlinks (`SessionCustodian::purge_dir_if_empty`) must implement bounded exponential backoff retries handling `ERROR_SHARING_VIOLATION` (32), `ERROR_ACCESS_DENIED` (5), and `ERROR_DIR_NOT_EMPTY` (145), and treat `ErrorKind::NotFound` as success.
+- **Windows Transient Lock & Unlink Resilience**: All filesystem deletion routines operating on child process outputs (`unlink_local_file_with_retry`, `unlink_local_file_with_retry_sync`) or directory unlinks (`SessionCustodian::purge_dir_if_empty`) must implement bounded exponential backoff retries handling `ERROR_SHARING_VIOLATION` (32), `ERROR_ACCESS_DENIED` (5), and `ERROR_DIR_NOT_EMPTY` (145), and treat `ErrorKind::NotFound` as success.
   - *Hard Violation*: Single-attempt `tokio::fs::remove_file` or `remove_dir` immediately following child process termination or file deletion.
   - *Resolution*: Retry up to 5–10 attempts with exponential backoff using the standard formula `Duration::from_millis(std::cmp::min(max_ms, base_ms * (1 << (attempt - 1))))` (20ms–200ms) before returning an I/O error, allowing background Windows antivirus and filesystem filter drivers to release locks.
 - **No Silent Directory Cleanup Error Suppression**: Directory purge routines (`SessionCustodian::purge_dir_if_empty`, `try_purge`) must distinguish between non-empty preserved directories (`Ok(false)`) and filesystem I/O failures.
