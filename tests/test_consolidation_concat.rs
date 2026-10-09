@@ -223,3 +223,17 @@ async fn test_create_temp_concat_script_in_nonexistent_directory_fails_without_l
         "Writing to a nonexistent directory must fail"
     );
 }
+
+#[test]
+fn test_concat_script_guard_drop_tolerates_not_found() {
+    let temp_dir = create_temp_test_dir("test_guard_not_found");
+    let missing_file = temp_dir.join("nonexistent_manifest.txt");
+    assert!(!missing_file.exists());
+
+    {
+        let _guard = ConcatScriptGuard::new(missing_file.clone());
+    } // drops here without panic
+
+    assert!(!missing_file.exists());
+    let _ = fs::remove_dir_all(&temp_dir);
+}

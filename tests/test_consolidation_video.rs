@@ -2,11 +2,10 @@ mod common;
 
 use chzzk_load::consolidation::manifest::{ConsolidationChunk, TargetLocation};
 use chzzk_load::consolidation::video::{
-    VideoConsolidationOptions, build_ffmpeg_remux_args, build_ffmpeg_remux_command,
-    build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command,
+    VideoConsolidationOptions, build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command,
     build_remote_concat_ffmpeg_args, build_remote_concat_ffmpeg_command, cleanup_staged_video,
-    consolidate_video, consolidate_video_remote, feed_video_chunks, finalize_staged_video,
-    join_remote_path, resolve_ffmpeg_bin,
+    consolidate_video, consolidate_video_remote, finalize_staged_video, join_remote_path,
+    resolve_ffmpeg_bin,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -162,37 +161,6 @@ fn test_ffmpeg_bin_resolution() {
             std::env::remove_var("CHZZK_LOAD_FFMPEG_BIN");
         }
     }
-}
-
-#[test]
-fn test_build_ffmpeg_remux_args_contains_required_flags() {
-    let args = build_ffmpeg_remux_args();
-
-    // Verify required remuxing flags per ADR 0009 and Ticket #24
-    assert!(args.contains(&"-c".to_string()));
-    assert!(args.contains(&"copy".to_string()));
-    assert!(args.contains(&"-movflags".to_string()));
-    assert!(args.contains(&"frag_keyframe+empty_moov".to_string()));
-    assert!(args.contains(&"-f".to_string()));
-    assert!(args.contains(&"mp4".to_string()));
-    assert!(args.contains(&"-fflags".to_string()));
-    assert!(args.contains(&"+genpts+discardcorrupt".to_string()));
-    assert!(args.contains(&"-bsf:a".to_string()));
-    assert!(args.contains(&"aac_adtstoasc".to_string()));
-
-    // Verify progress telemetry flags
-    assert!(args.contains(&"-progress".to_string()));
-    assert!(args.contains(&"pipe:2".to_string()));
-
-    // Verify stdin input and stdout pipe destination
-    assert!(args.contains(&"-i".to_string()));
-    assert!(args.contains(&"pipe:0".to_string()) || args.contains(&"-".to_string()));
-    assert!(args.contains(&"pipe:1".to_string()) || args.contains(&"-".to_string()));
-
-    // Verify command builder produces configured command
-    let cmd = build_ffmpeg_remux_command("test_ffmpeg");
-    let program = cmd.as_std().get_program().to_string_lossy();
-    assert_eq!(program, "test_ffmpeg");
 }
 
 #[test]
@@ -369,78 +337,6 @@ async fn test_staged_video_cleanup_on_abort_local() {
         chunk1.exists(),
         "Original chunk 1 must be strictly preserved"
     );
-
-    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-}
-
-#[tokio::test]
-async fn test_feed_video_chunks_local_streaming() {
-    let temp_dir = create_temp_test_dir("test_feed_local");
-    let chunk0 = temp_dir.join("chunk_0000.ts");
-    let chunk1 = temp_dir.join("chunk_0001.ts");
-    let chunk2 = temp_dir.join("chunk_0002.ts");
-
-    let data0 = vec![0x47, 0x01, 0x02, 0x03];
-    let data1 = vec![0x47, 0x11, 0x12, 0x13, 0x14];
-    let data2 = vec![0x47, 0x21, 0x22];
-
-    tokio::fs::write(&chunk0, &data0).await.unwrap();
-    tokio::fs::write(&chunk1, &data1).await.unwrap();
-    tokio::fs::write(&chunk2, &data2).await.unwrap();
-
-    let chunks = vec![
-        ConsolidationChunk {
-            index: 0,
-            name: "chunk_0000.ts".to_string(),
-            size: data0.len() as u64,
-        },
-        ConsolidationChunk {
-            index: 1,
-            name: "chunk_0001.ts".to_string(),
-            size: data1.len() as u64,
-        },
-        ConsolidationChunk {
-            index: 2,
-            name: "chunk_0002.ts".to_string(),
-            size: data2.len() as u64,
-        },
-    ];
-
-    let target = TargetLocation::Local(temp_dir.clone());
-    let mut buffer = Vec::new();
-
-    let total_bytes = feed_video_chunks(&target, &chunks, None, &mut buffer)
-        .await
-        .expect("Streaming chunks into buffer should succeed");
-
-    let mut expected = Vec::new();
-    expected.extend_from_slice(&data0);
-    expected.extend_from_slice(&data1);
-    expected.extend_from_slice(&data2);
-
-    assert_eq!(total_bytes, expected.len() as u64);
-    assert_eq!(buffer, expected);
-
-    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-}
-
-#[tokio::test]
-async fn test_feed_video_chunks_missing_file_errors() {
-    let temp_dir = create_temp_test_dir("test_feed_missing");
-    let target = TargetLocation::Local(temp_dir.clone());
-
-    let chunks = vec![ConsolidationChunk {
-        index: 0,
-        name: "chunk_0000.ts".to_string(),
-        size: 100,
-    }];
-
-    let mut buffer = Vec::new();
-    let err = feed_video_chunks(&target, &chunks, None, &mut buffer)
-        .await
-        .expect_err("Feeding missing chunk must return error");
-
-    assert!(err.to_string().contains("chunk_0000.ts"));
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
@@ -1621,6 +1517,11 @@ async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
 
 #[tokio::test]
 async fn test_consolidate_video_remote_hermetic_with_mock_rclone() {
+    if !ensure_ffmpeg_available() {
+        eprintln!("[SKIP] ffmpeg not available, skipping test");
+        return;
+    }
+
     let mock_bin = common::mock_rclone::get_mock_rclone_bin();
     let temp_dir = create_temp_test_dir("test_cons_rem_hermetic");
     let chunk0 = temp_dir.join("chunk_0000.ts");

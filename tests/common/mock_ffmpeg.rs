@@ -61,7 +61,7 @@ fn main() {
                 && !last_arg.ends_with("mock_ffmpeg")
                 && !last_arg.ends_with("mock_ffmpeg.exe")
             {
-                let _ = std::fs::File::create(last_arg);
+                let _ = std::fs::write(last_arg, b"mock_mp4_bytes");
             }
         }
         let stdin = std::io::stdin();

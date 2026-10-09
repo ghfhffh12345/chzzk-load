@@ -9,7 +9,7 @@ use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -130,8 +130,35 @@ impl ConcatScriptGuard {
 
 impl Drop for ConcatScriptGuard {
     fn drop(&mut self) {
-        if self.active {
-            let _ = std::fs::remove_file(&self.path);
+        if !self.active {
+            return;
+        }
+        let mut remove_res = std::fs::remove_file(&self.path);
+        let mut attempts = 0usize;
+        while let Err(ref e) = remove_res {
+            if attempts >= 5 || e.kind() == std::io::ErrorKind::NotFound {
+                break;
+            }
+            let raw_os = e.raw_os_error();
+            let is_transient_lock = raw_os == Some(32) // ERROR_SHARING_VIOLATION
+                || raw_os == Some(5)                   // ERROR_ACCESS_DENIED
+                || raw_os == Some(145)                 // ERROR_DIR_NOT_EMPTY
+                || e.kind() == std::io::ErrorKind::PermissionDenied;
+
+            if is_transient_lock {
+                attempts += 1;
+                let backoff_ms = std::cmp::min(
+                    20u64.saturating_mul(
+                        1u64.checked_shl(attempts.saturating_sub(1) as u32)
+                            .unwrap_or(u64::MAX),
+                    ),
+                    200,
+                );
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                remove_res = std::fs::remove_file(&self.path);
+            } else {
+                break;
+            }
         }
     }
 }
@@ -226,52 +253,6 @@ pub fn create_temp_concat_script_sync<S: AsRef<str>>(
     entries: &[S],
 ) -> anyhow::Result<ConcatScriptGuard> {
     create_temp_concat_script_in_sync(&std::env::temp_dir(), entries)
-}
-
-/// Constructs the list of command line arguments for the FFmpeg remuxing process.
-///
-/// Implements ADR 0009 and Ticket #24:
-/// - `-c copy`: Lossless stream-copy without transcoding
-/// - `-bsf:a aac_adtstoasc`: Converts ADTS AAC headers to AudioSpecificConfig (ASC) for MP4 container
-/// - `-progress pipe:2`: Emits progress telemetry lines to stderr
-/// - `-movflags frag_keyframe+empty_moov`: Fragmented MP4 for live streaming writes
-/// - `-f mp4`: MPEG-4 container
-/// - `-fflags +genpts+discardcorrupt`: Absorbs PTS gaps and sequence discontinuities
-/// - `-i pipe:0`: Reads MPEG-TS stream from stdin
-/// - `pipe:1`: Writes fragmented MP4 stream to stdout
-pub fn build_ffmpeg_remux_args() -> Vec<String> {
-    vec![
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "warning".to_string(),
-        "-progress".to_string(),
-        "pipe:2".to_string(),
-        "-y".to_string(),
-        "-fflags".to_string(),
-        "+genpts+discardcorrupt".to_string(),
-        "-i".to_string(),
-        "pipe:0".to_string(),
-        "-c".to_string(),
-        "copy".to_string(),
-        "-bsf:a".to_string(),
-        "aac_adtstoasc".to_string(),
-        "-movflags".to_string(),
-        "frag_keyframe+empty_moov".to_string(),
-        "-f".to_string(),
-        "mp4".to_string(),
-        "pipe:1".to_string(),
-    ]
-}
-
-/// Builds the Tokio `Command` for the FFmpeg remuxing process with piped stdio.
-pub fn build_ffmpeg_remux_command(ffmpeg_bin: &str) -> Command {
-    let mut cmd = Command::new(ffmpeg_bin);
-    cmd.kill_on_drop(true);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.args(build_ffmpeg_remux_args());
-    cmd
 }
 
 /// Constructs the list of command line arguments for local mode FFmpeg Concat Demuxer remuxing (Spec #56, Ticket #58).
@@ -469,114 +450,6 @@ pub async fn cleanup_staged_video(
     }
 }
 
-/// Sequentially streams chunk bytes into the provided writer sink without buffering chunks to local disk.
-///
-/// - In local mode: opens each chunk file on the local filesystem and streams bytes.
-/// - In remote mode: spawns `rclone cat <remote-path>/<chunk>` and streams its stdout.
-pub async fn feed_video_chunks<W>(
-    target: &TargetLocation,
-    chunks: &[ConsolidationChunk],
-    rclone_bin: Option<&str>,
-    writer: &mut W,
-) -> anyhow::Result<u64>
-where
-    W: AsyncWrite + Unpin + ?Sized,
-{
-    feed_video_chunks_with_progress(target, chunks, rclone_bin, writer, None).await
-}
-
-/// Sequentially streams chunk bytes into the writer sink, reporting progress updates
-/// after each chunk is fed.
-pub async fn feed_video_chunks_with_progress<W>(
-    target: &TargetLocation,
-    chunks: &[ConsolidationChunk],
-    rclone_bin: Option<&str>,
-    writer: &mut W,
-    progress_sender: Option<&tokio::sync::mpsc::UnboundedSender<VideoProgressUpdate>>,
-) -> anyhow::Result<u64>
-where
-    W: AsyncWrite + Unpin + ?Sized,
-{
-    let mut total_bytes = 0u64;
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        match target {
-            TargetLocation::Local(dir) => {
-                let chunk_path = dir.join(&chunk.name);
-                let mut file = tokio::fs::File::open(&chunk_path).await.with_context(|| {
-                    format!("Failed to open local chunk file: {}", chunk_path.display())
-                })?;
-                let copied = tokio::io::copy(&mut file, writer).await.with_context(|| {
-                    format!(
-                        "Error writing local chunk '{}' to pipe sink",
-                        chunk_path.display()
-                    )
-                })?;
-                total_bytes = total_bytes.saturating_add(copied);
-            }
-            TargetLocation::Remote(remote_base) => {
-                let remote_chunk = join_remote_path(remote_base, &chunk.name);
-                let bin = resolve_rclone_bin(rclone_bin);
-
-                let mut cmd = Command::new(&bin);
-                cmd.kill_on_drop(true);
-                cmd.stdin(Stdio::null());
-                cmd.stdout(Stdio::piped());
-                cmd.stderr(Stdio::piped());
-                cmd.arg("cat").arg(&remote_chunk);
-
-                let mut child = cmd.spawn().with_context(|| {
-                    format!("Failed to spawn '{bin} cat {remote_chunk}' process")
-                })?;
-
-                let mut stdout = child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout of rclone cat"))?;
-
-                let copied = tokio::io::copy(&mut stdout, writer)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Error streaming rclone cat output for '{remote_chunk}' to pipe sink"
-                        )
-                    })?;
-                total_bytes = total_bytes.saturating_add(copied);
-
-                let status = child
-                    .wait()
-                    .await
-                    .with_context(|| format!("Failed to wait for '{bin} cat {remote_chunk}'"))?;
-
-                if !status.success() {
-                    let mut stderr_content = String::new();
-                    if let Some(mut stderr) = child.stderr.take() {
-                        let _ = stderr.read_to_string(&mut stderr_content).await;
-                    }
-                    anyhow::bail!(
-                        "rclone cat for '{remote_chunk}' exited with status {}: {}",
-                        status,
-                        stderr_content.trim()
-                    );
-                }
-            }
-        }
-
-        if let Some(tx) = progress_sender {
-            let _ = tx.send(VideoProgressUpdate::ChunkFed {
-                chunks_fed: i + 1,
-                bytes_fed: total_bytes,
-            });
-        }
-    }
-
-    writer
-        .flush()
-        .await
-        .context("Failed to flush writer sink after streaming video chunks")?;
-    Ok(total_bytes)
-}
-
 fn normalize_status_line(line: &str) -> String {
     let mut result = String::with_capacity(line.len());
     let mut chars = line.chars().peekable();
@@ -701,11 +574,65 @@ impl VideoProgressTelemetry {
     }
 }
 
+/// Spawns an asynchronous background task monitoring FFmpeg stderr diagnostics, parsing
+/// progress telemetry lines, and reporting metrics via the optional progress channel.
+pub fn spawn_stderr_telemetry_monitor(
+    ffmpeg_stderr: tokio::process::ChildStderr,
+    progress_sender: Option<tokio::sync::mpsc::UnboundedSender<VideoProgressUpdate>>,
+    total_manifest_bytes: u64,
+    total_chunks: usize,
+) -> tokio::task::JoinHandle<String> {
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(ffmpeg_stderr).lines();
+        let mut logs = Vec::new();
+        let mut telemetry = VideoProgressTelemetry::default();
+        let mut last_speed = None;
+        let mut last_chunks_fed = 0usize;
+        let mut last_bytes_fed = 0u64;
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            if telemetry.update_from_line(&line) {
+                if let Some(ref speed) = telemetry.speed {
+                    if Some(speed) != last_speed.as_ref() {
+                        last_speed = Some(speed.clone());
+                        if let Some(ref tx) = progress_sender {
+                            let _ = tx.send(VideoProgressUpdate::Speed(speed.clone()));
+                        }
+                    }
+                }
+                if let Some(total_size) = telemetry.total_size {
+                    if total_manifest_bytes > 0 && total_chunks > 0 {
+                        let chunks_fed = ((total_size as f64 / total_manifest_bytes as f64)
+                            * total_chunks as f64)
+                            .round()
+                            .min(total_chunks as f64)
+                            as usize;
+                        if chunks_fed != last_chunks_fed || total_size != last_bytes_fed {
+                            last_chunks_fed = chunks_fed;
+                            last_bytes_fed = total_size;
+                            if let Some(ref tx) = progress_sender {
+                                let _ = tx.send(VideoProgressUpdate::ChunkFed {
+                                    chunks_fed,
+                                    bytes_fed: total_size,
+                                });
+                            }
+                        }
+                    }
+                }
+            } else if logs.len() < 100 {
+                logs.push(line);
+            }
+        }
+        logs.join("\n")
+    })
+}
+
 /// Executes the resilient video consolidation pipeline into staged `consolidated.mp4.part`.
 ///
 /// In local mode: uses FFmpeg's native container-aware Concat Demuxer with `-movflags +faststart`
 /// and `-avoid_negative_ts make_zero` directly targeting `consolidated.mp4.part`.
-/// In remote mode: streams chunks via pipe feeding (to be updated in Ticket #59).
+/// In remote mode: uses FFmpeg's native container-aware Concat Demuxer with Ephemeral Loopback Server
+/// streaming fragmented MP4 to rclone rcat.
 pub async fn consolidate_video(
     target: &TargetLocation,
     chunks: &[ConsolidationChunk],
@@ -783,50 +710,12 @@ pub async fn consolidate_video_local(
         .ok_or_else(|| anyhow::anyhow!("Failed to open FFmpeg stderr pipe"))?;
 
     // 5. Background task to monitor FFmpeg stderr diagnostics and parse progress telemetry lines
-    let stderr_progress_tx = options.progress_sender.clone();
-    let stderr_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(ffmpeg_stderr).lines();
-        let mut logs = Vec::new();
-        let mut telemetry = VideoProgressTelemetry::default();
-        let mut last_speed = None;
-        let mut last_chunks_fed = 0usize;
-        let mut last_bytes_fed = 0u64;
-
-        while let Ok(Some(line)) = reader.next_line().await {
-            if telemetry.update_from_line(&line) {
-                if let Some(ref speed) = telemetry.speed {
-                    if Some(speed) != last_speed.as_ref() {
-                        last_speed = Some(speed.clone());
-                        if let Some(ref tx) = stderr_progress_tx {
-                            let _ = tx.send(VideoProgressUpdate::Speed(speed.clone()));
-                        }
-                    }
-                }
-                if let Some(total_size) = telemetry.total_size {
-                    if total_manifest_bytes > 0 && total_chunks > 0 {
-                        let chunks_fed = ((total_size as f64 / total_manifest_bytes as f64)
-                            * total_chunks as f64)
-                            .round()
-                            .min(total_chunks as f64)
-                            as usize;
-                        if chunks_fed != last_chunks_fed || total_size != last_bytes_fed {
-                            last_chunks_fed = chunks_fed;
-                            last_bytes_fed = total_size;
-                            if let Some(ref tx) = stderr_progress_tx {
-                                let _ = tx.send(VideoProgressUpdate::ChunkFed {
-                                    chunks_fed,
-                                    bytes_fed: total_size,
-                                });
-                            }
-                        }
-                    }
-                }
-            } else if logs.len() < 100 {
-                logs.push(line);
-            }
-        }
-        logs.join("\n")
-    });
+    let stderr_handle = spawn_stderr_telemetry_monitor(
+        ffmpeg_stderr,
+        options.progress_sender.clone(),
+        total_manifest_bytes,
+        total_chunks,
+    );
 
     // 6. Cooperative cancellation & execution barrier
     let run_res: anyhow::Result<u64> = async {
@@ -845,15 +734,15 @@ pub async fn consolidate_video_local(
                     anyhow::bail!("FFmpeg remuxing exited with status {status}: {stderr_logs}");
                 }
 
-                let bytes_written = match tokio::fs::metadata(&staged_path).await {
-                    Ok(m) => m.len(),
-                    Err(_) => {
-                        // In mock environments where mock subprocess exits 0 without writing output,
-                        // create empty file so downstream staging finalization succeeds.
-                        let _ = tokio::fs::File::create(&staged_path).await;
-                        0
-                    }
-                };
+                let metadata = tokio::fs::metadata(&staged_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "FFmpeg completed with exit status {status} but staged output file was not produced: '{}'",
+                            staged_path.display()
+                        )
+                    })?;
+                let bytes_written = metadata.len();
 
                 if let Some(ref tx) = options.progress_sender {
                     let _ = tx.send(VideoProgressUpdate::ChunkFed {
@@ -906,7 +795,7 @@ pub async fn consolidate_video_remote(
     }
 
     // 1. Spawn Ephemeral Loopback Server scoped to remote_base
-    let loopback_server = EphemeralLoopbackServer::start(remote_base, rclone_bin.as_deref())
+    let mut loopback_server = EphemeralLoopbackServer::start(remote_base, rclone_bin.as_deref())
         .await
         .with_context(|| {
             format!("Failed to start ephemeral loopback server for remote '{remote_base}'")
@@ -931,6 +820,7 @@ pub async fn consolidate_video_remote(
     let mut ffmpeg_child = match ffmpeg_cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
+            let _ = loopback_server.kill().await;
             let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
             return Err(e)
                 .with_context(|| format!("Failed to spawn ffmpeg binary: '{ffmpeg_bin}'"));
@@ -947,50 +837,12 @@ pub async fn consolidate_video_remote(
         .ok_or_else(|| anyhow::anyhow!("Failed to open FFmpeg stderr pipe"))?;
 
     // 5. Background task to monitor FFmpeg stderr diagnostics and parse progress telemetry lines
-    let stderr_progress_tx = options.progress_sender.clone();
-    let stderr_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(ffmpeg_stderr).lines();
-        let mut logs = Vec::new();
-        let mut telemetry = VideoProgressTelemetry::default();
-        let mut last_speed = None;
-        let mut last_chunks_fed = 0usize;
-        let mut last_bytes_fed = 0u64;
-
-        while let Ok(Some(line)) = reader.next_line().await {
-            if telemetry.update_from_line(&line) {
-                if let Some(ref speed) = telemetry.speed {
-                    if Some(speed) != last_speed.as_ref() {
-                        last_speed = Some(speed.clone());
-                        if let Some(ref tx) = stderr_progress_tx {
-                            let _ = tx.send(VideoProgressUpdate::Speed(speed.clone()));
-                        }
-                    }
-                }
-                if let Some(total_size) = telemetry.total_size {
-                    if total_manifest_bytes > 0 && total_chunks > 0 {
-                        let chunks_fed = ((total_size as f64 / total_manifest_bytes as f64)
-                            * total_chunks as f64)
-                            .round()
-                            .min(total_chunks as f64)
-                            as usize;
-                        if chunks_fed != last_chunks_fed || total_size != last_bytes_fed {
-                            last_chunks_fed = chunks_fed;
-                            last_bytes_fed = total_size;
-                            if let Some(ref tx) = stderr_progress_tx {
-                                let _ = tx.send(VideoProgressUpdate::ChunkFed {
-                                    chunks_fed,
-                                    bytes_fed: total_size,
-                                });
-                            }
-                        }
-                    }
-                }
-            } else if logs.len() < 100 {
-                logs.push(line);
-            }
-        }
-        logs.join("\n")
-    });
+    let stderr_handle = spawn_stderr_telemetry_monitor(
+        ffmpeg_stderr,
+        options.progress_sender.clone(),
+        total_manifest_bytes,
+        total_chunks,
+    );
 
     // 6. Output sink task streaming FFmpeg stdout into rclone rcat
     let rclone_bin_for_sink = rclone_bin.clone();
@@ -1049,6 +901,7 @@ pub async fn consolidate_video_remote(
             _ = cancel_token.cancelled() => {
                 sink_handle.abort();
                 let _ = ffmpeg_child.kill().await;
+                let _ = loopback_server.kill().await;
                 let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
                 anyhow::bail!("Video consolidation cancelled by cooperative cancellation token");
             }
@@ -1059,6 +912,7 @@ pub async fn consolidate_video_remote(
                 let stderr_logs = stderr_handle.await.unwrap_or_default();
                 if !status.success() {
                     cancel_token.cancel();
+                    let _ = loopback_server.kill().await;
                     let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
                     anyhow::bail!("FFmpeg remuxing exited with status {status}: {stderr_logs}");
                 }
@@ -1070,6 +924,7 @@ pub async fn consolidate_video_remote(
                 if !status.success() {
                     cancel_token.cancel();
                     sink_handle.abort();
+                    let _ = loopback_server.kill().await;
                     let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
                     anyhow::bail!("FFmpeg remuxing exited with status {status}: {stderr_logs}");
                 }
