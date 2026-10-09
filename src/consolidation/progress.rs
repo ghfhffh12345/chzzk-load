@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
-pub const DEFAULT_BAR_WIDTH: usize = 20;
+pub(crate) const DEFAULT_BAR_WIDTH: usize = 20;
 
 /// Formats a progress bar matching the Cloud Upload visual language:
 /// `━` (Unicode \u{2501}, filled) and `─` (Unicode \u{2500}, unfilled).
+#[doc(hidden)]
 pub fn format_progress_bar(width: usize, pct: u16) -> String {
     if width == 0 {
         return String::new();
@@ -19,6 +20,7 @@ pub fn format_progress_bar(width: usize, pct: u16) -> String {
 }
 
 /// Formats byte quantities into human-readable strings with binary (1024-based) units.
+#[doc(hidden)]
 pub fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
@@ -32,6 +34,7 @@ pub fn format_bytes(bytes: u64) -> String {
 }
 
 /// Formats integers with comma thousands separators (e.g. 12,345).
+#[doc(hidden)]
 pub fn format_number_with_commas(n: usize) -> String {
     let s = n.to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
@@ -101,6 +104,7 @@ pub struct ChatProgressSnapshot {
     pub chunks_read: usize,
     pub total_chunks: usize,
     pub total_messages: usize,
+    pub deduplicated_messages: usize,
     pub emitted_messages: usize,
 }
 
@@ -179,7 +183,8 @@ impl PurgeProgressSnapshot {
 ///
 /// Triggers on:
 /// - 20% milestone boundaries: 0%, 20%, 40%, 60%, 80%, 100%.
-/// - 30-second heartbeat if progress has advanced since the last log line.
+/// - 30-second heartbeat since the last log line to prove liveness (even during slow chunks or stalls).
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct MilestoneTracker {
     last_logged_milestone: Option<u16>,
@@ -216,9 +221,9 @@ impl MilestoneTracker {
             return true;
         }
 
-        // Heartbeat check: 30 seconds since last log with progress advancement
+        // Heartbeat check: 30 seconds since last log to prove liveness during slow chunks or stalls
         let elapsed = now.saturating_duration_since(self.last_logged_at);
-        if elapsed >= Duration::from_secs(30) && progress_val > self.last_progress_value {
+        if elapsed >= Duration::from_secs(30) {
             self.last_logged_at = now;
             self.last_progress_value = progress_val;
             return true;
@@ -244,6 +249,7 @@ pub enum VideoProgressUpdate {
 pub struct ChatProgressUpdate {
     pub chunks_read: usize,
     pub total_messages: usize,
+    pub deduplicated_messages: usize,
     pub emitted_messages: usize,
 }
 
@@ -254,6 +260,7 @@ pub struct PurgeProgressUpdate {
 }
 
 /// Thread-safe output sink wrapper for telemetry rendering.
+#[doc(hidden)]
 #[derive(Clone)]
 pub struct CoordinatorOutput {
     inner: Arc<std::sync::Mutex<Box<dyn Write + Send>>>,
@@ -296,6 +303,19 @@ impl Write for SharedBuffer {
     }
 }
 
+async fn teardown_session(
+    finish_tx: &mut Option<oneshot::Sender<bool>>,
+    handle: &mut Option<tokio::task::JoinHandle<()>>,
+    success: bool,
+) {
+    if let Some(tx) = finish_tx.take() {
+        let _ = tx.send(success);
+    }
+    if let Some(handle) = handle.take() {
+        let _ = handle.await;
+    }
+}
+
 /// Live progress session for concurrent video and chat consolidation.
 pub struct MediaProgressSession {
     video_tx: Option<mpsc::UnboundedSender<VideoProgressUpdate>>,
@@ -314,12 +334,7 @@ impl MediaProgressSession {
     }
 
     pub async fn finish(&mut self, success: bool) {
-        if let Some(tx) = self.finish_tx.take() {
-            let _ = tx.send(success);
-        }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.await;
-        }
+        teardown_session(&mut self.finish_tx, &mut self.handle, success).await;
     }
 }
 
@@ -336,12 +351,7 @@ impl PurgeProgressSession {
     }
 
     pub async fn finish(&mut self, success: bool) {
-        if let Some(tx) = self.finish_tx.take() {
-            let _ = tx.send(success);
-        }
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.await;
-        }
+        teardown_session(&mut self.finish_tx, &mut self.handle, success).await;
     }
 }
 
@@ -417,6 +427,7 @@ impl ConsolidationProgressCoordinator {
                 chunks_read: 0,
                 total_chunks: total_chat,
                 total_messages: 0,
+                deduplicated_messages: 0,
                 emitted_messages: 0,
             };
             let start_time = Instant::now();
@@ -474,6 +485,7 @@ impl ConsolidationProgressCoordinator {
                     Some(c_upd) = c_rx.recv() => {
                         chat_snapshot.chunks_read = c_upd.chunks_read;
                         chat_snapshot.total_messages = c_upd.total_messages;
+                        chat_snapshot.deduplicated_messages = c_upd.deduplicated_messages;
                         chat_snapshot.emitted_messages = c_upd.emitted_messages;
                         if !is_tty {
                             if chat_milestones.should_log(chat_snapshot.pct(), chat_snapshot.chunks_read as u64) {
@@ -530,6 +542,7 @@ impl ConsolidationProgressCoordinator {
             while let Ok(c_upd) = c_rx.try_recv() {
                 chat_snapshot.chunks_read = c_upd.chunks_read;
                 chat_snapshot.total_messages = c_upd.total_messages;
+                chat_snapshot.deduplicated_messages = c_upd.deduplicated_messages;
                 chat_snapshot.emitted_messages = c_upd.emitted_messages;
                 if !is_tty
                     && chat_milestones
@@ -697,5 +710,48 @@ fn render_interactive_media(
         let c_line = c_snap.format_interactive(bar_width);
         output.write_str(&format!("\r\x1b[2K{c_line}"));
         *first_render = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_progress_bar_internal() {
+        assert_eq!(format_progress_bar(20, 0), "────────────────────");
+        assert_eq!(format_progress_bar(20, 50), "━━━━━━━━━━──────────");
+        assert_eq!(format_progress_bar(20, 100), "━━━━━━━━━━━━━━━━━━━━");
+        assert_eq!(format_progress_bar(0, 50), "");
+    }
+
+    #[test]
+    fn test_format_bytes_internal() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GB");
+    }
+
+    #[test]
+    fn test_format_number_with_commas_internal() {
+        assert_eq!(format_number_with_commas(0), "0");
+        assert_eq!(format_number_with_commas(999), "999");
+        assert_eq!(format_number_with_commas(1000), "1,000");
+        assert_eq!(format_number_with_commas(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn test_milestone_tracker_heartbeat_stall() {
+        let t0 = Instant::now();
+        let mut tracker = MilestoneTracker::new(t0);
+
+        assert!(tracker.should_log_at(0, 0, t0));
+        assert!(!tracker.should_log_at(5, 50, t0 + Duration::from_secs(20)));
+        // 31s elapsed: heartbeat triggers
+        assert!(tracker.should_log_at(5, 50, t0 + Duration::from_secs(31)));
+        // 65s elapsed: stalled progress (still 50), >30s passed since 31s -> heartbeat triggers during stall
+        assert!(tracker.should_log_at(5, 50, t0 + Duration::from_secs(65)));
     }
 }

@@ -31,7 +31,13 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
     if let Some(chzzk_load::cli::Commands::Consolidate(consolidate_args)) = args.command {
-        chzzk_load::consolidation::run_consolidation(consolidate_args).await?;
+        let is_tty = !args.headless && std::io::stdout().is_terminal();
+        let coordinator = chzzk_load::consolidation::ConsolidationProgressCoordinator::new(is_tty);
+        chzzk_load::consolidation::run_consolidation_with_coordinator(
+            consolidate_args,
+            coordinator,
+        )
+        .await?;
         return Ok(());
     }
 

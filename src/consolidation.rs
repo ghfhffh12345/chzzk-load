@@ -4,10 +4,9 @@ pub mod progress;
 pub mod video;
 
 pub use progress::{
-    ChatProgressSnapshot, ChatProgressUpdate, ConsolidationProgressCoordinator, CoordinatorOutput,
-    DEFAULT_BAR_WIDTH, MediaProgressSession, MilestoneTracker, PurgeProgressSession,
-    PurgeProgressSnapshot, PurgeProgressUpdate, VideoProgressSnapshot, VideoProgressUpdate,
-    format_bytes, format_number_with_commas, format_progress_bar,
+    ChatProgressSnapshot, ChatProgressUpdate, ConsolidationProgressCoordinator,
+    MediaProgressSession, PurgeProgressSession, PurgeProgressSnapshot, PurgeProgressUpdate,
+    VideoProgressSnapshot, VideoProgressUpdate,
 };
 
 pub use chat::{
@@ -27,8 +26,6 @@ pub use video::{
     feed_video_chunks, finalize_staged_video, rename_local_file_with_retry, resolve_ffmpeg_bin,
 };
 
-use std::sync::Arc;
-
 use crate::cli::ConsolidateArgs;
 use crate::uploader::unlink_local_file_with_retry;
 
@@ -46,6 +43,25 @@ pub struct ConsolidationSummary {
 
 pub const DEFAULT_DELETE_CONCURRENCY: usize = 16;
 
+/// Returns true if a chunk is eligible for post-consolidation purging (.ts or .jsonl, strictly excluding metadata.jsonl).
+pub(crate) fn is_purgeable_chunk(chunk: &ConsolidationChunk) -> bool {
+    chunk.name != "metadata.jsonl"
+        && (chunk.name.ends_with(".ts") || chunk.name.ends_with(".jsonl"))
+}
+
+/// Collects chunk names eligible for post-consolidation purging from video and chat manifests.
+pub(crate) fn collect_purgeable_chunks(
+    video_chunks: &[ConsolidationChunk],
+    chat_chunks: &[ConsolidationChunk],
+) -> Vec<String> {
+    video_chunks
+        .iter()
+        .chain(chat_chunks.iter())
+        .filter(|c| is_purgeable_chunk(c))
+        .map(|c| c.name.clone())
+        .collect()
+}
+
 /// Deletes original chunk files (.ts and .jsonl) upon successful consolidation completion
 /// using the default deletion concurrency (16).
 ///
@@ -58,11 +74,12 @@ pub async fn delete_original_chunks(
     video_chunks: &[ConsolidationChunk],
     chat_chunks: &[ConsolidationChunk],
 ) -> anyhow::Result<()> {
-    delete_original_chunks_with_concurrency(
+    delete_original_chunks_with_progress(
         target,
         video_chunks,
         chat_chunks,
         DEFAULT_DELETE_CONCURRENCY,
+        None,
         None,
     )
     .await
@@ -76,17 +93,18 @@ pub async fn delete_original_chunks_with_bin(
     chat_chunks: &[ConsolidationChunk],
     rclone_bin: Option<&str>,
 ) -> anyhow::Result<()> {
-    delete_original_chunks_with_concurrency(
+    delete_original_chunks_with_progress(
         target,
         video_chunks,
         chat_chunks,
         DEFAULT_DELETE_CONCURRENCY,
         rclone_bin,
+        None,
     )
     .await
 }
 
-/// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded semaphore limit.
+/// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded worker limit.
 ///
 /// Pools video chunks (`.ts`) and chat chunks (`.jsonl`) into a single unified queue,
 /// strictly excluding `metadata.jsonl`.
@@ -111,8 +129,34 @@ pub async fn delete_original_chunks_with_concurrency(
     .await
 }
 
-/// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded semaphore limit,
+async fn delete_chunk_task(
+    target: TargetLocation,
+    name: String,
+    bin: Option<String>,
+) -> anyhow::Result<()> {
+    match target {
+        TargetLocation::Local(ref dir) => {
+            let path = dir.join(&name);
+            match unlink_local_file_with_retry(&path).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(anyhow::Error::from(e)
+                    .context(format!("Failed to delete local chunk '{}'", path.display()))),
+            }
+        }
+        TargetLocation::Remote(ref remote_base) => {
+            let path = join_remote_path(remote_base, &name);
+            let bin_str = resolve_rclone_bin(bin.as_deref());
+            delete_remote_file_checked(&bin_str, &path).await
+        }
+    }
+}
+
+/// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded worker limit,
 /// sending progress updates as chunks are successfully deleted.
+///
+/// Throttles task spawning so that only up to `concurrency` tasks are spawned in-flight
+/// in Tokio at any time (bounded worker queue pattern).
 pub async fn delete_original_chunks_with_progress(
     target: &TargetLocation,
     video_chunks: &[ConsolidationChunk],
@@ -121,58 +165,30 @@ pub async fn delete_original_chunks_with_progress(
     rclone_bin: Option<&str>,
     progress_sender: Option<tokio::sync::mpsc::UnboundedSender<PurgeProgressUpdate>>,
 ) -> anyhow::Result<()> {
-    let mut eligible = Vec::with_capacity(video_chunks.len() + chat_chunks.len());
-    for chunk in video_chunks {
-        if chunk.name != "metadata.jsonl" && chunk.name.ends_with(".ts") {
-            eligible.push(chunk.name.clone());
-        }
-    }
-    for chunk in chat_chunks {
-        if chunk.name != "metadata.jsonl" && chunk.name.ends_with(".jsonl") {
-            eligible.push(chunk.name.clone());
-        }
-    }
-
+    let eligible = collect_purgeable_chunks(video_chunks, chat_chunks);
     if eligible.is_empty() {
         return Ok(());
     }
 
     let concurrency_limit = concurrency.max(1);
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency_limit));
     let mut join_set = tokio::task::JoinSet::new();
+    let mut chunk_iter = eligible.into_iter();
 
-    for name in eligible {
-        let sem = Arc::clone(&semaphore);
-        let target = target.clone();
-        let bin = rclone_bin.map(str::to_string);
-        join_set.spawn(async move {
-            let permit = sem
-                .acquire_owned()
-                .await
-                .map_err(|e| anyhow::anyhow!("Semaphore acquire failed: {e}"))?;
-            let res = match target {
-                TargetLocation::Local(ref dir) => {
-                    let path = dir.join(&name);
-                    match unlink_local_file_with_retry(&path).await {
-                        Ok(()) => Ok(()),
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                        Err(e) => Err(anyhow::Error::from(e)
-                            .context(format!("Failed to delete local chunk '{}'", path.display()))),
-                    }
-                }
-                TargetLocation::Remote(ref remote_base) => {
-                    let path = join_remote_path(remote_base, &name);
-                    let bin_str = resolve_rclone_bin(bin.as_deref());
-                    delete_remote_file_checked(&bin_str, &path).await
-                }
-            };
-            drop(permit);
-            res
-        });
+    // Seed worker queue with up to concurrency_limit in-flight tasks
+    for _ in 0..concurrency_limit {
+        if let Some(name) = chunk_iter.next() {
+            let target = target.clone();
+            let bin = rclone_bin.map(str::to_string);
+            join_set.spawn(delete_chunk_task(target, name, bin));
+        } else {
+            break;
+        }
     }
 
     let mut chunks_deleted = 0usize;
     let mut errors = Vec::new();
+
+    // Consume completed tasks and replenish worker queue until all chunks processed
     while let Some(res) = join_set.join_next().await {
         match res {
             Ok(Ok(())) => {
@@ -189,6 +205,13 @@ pub async fn delete_original_chunks_with_progress(
                     "Purge task panicked or aborted: {join_err}"
                 ));
             }
+        }
+
+        // Replenish worker queue
+        if let Some(name) = chunk_iter.next() {
+            let target = target.clone();
+            let bin = rclone_bin.map(str::to_string);
+            join_set.spawn(delete_chunk_task(target, name, bin));
         }
     }
 
@@ -397,16 +420,9 @@ pub async fn run_consolidation_with_coordinator(
     }
 
     if !args.keep_original {
-        let total_purge = manifest
-            .video_chunks
-            .iter()
-            .filter(|c| c.name != "metadata.jsonl" && c.name.ends_with(".ts"))
-            .count()
-            + manifest
-                .chat_chunks
-                .iter()
-                .filter(|c| c.name != "metadata.jsonl" && c.name.ends_with(".jsonl"))
-                .count();
+        let eligible_chunks =
+            collect_purgeable_chunks(&manifest.video_chunks, &manifest.chat_chunks);
+        let total_purge = eligible_chunks.len();
 
         let mut purge_session = coordinator.start_purge(total_purge);
         let purge_sender = purge_session.purge_sender();
@@ -447,4 +463,71 @@ pub async fn run_consolidation_with_coordinator(
 fn is_cancellation_error(err: &anyhow::Error) -> bool {
     let msg = format!("{err:#}");
     msg.contains("cancelled by cooperative cancellation token")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_purgeable_chunk_filters_metadata_and_non_chunks() {
+        let meta = ConsolidationChunk {
+            name: "metadata.jsonl".to_string(),
+            index: 0,
+            size: 100,
+        };
+        assert!(!is_purgeable_chunk(&meta));
+
+        let vid = ConsolidationChunk {
+            name: "chunk_0000.ts".to_string(),
+            index: 0,
+            size: 500,
+        };
+        assert!(is_purgeable_chunk(&vid));
+
+        let chat = ConsolidationChunk {
+            name: "chat_0000.jsonl".to_string(),
+            index: 0,
+            size: 200,
+        };
+        assert!(is_purgeable_chunk(&chat));
+
+        let other = ConsolidationChunk {
+            name: "readme.txt".to_string(),
+            index: 0,
+            size: 10,
+        };
+        assert!(!is_purgeable_chunk(&other));
+    }
+
+    #[test]
+    fn test_collect_purgeable_chunks() {
+        let v_chunks = vec![
+            ConsolidationChunk {
+                name: "chunk_0000.ts".to_string(),
+                index: 0,
+                size: 100,
+            },
+            ConsolidationChunk {
+                name: "metadata.jsonl".to_string(),
+                index: 1,
+                size: 50,
+            },
+        ];
+        let c_chunks = vec![
+            ConsolidationChunk {
+                name: "chat_0000.jsonl".to_string(),
+                index: 0,
+                size: 200,
+            },
+            ConsolidationChunk {
+                name: "notes.log".to_string(),
+                index: 1,
+                size: 20,
+            },
+        ];
+
+        let eligible = collect_purgeable_chunks(&v_chunks, &c_chunks);
+        assert_eq!(eligible, vec!["chunk_0000.ts", "chat_0000.jsonl"]);
+    }
 }

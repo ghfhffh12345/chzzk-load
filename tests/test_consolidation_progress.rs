@@ -85,6 +85,7 @@ fn test_chat_progress_snapshot_formatting() {
         chunks_read: 6,
         total_chunks: 10,
         total_messages: 15_000,
+        deduplicated_messages: 2_655,
         emitted_messages: 12_345,
     };
     assert_eq!(snapshot.pct(), 60);
@@ -182,11 +183,14 @@ fn test_milestone_tracker_heartbeat_trigger() {
     // At T=35s (<30s since last log at 31s) -> false
     assert!(!tracker.should_log_at(5, 55, t0 + Duration::from_secs(35)));
 
-    // At T=65s (>30s since last log at 31s), but progress has NOT advanced (still 50) -> false
-    assert!(!tracker.should_log_at(5, 50, t0 + Duration::from_secs(65)));
+    // At T=65s (>30s since last log at 31s), even when progress has stalled (still 50) -> true (heartbeat during stall)
+    assert!(tracker.should_log_at(5, 50, t0 + Duration::from_secs(65)));
 
-    // At T=65s with progress advanced (60 > 50) -> true (heartbeat)
-    assert!(tracker.should_log_at(5, 60, t0 + Duration::from_secs(65)));
+    // At T=70s (<30s since last log at 65s) -> false
+    assert!(!tracker.should_log_at(5, 50, t0 + Duration::from_secs(70)));
+
+    // At T=96s (>30s since last log at 65s) with progress advanced (60 > 50) -> true (heartbeat)
+    assert!(tracker.should_log_at(5, 60, t0 + Duration::from_secs(96)));
 }
 
 #[test]
@@ -201,6 +205,7 @@ fn test_ansi_suppression_non_interactive() {
         chunks_read: 6,
         total_chunks: 10,
         total_messages: 15_000,
+        deduplicated_messages: 2_655,
         emitted_messages: 12_345,
     };
     let del = PurgeProgressSnapshot {
@@ -235,6 +240,7 @@ async fn test_coordinator_interactive_dual_media() {
     let _ = c_tx.send(ChatProgressUpdate {
         chunks_read: 6,
         total_messages: 15_000,
+        deduplicated_messages: 2_655,
         emitted_messages: 12_345,
     });
 
@@ -294,6 +300,7 @@ async fn test_coordinator_interactive_single_media_chat_only() {
     let _ = c_tx.send(ChatProgressUpdate {
         chunks_read: 3,
         total_messages: 5_000,
+        deduplicated_messages: 500,
         emitted_messages: 4_500,
     });
 
@@ -326,6 +333,7 @@ async fn test_coordinator_non_interactive_milestones() {
         let _ = c_tx.send(ChatProgressUpdate {
             chunks_read: i * 2,
             total_messages: i * 2000,
+            deduplicated_messages: i * 200,
             emitted_messages: i * 1800,
         });
     }

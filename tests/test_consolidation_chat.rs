@@ -7,7 +7,7 @@ use common::mock_rclone::get_mock_rclone_bin;
 use chzzk_load::chzzk::models_chat::RecordedChatMessage;
 use chzzk_load::consolidation::chat::{
     ChatDeduplicator, DEFAULT_CHAT_DEDUP_WINDOW_MS, cleanup_staged_chat, consolidate_chat,
-    finalize_staged_chat,
+    consolidate_chat_local_with_progress, finalize_staged_chat,
 };
 use chzzk_load::consolidation::manifest::{ConsolidationChunk, TargetLocation};
 use tokio_util::sync::CancellationToken;
@@ -509,6 +509,46 @@ async fn test_delete_remote_file_exit_code_4_ignored_silently() {
     // Should complete cleanly without panic or error when file doesn't exist (mock_rclone exits with 4)
     chzzk_load::consolidation::chat::delete_remote_file(mock_bin.to_str().unwrap(), &remote_path)
         .await;
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_consolidate_chat_progress_reports_deduplicated_messages() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_cons_chat_prog_{}", rand::random::<u32>()));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0_path = temp_dir.join("chat_0000.jsonl");
+    let line1 = make_json_line(1_000, Some("u1"), "hello");
+    let line2 = make_json_line(1_000, Some("u1"), "hello"); // duplicate within 10s
+    let line3 = make_json_line(2_000, Some("u2"), "world");
+    let chunk0_content = format!("{line1}\n{line2}\n{line3}\n");
+    fs::write(&chunk0_path, &chunk0_content).unwrap();
+
+    let chunks = vec![ConsolidationChunk {
+        index: 0,
+        name: "chat_0000.jsonl".to_string(),
+        size: chunk0_content.len() as u64,
+    }];
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel_token = CancellationToken::new();
+
+    let stats =
+        consolidate_chat_local_with_progress(&temp_dir, &chunks, false, cancel_token, Some(tx))
+            .await
+            .expect("consolidate_chat_local_with_progress should succeed");
+
+    assert_eq!(stats.total_messages, 3);
+    assert_eq!(stats.deduplicated_messages, 1);
+    assert_eq!(stats.emitted_messages, 2);
+
+    let update = rx.recv().await.expect("should receive progress update");
+    assert_eq!(update.chunks_read, 1);
+    assert_eq!(update.total_messages, 3);
+    assert_eq!(update.deduplicated_messages, 1);
+    assert_eq!(update.emitted_messages, 2);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }

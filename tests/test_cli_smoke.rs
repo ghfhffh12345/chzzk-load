@@ -443,3 +443,40 @@ fn test_cli_consolidate_delete_concurrency_validation() {
         panic!("Expected Commands::Consolidate");
     }
 }
+
+#[test]
+fn test_cli_consolidate_with_headless_and_no_tui() {
+    let cli_headless = Cli::try_parse_from([
+        "chzzk-load",
+        "--headless",
+        "consolidate",
+        "recordings/stream",
+    ])
+    .expect("Parsing --headless consolidate should succeed");
+    assert!(cli_headless.headless);
+    assert_eq!(
+        cli_headless.command,
+        Some(Commands::Consolidate(ConsolidateArgs {
+            path: "recordings/stream".to_string(),
+            keep_original: false,
+            overwrite: false,
+            strict: false,
+            delete_concurrency: 16,
+        }))
+    );
+
+    let cli_no_tui =
+        Cli::try_parse_from(["chzzk-load", "--no-tui", "consolidate", "recordings/stream"])
+            .expect("Parsing --no-tui consolidate should succeed");
+    assert!(cli_no_tui.headless);
+    assert_eq!(
+        cli_no_tui.command,
+        Some(Commands::Consolidate(ConsolidateArgs {
+            path: "recordings/stream".to_string(),
+            keep_original: false,
+            overwrite: false,
+            strict: false,
+            delete_concurrency: 16,
+        }))
+    );
+}

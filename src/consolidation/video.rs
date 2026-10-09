@@ -18,15 +18,6 @@ pub struct VideoConsolidationOptions {
     pub progress_sender: Option<tokio::sync::mpsc::UnboundedSender<VideoProgressUpdate>>,
 }
 
-impl PartialEq for VideoConsolidationOptions {
-    fn eq(&self, other: &Self) -> bool {
-        self.ffmpeg_bin == other.ffmpeg_bin
-            && self.rclone_bin == other.rclone_bin
-            && self.progress_sender.is_some() == other.progress_sender.is_some()
-    }
-}
-impl Eq for VideoConsolidationOptions {}
-
 impl VideoConsolidationOptions {
     pub fn new() -> Self {
         Self::default()

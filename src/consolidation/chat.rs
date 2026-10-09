@@ -376,6 +376,7 @@ pub async fn consolidate_chat_local_with_progress(
                 let _ = tx.send(ChatProgressUpdate {
                     chunks_read: i + 1,
                     total_messages: stats.total_messages,
+                    deduplicated_messages: stats.deduplicated_messages,
                     emitted_messages: stats.emitted_messages,
                 });
             }
@@ -519,6 +520,7 @@ pub async fn consolidate_chat_remote_with_progress(
                 let _ = tx.send(ChatProgressUpdate {
                     chunks_read: i + 1,
                     total_messages: stats.total_messages,
+                    deduplicated_messages: stats.deduplicated_messages,
                     emitted_messages: stats.emitted_messages,
                 });
             }
