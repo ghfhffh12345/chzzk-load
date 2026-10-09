@@ -68,6 +68,14 @@ _Avoid_: Temp file, incomplete download, partial upload
 The bounded time-window algorithm that identifies and eliminates duplicate live chat messages across chunk boundaries using monotonic message timestamps and identity tuples while maintaining $O(1)$ memory consumption.
 _Avoid_: Chat filter, message dedup cache, hash set
 
+**Concurrent Chunk Purge**:
+The post-consolidation cleanup process that deletes original video and chat chunks concurrently under a bounded concurrency limit, rapidly reclaiming storage without exceeding API rate limits or local resource quotas.
+_Avoid_: Parallel deleter, batch wipe, chunk cleaner
+
+**Consolidation Progress Telemetry**:
+The real-time progress tracking mechanism providing live visibility into simultaneous video remuxing, chat deduplication, and chunk purge states via interactive terminal bars or non-interactive diagnostic milestones.
+_Avoid_: Progress monitor, consolidate logger, status bar
+
 **Lean Metadata Snapshot**:
 The flat JSON Lines event format (`metadata.jsonl`) recording essential stream lifecycle and classification state with monotonic offsets, synchronized via the unified upload DLQ pipeline and omitting volatile viewer telemetry and static CDN thumbnail URLs.
 _Avoid_: Metadata diff, delta log, stream telemetry
