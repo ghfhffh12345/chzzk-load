@@ -53,4 +53,22 @@ pub struct ConsolidateArgs {
         help = "Abort consolidation if chunk gaps or malformed entries are encountered"
     )]
     pub strict: bool,
+
+    #[arg(
+        long,
+        default_value = "16",
+        value_parser = parse_delete_concurrency,
+        help = "Maximum concurrent deletion tasks when purging original chunks"
+    )]
+    pub delete_concurrency: usize,
+}
+
+fn parse_delete_concurrency(s: &str) -> Result<usize, String> {
+    let val: usize = s
+        .parse()
+        .map_err(|e| format!("invalid integer '{s}': {e}"))?;
+    if val == 0 {
+        return Err("delete concurrency must be greater than 0".to_string());
+    }
+    Ok(val)
 }

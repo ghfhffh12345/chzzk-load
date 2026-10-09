@@ -465,6 +465,7 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
         keep_original: false,
         overwrite: false,
         strict: false,
+        delete_concurrency: 16,
     };
 
     let summary = run_consolidation(args)
@@ -527,6 +528,7 @@ async fn test_run_consolidation_keep_original_flag() {
         keep_original: true,
         overwrite: false,
         strict: false,
+        delete_concurrency: 16,
     };
 
     let summary = run_consolidation(args)
@@ -564,6 +566,7 @@ async fn test_run_consolidation_single_media_video_only() {
         keep_original: false,
         overwrite: false,
         strict: false,
+        delete_concurrency: 16,
     };
 
     let summary = run_consolidation(args)
@@ -601,6 +604,7 @@ async fn test_run_consolidation_single_media_chat_only() {
         keep_original: false,
         overwrite: false,
         strict: false,
+        delete_concurrency: 16,
     };
 
     let summary = run_consolidation(args)
@@ -746,6 +750,7 @@ async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_prese
         keep_original: false,
         overwrite: false,
         strict: true,
+        delete_concurrency: 16,
     };
 
     let result = run_consolidation(args).await;
@@ -810,6 +815,7 @@ async fn test_run_consolidation_video_failure_surfaces_video_error_not_chat_canc
         keep_original: false,
         overwrite: false,
         strict: false,
+        delete_concurrency: 16,
     };
 
     let result = run_consolidation(args).await;

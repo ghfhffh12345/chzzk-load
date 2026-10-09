@@ -335,6 +335,7 @@ fn test_cli_consolidate_subcommand_parsing() {
             keep_original: false,
             overwrite: false,
             strict: false,
+            delete_concurrency: 16,
         }))
     );
 
@@ -346,6 +347,8 @@ fn test_cli_consolidate_subcommand_parsing() {
         "--keep-original",
         "--overwrite",
         "--strict",
+        "--delete-concurrency",
+        "8",
     ])
     .expect("Parsing consolidate command with all flags should succeed");
     assert_eq!(
@@ -355,6 +358,7 @@ fn test_cli_consolidate_subcommand_parsing() {
             keep_original: true,
             overwrite: true,
             strict: true,
+            delete_concurrency: 8,
         }))
     );
 
@@ -390,4 +394,52 @@ fn test_cli_consolidate_subcommand_parsing() {
         sub_stdout.contains("--strict"),
         "Subcommand help must contain --strict: {sub_stdout}"
     );
+    assert!(
+        sub_stdout.contains("--delete-concurrency"),
+        "Subcommand help must contain --delete-concurrency: {sub_stdout}"
+    );
+}
+
+#[test]
+fn test_cli_consolidate_delete_concurrency_validation() {
+    // Value of 0 must fail validation
+    let err_zero = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/stream",
+        "--delete-concurrency",
+        "0",
+    ])
+    .expect_err("delete_concurrency=0 must fail");
+    let err_str = err_zero.to_string();
+    assert!(
+        err_str.contains("delete concurrency must be greater than 0"),
+        "Expected error message about > 0, got: {err_str}"
+    );
+
+    // Non-integer string must fail validation
+    let err_invalid = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/stream",
+        "--delete-concurrency",
+        "abc",
+    ])
+    .expect_err("delete_concurrency=abc must fail");
+    assert!(err_invalid.to_string().contains("invalid"));
+
+    // Valid positive value
+    let cli = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/stream",
+        "--delete-concurrency",
+        "32",
+    ])
+    .expect("delete_concurrency=32 must succeed");
+    if let Some(Commands::Consolidate(args)) = cli.command {
+        assert_eq!(args.delete_concurrency, 32);
+    } else {
+        panic!("Expected Commands::Consolidate");
+    }
 }
