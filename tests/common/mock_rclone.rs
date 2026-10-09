@@ -109,6 +109,10 @@ fn main() {
         }
         "deletefile" => {
             let target = &args[2];
+            if target.contains("fail_delete") {
+                eprintln!("mock error: failed to deletefile {}", target);
+                std::process::exit(1);
+            }
             let local_path = resolve_path(target);
             if !std::path::Path::new(&local_path).exists() {
                 eprintln!("mock error: {} is a directory or doesn't exist: object not found", local_path);

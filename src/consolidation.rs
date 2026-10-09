@@ -5,7 +5,7 @@ pub mod video;
 pub use chat::{
     ChatConsolidationStats, ChatDeduplicator, ChatMessageKey, DEFAULT_CHAT_DEDUP_WINDOW_MS,
     cleanup_staged_chat, consolidate_chat, consolidate_chat_local, consolidate_chat_remote,
-    delete_remote_file, finalize_staged_chat,
+    delete_remote_file, delete_remote_file_checked, finalize_staged_chat,
 };
 pub use manifest::{
     ChunkGap, ConsolidationChunk, ConsolidationManifest, RawManifestEntry, TargetLocation,
@@ -19,9 +19,10 @@ pub use video::{
     feed_video_chunks, finalize_staged_video, rename_local_file_with_retry, resolve_ffmpeg_bin,
 };
 
+use std::sync::Arc;
+
 use crate::cli::ConsolidateArgs;
 use crate::uploader::unlink_local_file_with_retry;
-use anyhow::Context;
 
 /// Summary report returned upon consolidation completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,44 +36,10 @@ pub struct ConsolidationSummary {
     pub video_result: Option<VideoConsolidationResult>,
 }
 
-/// Helper function to purge a list of chunk files matching an expected extension.
-async fn purge_chunk_list(
-    target: &TargetLocation,
-    chunks: &[ConsolidationChunk],
-    expected_extension: &str,
-    rclone_bin: Option<&str>,
-) -> anyhow::Result<()> {
-    match target {
-        TargetLocation::Local(dir) => {
-            for chunk in chunks {
-                if chunk.name == "metadata.jsonl" || !chunk.name.ends_with(expected_extension) {
-                    continue;
-                }
-                let path = dir.join(&chunk.name);
-                if let Err(e) = unlink_local_file_with_retry(&path).await {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        return Err(e).with_context(|| {
-                            format!("Failed to delete local chunk '{}'", path.display())
-                        });
-                    }
-                }
-            }
-        }
-        TargetLocation::Remote(remote_base) => {
-            let bin = resolve_rclone_bin(rclone_bin);
-            for chunk in chunks {
-                if chunk.name == "metadata.jsonl" || !chunk.name.ends_with(expected_extension) {
-                    continue;
-                }
-                let remote_chunk_path = join_remote_path(remote_base, &chunk.name);
-                delete_remote_file(&bin, &remote_chunk_path).await;
-            }
-        }
-    }
-    Ok(())
-}
+pub const DEFAULT_DELETE_CONCURRENCY: usize = 16;
 
-/// Deletes original chunk files (.ts and .jsonl) upon successful consolidation completion.
+/// Deletes original chunk files (.ts and .jsonl) upon successful consolidation completion
+/// using the default deletion concurrency (16).
 ///
 /// Under `TargetLocation::Local`, unlinks files using bounded retry logic handling Windows locks.
 /// Under `TargetLocation::Remote`, deletes files using `rclone deletefile`.
@@ -83,18 +50,127 @@ pub async fn delete_original_chunks(
     video_chunks: &[ConsolidationChunk],
     chat_chunks: &[ConsolidationChunk],
 ) -> anyhow::Result<()> {
-    delete_original_chunks_with_bin(target, video_chunks, chat_chunks, None).await
+    delete_original_chunks_with_concurrency(
+        target,
+        video_chunks,
+        chat_chunks,
+        DEFAULT_DELETE_CONCURRENCY,
+        None,
+    )
+    .await
 }
 
-/// Deletes original chunk files (.ts and .jsonl) with an optional custom rclone binary path.
+/// Deletes original chunk files (.ts and .jsonl) with an optional custom rclone binary path
+/// using the default deletion concurrency (16).
 pub async fn delete_original_chunks_with_bin(
     target: &TargetLocation,
     video_chunks: &[ConsolidationChunk],
     chat_chunks: &[ConsolidationChunk],
     rclone_bin: Option<&str>,
 ) -> anyhow::Result<()> {
-    purge_chunk_list(target, video_chunks, ".ts", rclone_bin).await?;
-    purge_chunk_list(target, chat_chunks, ".jsonl", rclone_bin).await?;
+    delete_original_chunks_with_concurrency(
+        target,
+        video_chunks,
+        chat_chunks,
+        DEFAULT_DELETE_CONCURRENCY,
+        rclone_bin,
+    )
+    .await
+}
+
+/// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded semaphore limit.
+///
+/// Pools video chunks (`.ts`) and chat chunks (`.jsonl`) into a single unified queue,
+/// strictly excluding `metadata.jsonl`.
+///
+/// Implements best-effort failure aggregation: all tasks run to completion, and any failures
+/// are collected and reported in an aggregate error summary upon completion.
+pub async fn delete_original_chunks_with_concurrency(
+    target: &TargetLocation,
+    video_chunks: &[ConsolidationChunk],
+    chat_chunks: &[ConsolidationChunk],
+    concurrency: usize,
+    rclone_bin: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut eligible = Vec::with_capacity(video_chunks.len() + chat_chunks.len());
+    for chunk in video_chunks {
+        if chunk.name != "metadata.jsonl" && chunk.name.ends_with(".ts") {
+            eligible.push(chunk.name.clone());
+        }
+    }
+    for chunk in chat_chunks {
+        if chunk.name != "metadata.jsonl" && chunk.name.ends_with(".jsonl") {
+            eligible.push(chunk.name.clone());
+        }
+    }
+
+    if eligible.is_empty() {
+        return Ok(());
+    }
+
+    let concurrency_limit = concurrency.max(1);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency_limit));
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for name in eligible {
+        let sem = Arc::clone(&semaphore);
+        let target = target.clone();
+        let bin = rclone_bin.map(str::to_string);
+        join_set.spawn(async move {
+            let permit = sem
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow::anyhow!("Semaphore acquire failed: {e}"))?;
+            let res = match target {
+                TargetLocation::Local(ref dir) => {
+                    let path = dir.join(&name);
+                    match unlink_local_file_with_retry(&path).await {
+                        Ok(()) => Ok(()),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(e) => Err(anyhow::Error::from(e)
+                            .context(format!("Failed to delete local chunk '{}'", path.display()))),
+                    }
+                }
+                TargetLocation::Remote(ref remote_base) => {
+                    let path = join_remote_path(remote_base, &name);
+                    let bin_str = resolve_rclone_bin(bin.as_deref());
+                    delete_remote_file_checked(&bin_str, &path).await
+                }
+            };
+            drop(permit);
+            res
+        });
+    }
+
+    let mut errors = Vec::new();
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                errors.push(err);
+            }
+            Err(join_err) => {
+                errors.push(anyhow::anyhow!(
+                    "Purge task panicked or aborted: {join_err}"
+                ));
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        let count = errors.len();
+        let sample: Vec<String> = errors.iter().take(5).map(|e| format!("{e:#}")).collect();
+        let sample_str = sample.join("\n  - ");
+        let extra = if count > 5 {
+            format!("\n  ... and {} more error(s)", count - 5)
+        } else {
+            String::new()
+        };
+        anyhow::bail!(
+            "Failed to delete {count} chunk(s) during concurrent purge:\n  - {sample_str}{extra}"
+        );
+    }
+
     Ok(())
 }
 
@@ -260,10 +336,12 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
     }
 
     if !args.keep_original {
-        delete_original_chunks(
+        delete_original_chunks_with_concurrency(
             &manifest.target,
             &manifest.video_chunks,
             &manifest.chat_chunks,
+            args.delete_concurrency,
+            None,
         )
         .await?;
         println!("[INFO] Original chunks cleaned up successfully");
