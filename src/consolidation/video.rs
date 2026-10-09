@@ -1,3 +1,6 @@
+pub use super::loopback::{
+    DEFAULT_LOOPBACK_STARTUP_TIMEOUT, EphemeralLoopbackServer, parse_loopback_port,
+};
 pub use super::manifest::join_remote_path;
 use super::manifest::{ConsolidationChunk, TargetLocation, resolve_rclone_bin};
 pub use crate::uploader::worker::rename_local_file_with_retry;
@@ -331,6 +334,65 @@ pub fn build_local_concat_ffmpeg_command(
     cmd
 }
 
+/// Constructs the list of command line arguments for remote mode FFmpeg Concat Demuxer remuxing (Spec #56, Ticket #59).
+///
+/// Features:
+/// - `-protocol_whitelist file,http,tcp`: Whitelists file, http, and tcp protocols for reading the manifest and loopback chunk streams
+/// - `-safe 0`: Allows loopback HTTP URLs in the concat manifest script
+/// - `-f concat`: Invokes FFmpeg's native container-aware Concat Demuxer
+/// - `-i <manifest_path>`: Reads chunk URLs from the manifest script
+/// - `-c copy`: Lossless stream-copy without transcoding
+/// - `-bsf:a aac_adtstoasc`: Converts ADTS AAC headers to AudioSpecificConfig (ASC) for MP4 container
+/// - `-avoid_negative_ts make_zero`: Resets container timeline start to 0.0s, eliminating initial playback freezing
+/// - `-movflags frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets`: Fragmented MP4 for live streaming writes
+/// - `-progress pipe:2`: Emits progress telemetry key-value pairs to stderr
+/// - `pipe:1`: Emits fragmented MP4 byte stream to stdout for rclone rcat
+pub fn build_remote_concat_ffmpeg_args(manifest_path: &Path) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "warning".to_string(),
+        "-progress".to_string(),
+        "pipe:2".to_string(),
+        "-y".to_string(),
+        "-fflags".to_string(),
+        "+genpts+discardcorrupt".to_string(),
+        "-protocol_whitelist".to_string(),
+        "file,http,tcp".to_string(),
+        "-safe".to_string(),
+        "0".to_string(),
+        "-f".to_string(),
+        "concat".to_string(),
+        "-i".to_string(),
+        manifest_path.to_string_lossy().to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+        "-bsf:a".to_string(),
+        "aac_adtstoasc".to_string(),
+        "-avoid_negative_ts".to_string(),
+        "make_zero".to_string(),
+        "-movflags".to_string(),
+        "frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets".to_string(),
+        "-f".to_string(),
+        "mp4".to_string(),
+        "pipe:1".to_string(),
+    ]
+}
+
+/// Builds the Tokio `Command` for the remote mode FFmpeg Concat Demuxer process.
+///
+/// Configures `stdin(Stdio::null())`, `stdout(Stdio::piped())`, `stderr(Stdio::piped())`,
+/// and `kill_on_drop(true)`.
+pub fn build_remote_concat_ffmpeg_command(ffmpeg_bin: &str, manifest_path: &Path) -> Command {
+    let mut cmd = Command::new(ffmpeg_bin);
+    cmd.kill_on_drop(true);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.args(build_remote_concat_ffmpeg_args(manifest_path));
+    cmd
+}
+
 /// Atomically finalizes the staged `consolidated.mp4.part` into `consolidated.mp4`.
 ///
 /// In local mode: uses `tokio::fs::rename` with Windows file lock retries.
@@ -599,7 +661,7 @@ pub async fn consolidate_video(
 }
 
 /// Local mode video consolidation using FFmpeg Concat Demuxer and faststart seek table (Spec #56, Ticket #58).
-async fn consolidate_video_local(
+pub async fn consolidate_video_local(
     dir: &Path,
     chunks: &[ConsolidationChunk],
     options: &VideoConsolidationOptions,
@@ -751,27 +813,59 @@ async fn consolidate_video_local(
     }
 }
 
-/// Remote mode video consolidation (preserved streaming pipe feeding, to be updated in Ticket #59).
-async fn consolidate_video_remote(
+/// Remote mode video consolidation using FFmpeg Concat Demuxer and Ephemeral Loopback Server (Spec #56, Ticket #59).
+pub async fn consolidate_video_remote(
     remote_base: &str,
     chunks: &[ConsolidationChunk],
     options: &VideoConsolidationOptions,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<VideoConsolidationResult> {
+    let total_chunks = chunks.len();
+    let total_manifest_bytes: u64 = chunks.iter().map(|c| c.size).sum();
     let target = TargetLocation::Remote(remote_base.to_string());
+    let staged_remote = join_remote_path(remote_base, "consolidated.mp4.part");
     let ffmpeg_bin = resolve_ffmpeg_bin(options.ffmpeg_bin.as_deref());
     let rclone_bin = options.rclone_bin.clone();
 
-    // Spawn FFmpeg remuxing process
-    let mut ffmpeg_cmd = build_ffmpeg_remux_command(&ffmpeg_bin);
-    let mut ffmpeg_child = ffmpeg_cmd
-        .spawn()
-        .with_context(|| format!("Failed to spawn ffmpeg binary: '{ffmpeg_bin}'"))?;
+    // Clean up any lingering .part file from prior aborted run
+    let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
 
-    let mut ffmpeg_stdin = ffmpeg_child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to open FFmpeg stdin pipe"))?;
+    if cancel_token.is_cancelled() {
+        anyhow::bail!("Video consolidation cancelled by cooperative cancellation token");
+    }
+
+    // 1. Spawn Ephemeral Loopback Server scoped to remote_base
+    let loopback_server = EphemeralLoopbackServer::start(remote_base, rclone_bin.as_deref())
+        .await
+        .with_context(|| {
+            format!("Failed to start ephemeral loopback server for remote '{remote_base}'")
+        })?;
+
+    // 2. Construct manifest entries as http://127.0.0.1:{port}/{chunk.name}
+    let entries: Vec<String> = chunks
+        .iter()
+        .map(|c| loopback_server.chunk_url(&c.name))
+        .collect();
+
+    // 3. Create temporary concat script guarded by ConcatScriptGuard (RAII cleanup)
+    let manifest_guard = create_temp_concat_script(&entries).await.with_context(|| {
+        format!(
+            "Failed to create temporary concat script for {} remote chunks",
+            chunks.len()
+        )
+    })?;
+
+    // 4. Build and spawn FFmpeg Concat Demuxer command with piped stdout for rclone rcat
+    let mut ffmpeg_cmd = build_remote_concat_ffmpeg_command(&ffmpeg_bin, manifest_guard.path());
+    let mut ffmpeg_child = match ffmpeg_cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
+            return Err(e)
+                .with_context(|| format!("Failed to spawn ffmpeg binary: '{ffmpeg_bin}'"));
+        }
+    };
+
     let mut ffmpeg_stdout = ffmpeg_child
         .stdout
         .take()
@@ -781,13 +875,15 @@ async fn consolidate_video_remote(
         .take()
         .ok_or_else(|| anyhow::anyhow!("Failed to open FFmpeg stderr pipe"))?;
 
-    // Background task to monitor FFmpeg stderr diagnostics and parse progress telemetry lines
+    // 5. Background task to monitor FFmpeg stderr diagnostics and parse progress telemetry lines
     let stderr_progress_tx = options.progress_sender.clone();
     let stderr_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(ffmpeg_stderr).lines();
         let mut logs = Vec::new();
         let mut telemetry = VideoProgressTelemetry::default();
         let mut last_speed = None;
+        let mut last_chunks_fed = 0usize;
+
         while let Ok(Some(line)) = reader.next_line().await {
             if telemetry.update_from_line(&line) {
                 if let Some(ref speed) = telemetry.speed {
@@ -798,6 +894,24 @@ async fn consolidate_video_remote(
                         }
                     }
                 }
+                if let Some(total_size) = telemetry.total_size {
+                    if total_manifest_bytes > 0 && total_chunks > 0 {
+                        let chunks_fed = ((total_size as f64 / total_manifest_bytes as f64)
+                            * total_chunks as f64)
+                            .round()
+                            .min(total_chunks as f64)
+                            as usize;
+                        if chunks_fed != last_chunks_fed {
+                            last_chunks_fed = chunks_fed;
+                            if let Some(ref tx) = stderr_progress_tx {
+                                let _ = tx.send(VideoProgressUpdate::ChunkFed {
+                                    chunks_fed,
+                                    bytes_fed: total_size,
+                                });
+                            }
+                        }
+                    }
+                }
             } else if logs.len() < 100 {
                 logs.push(line);
             }
@@ -805,9 +919,9 @@ async fn consolidate_video_remote(
         logs.join("\n")
     });
 
-    // Output sink task writing FFmpeg stdout to staged .part destination
+    // 6. Output sink task streaming FFmpeg stdout into rclone rcat
     let rclone_bin_for_sink = rclone_bin.clone();
-    let staged_remote = join_remote_path(remote_base, "consolidated.mp4.part");
+    let staged_remote_for_sink = staged_remote.clone();
     let sink_handle = tokio::spawn(async move {
         let bin = resolve_rclone_bin(rclone_bin_for_sink.as_deref());
 
@@ -816,11 +930,11 @@ async fn consolidate_video_remote(
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::piped());
-        cmd.arg("rcat").arg(&staged_remote);
+        cmd.arg("rcat").arg(&staged_remote_for_sink);
 
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("Failed to spawn '{bin} rcat {staged_remote}' process"))?;
+        let mut child = cmd.spawn().with_context(|| {
+            format!("Failed to spawn '{bin} rcat {staged_remote_for_sink}' process")
+        })?;
 
         let mut stdin = child
             .stdin
@@ -839,7 +953,7 @@ async fn consolidate_video_remote(
         let status = child
             .wait()
             .await
-            .with_context(|| format!("Failed to wait for '{bin} rcat {staged_remote}'"))?;
+            .with_context(|| format!("Failed to wait for '{bin} rcat {staged_remote_for_sink}'"))?;
 
         if !status.success() {
             let mut stderr_content = String::new();
@@ -847,7 +961,7 @@ async fn consolidate_video_remote(
                 let _ = stderr.read_to_string(&mut stderr_content).await;
             }
             anyhow::bail!(
-                "rclone rcat for '{staged_remote}' exited with status {}: {}",
+                "rclone rcat for '{staged_remote_for_sink}' exited with status {}: {}",
                 status,
                 stderr_content.trim()
             );
@@ -855,120 +969,63 @@ async fn consolidate_video_remote(
         Ok(bytes)
     });
 
-    // Chunk feeder task writing TS chunks to FFmpeg stdin
-    let target_for_feeder = target.clone();
-    let chunks_to_feed = chunks.to_vec();
-    let rclone_bin_for_feeder = rclone_bin.clone();
-    let feeder_progress_tx = options.progress_sender.clone();
-    let feeder_handle = tokio::spawn(async move {
-        let res = feed_video_chunks_with_progress(
-            &target_for_feeder,
-            &chunks_to_feed,
-            rclone_bin_for_feeder.as_deref(),
-            &mut ffmpeg_stdin,
-            feeder_progress_tx.as_ref(),
-        )
-        .await;
-        // Explicitly drop stdin to signal EOF to FFmpeg
-        drop(ffmpeg_stdin);
-        res
-    });
-
-    // Coordinated execution with failure isolation and cooperative cancellation
+    // 7. Cooperative cancellation & execution barrier
     let run_result: anyhow::Result<u64> = async {
-        let mut feeder_handle = feeder_handle;
         let mut sink_handle = sink_handle;
-
         tokio::select! {
             _ = cancel_token.cancelled() => {
-                feeder_handle.abort();
                 sink_handle.abort();
                 let _ = ffmpeg_child.kill().await;
                 let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
                 anyhow::bail!("Video consolidation cancelled by cooperative cancellation token");
             }
-            feed_res = &mut feeder_handle => {
-                match feed_res {
-                    Ok(Ok(_)) => {
-                        tokio::select! {
-                            _ = cancel_token.cancelled() => {
-                                sink_handle.abort();
-                                let _ = ffmpeg_child.kill().await;
-                                let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
-                                anyhow::bail!("Video consolidation cancelled by cooperative cancellation token");
-                            }
-                            sink_out = &mut sink_handle => {
-                                let bytes_written = sink_out
-                                    .map_err(|e| anyhow::anyhow!("Sink task panicked: {e}"))??;
-                                let status = ffmpeg_child.wait().await.context("Failed waiting on ffmpeg process")?;
-                                let stderr_logs = stderr_handle.await.unwrap_or_default();
-                                if !status.success() {
-                                    cancel_token.cancel();
-                                    let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
-                                    anyhow::bail!("FFmpeg remuxing exited with status {status}: {stderr_logs}");
-                                }
-                                Ok(bytes_written)
-                            }
-                            status_res = ffmpeg_child.wait() => {
-                                let status = status_res.context("Failed waiting on ffmpeg process")?;
-                                let sink_out = sink_handle.await
-                                    .map_err(|e| anyhow::anyhow!("Sink task panicked: {e}"))??;
-                                let stderr_logs = stderr_handle.await.unwrap_or_default();
-                                if !status.success() {
-                                    cancel_token.cancel();
-                                    let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
-                                    anyhow::bail!("FFmpeg remuxing exited with status {status}: {stderr_logs}");
-                                }
-                                Ok(sink_out)
-                            }
-                        }
-                    }
-                    Ok(Err(feed_err)) => {
-                        cancel_token.cancel();
-                        sink_handle.abort();
-                        let _ = ffmpeg_child.kill().await;
-                        let stderr_logs = stderr_handle.await.unwrap_or_default();
-                        let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
-                        anyhow::bail!("Video chunk feeder failed: {feed_err}. FFmpeg stderr: {stderr_logs}");
-                    }
-                    Err(join_err) => {
-                        cancel_token.cancel();
-                        sink_handle.abort();
-                        let _ = ffmpeg_child.kill().await;
-                        let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
-                        anyhow::bail!("Video feeder task panicked: {join_err}");
-                    }
-                }
-            }
-            sink_res = &mut sink_handle => {
-                cancel_token.cancel();
-                feeder_handle.abort();
-                let _ = ffmpeg_child.kill().await;
+            sink_out = &mut sink_handle => {
+                let bytes_written = sink_out
+                    .map_err(|e| anyhow::anyhow!("Sink task panicked: {e}"))??;
+                let status = ffmpeg_child.wait().await.context("Failed waiting on ffmpeg process")?;
                 let stderr_logs = stderr_handle.await.unwrap_or_default();
-                let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
-                match sink_res {
-                    Ok(Ok(_)) => anyhow::bail!("Video sink completed prematurely before feeder. FFmpeg stderr: {stderr_logs}"),
-                    Ok(Err(e)) => anyhow::bail!("Video sink error: {e}. FFmpeg stderr: {stderr_logs}"),
-                    Err(e) => anyhow::bail!("Video sink task panicked: {e}. FFmpeg stderr: {stderr_logs}"),
+                if !status.success() {
+                    cancel_token.cancel();
+                    let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
+                    anyhow::bail!("FFmpeg remuxing exited with status {status}: {stderr_logs}");
                 }
+                Ok(bytes_written)
             }
             status_res = ffmpeg_child.wait() => {
-                cancel_token.cancel();
-                feeder_handle.abort();
-                sink_handle.abort();
-                let stderr_logs = stderr_handle.await.unwrap_or_default();
-                let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
                 let status = status_res.context("Failed waiting on ffmpeg process")?;
-                anyhow::bail!("FFmpeg exited prematurely with status {status} before feeder completed. FFmpeg stderr: {stderr_logs}");
+                let stderr_logs = stderr_handle.await.unwrap_or_default();
+                if !status.success() {
+                    cancel_token.cancel();
+                    sink_handle.abort();
+                    let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;
+                    anyhow::bail!("FFmpeg remuxing exited with status {status}: {stderr_logs}");
+                }
+                let bytes_written = sink_handle
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Sink task panicked: {e}"))??;
+                Ok(bytes_written)
             }
         }
-    }.await;
+    }
+    .await;
+
+    // Drop temp manifest and loopback server explicitly
+    drop(manifest_guard);
+    drop(loopback_server);
 
     match run_result {
-        Ok(bytes_written) => Ok(VideoConsolidationResult {
-            chunks_processed: chunks.len(),
-            bytes_written,
-        }),
+        Ok(bytes_written) => {
+            if let Some(ref tx) = options.progress_sender {
+                let _ = tx.send(VideoProgressUpdate::ChunkFed {
+                    chunks_fed: total_chunks,
+                    bytes_fed: bytes_written,
+                });
+            }
+            Ok(VideoConsolidationResult {
+                chunks_processed: total_chunks,
+                bytes_written,
+            })
+        }
         Err(err) => {
             cancel_token.cancel();
             let _ = cleanup_staged_video(&target, rclone_bin.as_deref()).await;

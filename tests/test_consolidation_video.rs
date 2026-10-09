@@ -1,13 +1,17 @@
+mod common;
+
 use chzzk_load::consolidation::manifest::{ConsolidationChunk, TargetLocation};
 use chzzk_load::consolidation::video::{
     VideoConsolidationOptions, build_ffmpeg_remux_args, build_ffmpeg_remux_command,
-    build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command, cleanup_staged_video,
-    consolidate_video, feed_video_chunks, finalize_staged_video, join_remote_path,
-    resolve_ffmpeg_bin,
+    build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command,
+    build_remote_concat_ffmpeg_args, build_remote_concat_ffmpeg_command, cleanup_staged_video,
+    consolidate_video, consolidate_video_remote, feed_video_chunks, finalize_staged_video,
+    join_remote_path, resolve_ffmpeg_bin,
 };
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 fn ensure_ffmpeg_available() -> bool {
@@ -232,6 +236,60 @@ fn test_build_local_concat_ffmpeg_args_contains_required_flags() {
 
     // Verify command builder produces configured command with null stdin
     let cmd = build_local_concat_ffmpeg_command("test_ffmpeg", &manifest_path, &output_path);
+    let program = cmd.as_std().get_program().to_string_lossy();
+    assert_eq!(program, "test_ffmpeg");
+}
+
+#[test]
+fn test_build_remote_concat_ffmpeg_args_contains_required_flags() {
+    let manifest_path = PathBuf::from("temp/concat_manifest.txt");
+    let args = build_remote_concat_ffmpeg_args(&manifest_path);
+
+    // Verify Concat Demuxer input flags
+    assert!(args.contains(&"-protocol_whitelist".to_string()));
+    assert!(args.contains(&"file,http,tcp".to_string()));
+    assert!(args.contains(&"-safe".to_string()));
+    assert!(args.contains(&"0".to_string()));
+    assert!(args.contains(&"-f".to_string()));
+    assert!(args.contains(&"concat".to_string()));
+    assert!(args.contains(&"-i".to_string()));
+    let i_pos = args.iter().position(|a| a == "-i").expect("-i present");
+    assert_eq!(args[i_pos + 1], manifest_path.to_string_lossy().to_string());
+
+    // Verify protocol whitelist precedes -i
+    let pw_pos = args
+        .iter()
+        .position(|a| a == "-protocol_whitelist")
+        .expect("-protocol_whitelist present");
+    assert!(pw_pos < i_pos, "-protocol_whitelist must precede -i");
+
+    // Verify lossless copy & ADTS-to-ASC bitstream filter
+    assert!(args.contains(&"-c".to_string()));
+    assert!(args.contains(&"copy".to_string()));
+    assert!(args.contains(&"-bsf:a".to_string()));
+    assert!(args.contains(&"aac_adtstoasc".to_string()));
+
+    // Verify timestamp normalization & fragmented MP4 streaming flags
+    assert!(args.contains(&"-avoid_negative_ts".to_string()));
+    assert!(args.contains(&"make_zero".to_string()));
+    assert!(args.contains(&"-movflags".to_string()));
+    assert!(
+        args.contains(
+            &"frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets".to_string()
+        )
+    );
+
+    // Verify progress telemetry
+    assert!(args.contains(&"-progress".to_string()));
+    assert!(args.contains(&"pipe:2".to_string()));
+
+    // Verify output destination is pipe:1 for rclone rcat streaming
+    assert!(args.contains(&"-f".to_string()));
+    assert!(args.contains(&"mp4".to_string()));
+    assert_eq!(args.last().unwrap(), "pipe:1");
+
+    // Verify command builder produces configured command with null stdin and piped stdout
+    let cmd = build_remote_concat_ffmpeg_command("test_ffmpeg", &manifest_path);
     let program = cmd.as_std().get_program().to_string_lossy();
     assert_eq!(program, "test_ffmpeg");
 }
@@ -1242,6 +1300,406 @@ async fn test_consolidate_video_local_path_with_korean_and_special_characters() 
         .position(|b| b == "mdat")
         .expect("mdat box present");
     assert!(moov_pos < mdat_pos);
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_consolidate_video_remote_concat_demuxer_zero_frame_drops() {
+    if !ensure_ffmpeg_available() || !ensure_rclone_available() {
+        eprintln!("[SKIP] ffmpeg or rclone not available, skipping remote zero frame drops test");
+        return;
+    }
+
+    let temp_dir = create_temp_test_dir("test_cons_remote_demux");
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+
+    // Generate 2 valid synthetic MPEG-TS chunks without B-frames (-bf 0): 2.0s each at 10fps (20 frames each = 40 frames total)
+    let status0 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2.0:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=2.0",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "0",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk0.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk0");
+    assert!(status0.status.success(), "Failed to generate chunk0");
+
+    let status1 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2.0:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=2.0",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "0",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk1.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk1");
+    assert!(status1.status.success(), "Failed to generate chunk1");
+
+    let size0 = fs::metadata(&chunk0).unwrap().len();
+    let size1 = fs::metadata(&chunk1).unwrap().len();
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chunk_0000.ts".to_string(),
+            size: size0,
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chunk_0001.ts".to_string(),
+            size: size1,
+        },
+    ];
+
+    let has_ffprobe = ensure_ffprobe_available();
+    if has_ffprobe {
+        // Verify source chunk frames and packets before consolidation
+        assert_eq!(probe_video_frame_count(&chunk0), 20);
+        assert_eq!(probe_video_frame_count(&chunk1), 20);
+        assert_eq!(probe_video_packet_count(&chunk0), 20);
+        assert_eq!(probe_video_packet_count(&chunk1), 20);
+    }
+
+    let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
+    let remote_name = format!("tstremdemux{}", rand::random::<u16>());
+    unsafe {
+        std::env::set_var(
+            format!("RCLONE_CONFIG_{}_TYPE", remote_name.to_ascii_uppercase()),
+            "local",
+        );
+    }
+
+    let target = TargetLocation::Remote(format!("{remote_name}:{remote_dir_str}"));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let options = VideoConsolidationOptions::default().with_progress_sender(tx);
+    let cancel_token = CancellationToken::new();
+
+    let result = consolidate_video(&target, &chunks, &options, cancel_token)
+        .await
+        .expect("Remote consolidation with Concat Demuxer and Loopback Server must succeed");
+
+    assert_eq!(result.chunks_processed, 2);
+    assert!(result.bytes_written > 0);
+
+    // Drain progress updates
+    let mut received_chunk_fed = Vec::new();
+    while let Ok(update) = rx.try_recv() {
+        if let chzzk_load::consolidation::progress::VideoProgressUpdate::ChunkFed {
+            chunks_fed,
+            bytes_fed,
+        } = update
+        {
+            received_chunk_fed.push((chunks_fed, bytes_fed));
+        }
+    }
+    assert!(
+        !received_chunk_fed.is_empty(),
+        "Must receive progress ChunkFed updates"
+    );
+    let last_chunk_fed = received_chunk_fed.last().unwrap();
+    assert_eq!(
+        last_chunk_fed.0, 2,
+        "Final chunks_fed must be total chunks count"
+    );
+    assert!(last_chunk_fed.1 > 0, "Final bytes_fed must be positive");
+
+    let part_mp4 = temp_dir.join("consolidated.mp4.part");
+    let final_mp4 = temp_dir.join("consolidated.mp4");
+    assert!(
+        part_mp4.exists(),
+        "Staged .part file must exist on remote before finalization"
+    );
+    assert!(
+        !final_mp4.exists(),
+        "Final .mp4 must not exist on remote before finalization"
+    );
+
+    // Finalize staged video on remote
+    finalize_staged_video(&target, None)
+        .await
+        .expect("finalize_staged_video on remote must succeed");
+
+    assert!(
+        final_mp4.exists(),
+        "Final consolidated.mp4 must exist on remote"
+    );
+    assert!(!part_mp4.exists(), "Staged .part file must no longer exist");
+    assert!(
+        chunk0.exists() && chunk1.exists(),
+        "Original remote chunks must remain untouched"
+    );
+
+    // Verify fragmented MP4 box structure
+    let boxes = inspect_mp4_box_order(&final_mp4);
+    assert!(
+        boxes.contains(&"moof".to_string()),
+        "Remote MP4 output must be fragmented containing 'moof' fragment box: {boxes:?}"
+    );
+
+    // If ffprobe is available, verify 100% preserved frames and normalized start time
+    if has_ffprobe {
+        let final_frames = probe_video_frame_count(&final_mp4);
+        assert_eq!(
+            final_frames, 40,
+            "Must preserve 100% of video frames (20 + 20 = 40) across remote chunk seams"
+        );
+
+        let final_packets = probe_video_packet_count(&final_mp4);
+        assert_eq!(
+            final_packets, 40,
+            "Must preserve all video packets with zero dropped boundary packets on remote"
+        );
+
+        let format_start = probe_format_start_time(&final_mp4);
+        assert!(
+            (format_start - 0.0).abs() < 0.001,
+            "Container start time must be normalized to 0.0s (got {format_start})"
+        );
+    }
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
+    if !ensure_ffmpeg_available() || !ensure_rclone_available() {
+        eprintln!(
+            "[SKIP] ffmpeg or rclone not available, skipping remote active cancellation test"
+        );
+        return;
+    }
+
+    let temp_dir = create_temp_test_dir("test_cons_rem_act_cancel");
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+
+    let status0 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=4.0:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=4.0",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "0",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk0.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk0");
+    assert!(status0.status.success());
+
+    let status1 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=4.0:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=4.0",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "0",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk1.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk1");
+    assert!(status1.status.success());
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chunk_0000.ts".to_string(),
+            size: fs::metadata(&chunk0).unwrap().len(),
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chunk_0001.ts".to_string(),
+            size: fs::metadata(&chunk1).unwrap().len(),
+        },
+    ];
+
+    let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
+    let remote_name = format!("tstremactc{}", rand::random::<u16>());
+    unsafe {
+        std::env::set_var(
+            format!("RCLONE_CONFIG_{}_TYPE", remote_name.to_ascii_uppercase()),
+            "local",
+        );
+    }
+
+    let target = TargetLocation::Remote(format!("{remote_name}:{remote_dir_str}"));
+    let options = VideoConsolidationOptions::default();
+    let cancel_token = CancellationToken::new();
+
+    let cancel_token_clone = cancel_token.clone();
+    let target_clone = target.clone();
+    let chunks_clone = chunks.clone();
+
+    let handle = tokio::spawn(async move {
+        consolidate_video(&target_clone, &chunks_clone, &options, cancel_token_clone).await
+    });
+
+    // Let loopback server and FFmpeg start, then cooperatively cancel
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel_token.cancel();
+
+    let result = handle.await.unwrap();
+    assert!(
+        result.is_err(),
+        "Active remote cancellation must return error"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled by cooperative cancellation token")
+    );
+
+    let staged_file = temp_dir.join("consolidated.mp4.part");
+    let final_file = temp_dir.join("consolidated.mp4");
+    assert!(
+        !staged_file.exists(),
+        "Staged .part file must be cleaned up on active remote cancellation"
+    );
+    assert!(!final_file.exists(), "Final file must not exist on remote");
+    assert!(
+        chunk0.exists() && chunk1.exists(),
+        "Original remote chunks must remain untouched on active cancellation"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_consolidate_video_remote_hermetic_with_mock_rclone() {
+    let mock_bin = common::mock_rclone::get_mock_rclone_bin();
+    let temp_dir = create_temp_test_dir("test_cons_rem_hermetic");
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+
+    let status0 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.5:size=160x120:rate=10",
+            "-c:v",
+            "libx264",
+            "-f",
+            "mpegts",
+            chunk0.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk0");
+    assert!(status0.status.success());
+
+    let status1 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.5:size=160x120:rate=10",
+            "-c:v",
+            "libx264",
+            "-f",
+            "mpegts",
+            chunk1.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk1");
+    assert!(status1.status.success());
+
+    let size0 = fs::metadata(&chunk0).unwrap().len();
+    let size1 = fs::metadata(&chunk1).unwrap().len();
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chunk_0000.ts".to_string(),
+            size: size0,
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chunk_0001.ts".to_string(),
+            size: size1,
+        },
+    ];
+
+    let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
+    let remote_base = format!("mockremote:{remote_dir_str}");
+    let options = VideoConsolidationOptions::default().with_rclone_bin(mock_bin.to_str().unwrap());
+    let cancel_token = CancellationToken::new();
+
+    let result = consolidate_video_remote(&remote_base, &chunks, &options, cancel_token).await;
+    assert!(
+        result.is_ok(),
+        "Hermetic remote consolidation with mock_rclone must succeed: {:?}",
+        result.err()
+    );
+
+    let res = result.unwrap();
+    assert_eq!(res.chunks_processed, 2);
+
+    let staged_part = temp_dir.join("consolidated.mp4.part");
+    assert!(
+        staged_part.exists(),
+        "Staged .part file must exist after mock consolidation"
+    );
+    assert!(
+        chunk0.exists() && chunk1.exists(),
+        "Original chunks must remain untouched"
+    );
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }

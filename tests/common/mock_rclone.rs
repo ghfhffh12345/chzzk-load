@@ -34,7 +34,12 @@ pub fn get_mock_rclone_bin() -> &'static Path {
 use std::io::{Read, Write};
 
 fn resolve_path(arg: &str) -> String {
-    // If format is remote:C:/path or remote:/path, split on first colon
+    // If format is remote:C:/path or remote:/path, split on first colon,
+    // but preserve Windows drive specifiers (e.g. C:\path or C:/path).
+    let chars: Vec<char> = arg.chars().take(2).collect();
+    if chars.len() == 2 && chars[0].is_ascii_alphabetic() && chars[1] == ':' {
+        return arg.to_string();
+    }
     if let Some((_, rest)) = arg.split_once(':') {
         rest.to_string()
     } else {
@@ -119,6 +124,75 @@ fn main() {
                 std::process::exit(4);
             }
             let _ = std::fs::remove_file(&local_path);
+            std::process::exit(0);
+        }
+        "serve" => {
+            if args.len() < 3 || args[2] != "http" {
+                eprintln!("mock error: expected serve http");
+                std::process::exit(1);
+            }
+            let remote_base = if args.len() > 3 { &args[3] } else { "" };
+            if remote_base.contains("fail_serve") {
+                eprintln!("mock error: failed to serve http for {}", remote_base);
+                std::process::exit(1);
+            }
+            if remote_base.contains("hang_serve") {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                std::process::exit(0);
+            }
+            let local_dir = resolve_path(remote_base);
+            let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("mock error: failed to bind loopback: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let port = listener.local_addr().unwrap().port();
+            eprintln!("NOTICE: HTTP Server started on [http://127.0.0.1:{}/]", port);
+
+            for stream in listener.incoming() {
+                if let Ok(mut stream) = stream {
+                    let local_dir = local_dir.clone();
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 4096];
+                        let n = match stream.read(&mut buf) {
+                            Ok(n) => n,
+                            Err(_) => return,
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        let first_line = req.lines().next().unwrap_or("");
+                        let parts: Vec<&str> = first_line.split_whitespace().collect();
+                        if parts.len() < 2 {
+                            return;
+                        }
+                        let method = parts[0];
+                        let raw_path = parts[1];
+                        let path = raw_path.split('?').next().unwrap_or(raw_path).trim_start_matches('/');
+                        let file_path = std::path::Path::new(&local_dir).join(path);
+                        if file_path.exists() && file_path.is_file() {
+                            if let Ok(bytes) = std::fs::read(&file_path) {
+                                let header = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n",
+                                    bytes.len()
+                                );
+                                let _ = stream.write_all(header.as_bytes());
+                                if method != "HEAD" {
+                                    let _ = stream.write_all(&bytes);
+                                }
+                                let _ = stream.flush();
+                                return;
+                            }
+                        }
+                        let not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(not_found.as_bytes());
+                        let _ = stream.flush();
+                    });
+                }
+            }
             std::process::exit(0);
         }
         _ => {

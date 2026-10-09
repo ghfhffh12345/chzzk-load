@@ -1,7 +1,12 @@
 pub mod chat;
+pub mod loopback;
 pub mod manifest;
 pub mod progress;
 pub mod video;
+
+pub use loopback::{
+    DEFAULT_LOOPBACK_STARTUP_TIMEOUT, EphemeralLoopbackServer, parse_loopback_port,
+};
 
 pub use progress::{
     ChatProgressSnapshot, ChatProgressUpdate, ConsolidationProgressCoordinator,
@@ -23,8 +28,10 @@ pub use manifest::{
 pub use video::{
     ConcatScriptGuard, VideoConsolidationOptions, VideoConsolidationResult, VideoProgressTelemetry,
     build_ffmpeg_remux_args, build_ffmpeg_remux_command, build_local_concat_ffmpeg_args,
-    build_local_concat_ffmpeg_command, cleanup_staged_video, consolidate_video,
-    create_temp_concat_script, create_temp_concat_script_in, create_temp_concat_script_in_sync,
+    build_local_concat_ffmpeg_command, build_remote_concat_ffmpeg_args,
+    build_remote_concat_ffmpeg_command, cleanup_staged_video, consolidate_video,
+    consolidate_video_local, consolidate_video_remote, create_temp_concat_script,
+    create_temp_concat_script_in, create_temp_concat_script_in_sync,
     create_temp_concat_script_sync, escape_concat_path, feed_video_chunks, finalize_staged_video,
     generate_concat_script, rename_local_file_with_retry, resolve_ffmpeg_bin,
 };

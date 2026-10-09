@@ -72,6 +72,11 @@ fn main() {
                 }
             }
         }
+        if args.iter().any(|a| a == "pipe:1") {
+            let mut stdout = std::io::stdout().lock();
+            let _ = stdout.write_all(b"mock_mp4_bytes");
+            let _ = stdout.flush();
+        }
         std::process::exit(0);
     }
 }
