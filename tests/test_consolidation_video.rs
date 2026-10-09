@@ -1,8 +1,9 @@
 use chzzk_load::consolidation::manifest::{ConsolidationChunk, TargetLocation};
 use chzzk_load::consolidation::video::{
     VideoConsolidationOptions, build_ffmpeg_remux_args, build_ffmpeg_remux_command,
-    cleanup_staged_video, consolidate_video, feed_video_chunks, finalize_staged_video,
-    join_remote_path, resolve_ffmpeg_bin,
+    build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command, cleanup_staged_video,
+    consolidate_video, feed_video_chunks, finalize_staged_video, join_remote_path,
+    resolve_ffmpeg_bin,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -27,10 +28,105 @@ fn ensure_rclone_available() -> bool {
         .unwrap_or(false)
 }
 
+fn ensure_ffprobe_available() -> bool {
+    Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn create_temp_test_dir(prefix: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("{}_{}", prefix, rand::random::<u32>()));
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
+}
+
+fn inspect_mp4_box_order(path: &std::path::Path) -> Vec<String> {
+    let bytes = fs::read(path).expect("read mp4 file");
+    let mut offset = 0;
+    let mut boxes = Vec::new();
+    while offset + 8 <= bytes.len() {
+        let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let box_type = std::str::from_utf8(&bytes[offset + 4..offset + 8])
+            .unwrap_or("????")
+            .to_string();
+        boxes.push(box_type);
+        if size == 0 || size > bytes.len() - offset {
+            break;
+        }
+        offset += size;
+    }
+    boxes
+}
+
+fn probe_video_frame_count(path: &std::path::Path) -> u64 {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("probe frame count");
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && *l != "N/A")
+        .and_then(|l| l.parse::<u64>().ok())
+        .expect("parse frame count")
+}
+
+fn probe_video_packet_count(path: &std::path::Path) -> u64 {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_packets",
+            "-show_entries",
+            "stream=nb_read_packets",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("probe packet count");
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && *l != "N/A")
+        .and_then(|l| l.parse::<u64>().ok())
+        .expect("parse packet count")
+}
+
+fn probe_format_start_time(path: &std::path::Path) -> f64 {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=start_time",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("probe start time");
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && *l != "N/A")
+        .and_then(|l| l.parse::<f64>().ok())
+        .expect("parse start time")
 }
 
 #[test]
@@ -91,6 +187,51 @@ fn test_build_ffmpeg_remux_args_contains_required_flags() {
 
     // Verify command builder produces configured command
     let cmd = build_ffmpeg_remux_command("test_ffmpeg");
+    let program = cmd.as_std().get_program().to_string_lossy();
+    assert_eq!(program, "test_ffmpeg");
+}
+
+#[test]
+fn test_build_local_concat_ffmpeg_args_contains_required_flags() {
+    let manifest_path = PathBuf::from("temp/concat_manifest.txt");
+    let output_path = PathBuf::from("recordings/consolidated.mp4.part");
+    let args = build_local_concat_ffmpeg_args(&manifest_path, &output_path);
+
+    // Verify Concat Demuxer input flags
+    assert!(args.contains(&"-safe".to_string()));
+    assert!(args.contains(&"0".to_string()));
+    assert!(args.contains(&"-f".to_string()));
+    assert!(args.contains(&"concat".to_string()));
+    assert!(args.contains(&"-i".to_string()));
+    let i_pos = args.iter().position(|a| a == "-i").expect("-i present");
+    assert_eq!(args[i_pos + 1], manifest_path.to_string_lossy().to_string());
+
+    // Verify lossless copy & ADTS-to-ASC bitstream filter
+    assert!(args.contains(&"-c".to_string()));
+    assert!(args.contains(&"copy".to_string()));
+    assert!(args.contains(&"-bsf:a".to_string()));
+    assert!(args.contains(&"aac_adtstoasc".to_string()));
+
+    // Verify timestamp normalization & faststart seek table
+    assert!(args.contains(&"-avoid_negative_ts".to_string()));
+    assert!(args.contains(&"make_zero".to_string()));
+    assert!(args.contains(&"-movflags".to_string()));
+    assert!(args.contains(&"+faststart".to_string()));
+
+    // Verify progress telemetry
+    assert!(args.contains(&"-progress".to_string()));
+    assert!(args.contains(&"pipe:2".to_string()));
+
+    // Verify output destination is staged file directly with mp4 container format
+    assert!(args.contains(&"-f".to_string()));
+    assert!(args.contains(&"mp4".to_string()));
+    assert_eq!(
+        args.last().unwrap(),
+        &output_path.to_string_lossy().to_string()
+    );
+
+    // Verify command builder produces configured command with null stdin
+    let cmd = build_local_concat_ffmpeg_command("test_ffmpeg", &manifest_path, &output_path);
     let program = cmd.as_std().get_program().to_string_lossy();
     assert_eq!(program, "test_ffmpeg");
 }
@@ -695,6 +836,412 @@ async fn test_consolidate_video_cooperative_cancellation() {
         chunk0.exists(),
         "Original chunk must remain untouched on cancellation"
     );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_consolidate_video_local_faststart_seek_table_and_preserved_frames() {
+    if !ensure_ffmpeg_available() {
+        eprintln!("[SKIP] ffmpeg not available, skipping faststart & preserved frames test");
+        return;
+    }
+
+    let temp_dir = create_temp_test_dir("test_cons_faststart");
+
+    // Generate 2 valid synthetic MPEG-TS chunks without B-frames (-bf 0): 2.0s each at 10fps (20 frames each = 40 frames total)
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+
+    let status0 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2.0:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=2.0",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "0",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk0.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk0");
+    assert!(status0.status.success(), "Failed to generate chunk0");
+
+    let status1 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=2.0:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=2.0",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "0",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk1.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk1");
+    assert!(status1.status.success(), "Failed to generate chunk1");
+
+    let size0 = fs::metadata(&chunk0).unwrap().len();
+    let size1 = fs::metadata(&chunk1).unwrap().len();
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chunk_0000.ts".to_string(),
+            size: size0,
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chunk_0001.ts".to_string(),
+            size: size1,
+        },
+    ];
+
+    let has_ffprobe = ensure_ffprobe_available();
+    if has_ffprobe {
+        // Verify source chunk frames and packets before consolidation
+        assert_eq!(probe_video_frame_count(&chunk0), 20);
+        assert_eq!(probe_video_frame_count(&chunk1), 20);
+        assert_eq!(probe_video_packet_count(&chunk0), 20);
+        assert_eq!(probe_video_packet_count(&chunk1), 20);
+    }
+
+    let target = TargetLocation::Local(temp_dir.clone());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let options = VideoConsolidationOptions::default().with_progress_sender(tx);
+    let cancel_token = CancellationToken::new();
+
+    let result = consolidate_video(&target, &chunks, &options, cancel_token)
+        .await
+        .expect("Consolidation with real ffmpeg must succeed");
+
+    assert_eq!(result.chunks_processed, 2);
+    assert!(result.bytes_written > 0);
+
+    // Drain progress updates
+    let mut received_chunk_fed = Vec::new();
+    while let Ok(update) = rx.try_recv() {
+        if let chzzk_load::consolidation::progress::VideoProgressUpdate::ChunkFed {
+            chunks_fed,
+            bytes_fed,
+        } = update
+        {
+            received_chunk_fed.push((chunks_fed, bytes_fed));
+        }
+    }
+    assert!(
+        !received_chunk_fed.is_empty(),
+        "Must receive progress ChunkFed updates"
+    );
+    let last_chunk_fed = received_chunk_fed.last().unwrap();
+    assert_eq!(
+        last_chunk_fed.0, 2,
+        "Final chunks_fed must be total chunks count"
+    );
+    assert!(last_chunk_fed.1 > 0, "Final bytes_fed must be positive");
+
+    let part_mp4 = temp_dir.join("consolidated.mp4.part");
+    let final_mp4 = temp_dir.join("consolidated.mp4");
+    assert!(
+        part_mp4.exists(),
+        "Staged .part file must exist before finalization"
+    );
+    assert!(
+        !final_mp4.exists(),
+        "Final .mp4 must not exist before finalization"
+    );
+
+    // Finalize staged video
+    finalize_staged_video(&target, None)
+        .await
+        .expect("finalize_staged_video must succeed");
+
+    assert!(final_mp4.exists(), "Final consolidated.mp4 must exist");
+    assert!(!part_mp4.exists(), "Staged .part file must no longer exist");
+    assert!(
+        chunk0.exists() && chunk1.exists(),
+        "Original chunks must remain untouched"
+    );
+
+    // 1. Verify faststart seek table: moov atom MUST appear before mdat atom
+    let boxes = inspect_mp4_box_order(&final_mp4);
+    let moov_pos = boxes
+        .iter()
+        .position(|b| b == "moov")
+        .expect("moov box present");
+    let mdat_pos = boxes
+        .iter()
+        .position(|b| b == "mdat")
+        .expect("mdat box present");
+    assert!(
+        moov_pos < mdat_pos,
+        "moov atom (index {moov_pos}) must appear before mdat atom (index {mdat_pos}) for instant faststart seeking"
+    );
+
+    // 2. If ffprobe is available, verify frame preservation, zero boundary packet drops, and start time
+    if has_ffprobe {
+        let final_frames = probe_video_frame_count(&final_mp4);
+        assert_eq!(
+            final_frames, 40,
+            "Must preserve 100% of video frames (20 + 20 = 40) across chunk seams"
+        );
+
+        let final_packets = probe_video_packet_count(&final_mp4);
+        assert_eq!(
+            final_packets, 40,
+            "Must preserve all video packets with zero dropped boundary packets"
+        );
+
+        let format_start = probe_format_start_time(&final_mp4);
+        assert!(
+            (format_start - 0.0).abs() < 0.001,
+            "Container start time must be normalized to 0.0s (got {format_start})"
+        );
+    }
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_consolidate_video_local_active_cancellation_cleans_up_part() {
+    if !ensure_ffmpeg_available() {
+        eprintln!("[SKIP] ffmpeg not available, skipping active cancellation test");
+        return;
+    }
+
+    let temp_dir = create_temp_test_dir("test_cons_active_cancel");
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+
+    let status0 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=4.0:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=4.0",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "0",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk0.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk0");
+    assert!(status0.status.success());
+
+    let status1 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=4.0:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=4.0",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "0",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk1.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk1");
+    assert!(status1.status.success());
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chunk_0000.ts".to_string(),
+            size: fs::metadata(&chunk0).unwrap().len(),
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chunk_0001.ts".to_string(),
+            size: fs::metadata(&chunk1).unwrap().len(),
+        },
+    ];
+
+    let target = TargetLocation::Local(temp_dir.clone());
+    let options = VideoConsolidationOptions::default();
+    let cancel_token = CancellationToken::new();
+
+    let cancel_token_clone = cancel_token.clone();
+    let target_clone = target.clone();
+    let chunks_clone = chunks.clone();
+
+    let handle = tokio::spawn(async move {
+        consolidate_video(&target_clone, &chunks_clone, &options, cancel_token_clone).await
+    });
+
+    // Let FFmpeg start, then cooperatively cancel
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    cancel_token.cancel();
+
+    let result = handle.await.unwrap();
+    assert!(result.is_err(), "Active cancellation must return error");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled by cooperative cancellation token")
+    );
+
+    let staged_file = temp_dir.join("consolidated.mp4.part");
+    let final_file = temp_dir.join("consolidated.mp4");
+    assert!(
+        !staged_file.exists(),
+        "Staged .part file must be cleaned up on active cancellation"
+    );
+    assert!(!final_file.exists(), "Final file must not exist");
+    assert!(
+        chunk0.exists() && chunk1.exists(),
+        "Original chunks must remain untouched on active cancellation"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_consolidate_video_local_path_with_korean_and_special_characters() {
+    if !ensure_ffmpeg_available() {
+        eprintln!("[SKIP] ffmpeg not available, skipping special characters test");
+        return;
+    }
+
+    let parent_dir = std::env::temp_dir();
+    let special_name = format!(
+        "test_cons_[2026-10-09]_[스트리머]_방송's_test_{}",
+        rand::random::<u32>()
+    );
+    let temp_dir = parent_dir.join(special_name);
+    fs::create_dir_all(&temp_dir).expect("create special dir");
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+
+    let status0 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.5:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=0.5",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk0.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk0");
+    assert!(status0.status.success());
+
+    let status1 = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.5:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=0.5",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            chunk1.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate chunk1");
+    assert!(status1.status.success());
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chunk_0000.ts".to_string(),
+            size: fs::metadata(&chunk0).unwrap().len(),
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chunk_0001.ts".to_string(),
+            size: fs::metadata(&chunk1).unwrap().len(),
+        },
+    ];
+
+    let target = TargetLocation::Local(temp_dir.clone());
+    let options = VideoConsolidationOptions::default();
+    let cancel_token = CancellationToken::new();
+
+    let result = consolidate_video(&target, &chunks, &options, cancel_token)
+        .await
+        .expect("Consolidation in special character directory must succeed");
+
+    assert_eq!(result.chunks_processed, 2);
+    assert!(result.bytes_written > 0);
+
+    let final_mp4 = temp_dir.join("consolidated.mp4");
+    finalize_staged_video(&target, None)
+        .await
+        .expect("finalize_staged_video must succeed");
+
+    assert!(final_mp4.exists());
+    let boxes = inspect_mp4_box_order(&final_mp4);
+    let moov_pos = boxes
+        .iter()
+        .position(|b| b == "moov")
+        .expect("moov box present");
+    let mdat_pos = boxes
+        .iter()
+        .position(|b| b == "mdat")
+        .expect("mdat box present");
+    assert!(moov_pos < mdat_pos);
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }

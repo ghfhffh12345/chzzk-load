@@ -54,6 +54,16 @@ fn main() {
         let _ = handle.flush();
         std::process::exit(0);
     } else {
+        if let Some(last_arg) = args.last() {
+            if !last_arg.starts_with('-')
+                && !last_arg.starts_with("pipe:")
+                && !last_arg.contains('%')
+                && !last_arg.ends_with("mock_ffmpeg")
+                && !last_arg.ends_with("mock_ffmpeg.exe")
+            {
+                let _ = std::fs::File::create(last_arg);
+            }
+        }
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
             if let Ok(l) = line {
