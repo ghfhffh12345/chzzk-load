@@ -8,12 +8,24 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufRea
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use super::progress::VideoProgressUpdate;
+
 /// Configuration options for video consolidation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct VideoConsolidationOptions {
     pub ffmpeg_bin: Option<String>,
     pub rclone_bin: Option<String>,
+    pub progress_sender: Option<tokio::sync::mpsc::UnboundedSender<VideoProgressUpdate>>,
 }
+
+impl PartialEq for VideoConsolidationOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.ffmpeg_bin == other.ffmpeg_bin
+            && self.rclone_bin == other.rclone_bin
+            && self.progress_sender.is_some() == other.progress_sender.is_some()
+    }
+}
+impl Eq for VideoConsolidationOptions {}
 
 impl VideoConsolidationOptions {
     pub fn new() -> Self {
@@ -27,6 +39,14 @@ impl VideoConsolidationOptions {
 
     pub fn with_rclone_bin(mut self, bin: impl Into<String>) -> Self {
         self.rclone_bin = Some(bin.into());
+        self
+    }
+
+    pub fn with_progress_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<VideoProgressUpdate>,
+    ) -> Self {
+        self.progress_sender = Some(sender);
         self
     }
 }
@@ -190,9 +210,24 @@ pub async fn feed_video_chunks<W>(
 where
     W: AsyncWrite + Unpin + ?Sized,
 {
+    feed_video_chunks_with_progress(target, chunks, rclone_bin, writer, None).await
+}
+
+/// Sequentially streams chunk bytes into the writer sink, reporting progress updates
+/// after each chunk is fed.
+pub async fn feed_video_chunks_with_progress<W>(
+    target: &TargetLocation,
+    chunks: &[ConsolidationChunk],
+    rclone_bin: Option<&str>,
+    writer: &mut W,
+    progress_sender: Option<&tokio::sync::mpsc::UnboundedSender<VideoProgressUpdate>>,
+) -> anyhow::Result<u64>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+{
     let mut total_bytes = 0u64;
 
-    for chunk in chunks {
+    for (i, chunk) in chunks.iter().enumerate() {
         match target {
             TargetLocation::Local(dir) => {
                 let chunk_path = dir.join(&chunk.name);
@@ -253,6 +288,13 @@ where
                     );
                 }
             }
+        }
+
+        if let Some(tx) = progress_sender {
+            let _ = tx.send(VideoProgressUpdate::ChunkFed {
+                chunks_fed: i + 1,
+                bytes_fed: total_bytes,
+            });
         }
     }
 
@@ -363,13 +405,22 @@ pub async fn consolidate_video(
         .ok_or_else(|| anyhow::anyhow!("Failed to open FFmpeg stderr pipe"))?;
 
     // Background task to monitor FFmpeg stderr diagnostics and parse progress telemetry lines
+    let stderr_progress_tx = options.progress_sender.clone();
     let stderr_handle = tokio::spawn(async move {
         let mut reader = BufReader::new(ffmpeg_stderr).lines();
         let mut logs = Vec::new();
         let mut telemetry = VideoProgressTelemetry::default();
+        let mut last_speed = None;
         while let Ok(Some(line)) = reader.next_line().await {
             if telemetry.update_from_line(&line) {
-                // Successfully parsed progress telemetry line
+                if let Some(ref speed) = telemetry.speed {
+                    if Some(speed) != last_speed.as_ref() {
+                        last_speed = Some(speed.clone());
+                        if let Some(ref tx) = stderr_progress_tx {
+                            let _ = tx.send(VideoProgressUpdate::Speed(speed.clone()));
+                        }
+                    }
+                }
             } else if logs.len() < 100 {
                 logs.push(line);
             }
@@ -454,12 +505,14 @@ pub async fn consolidate_video(
     let target_for_feeder = target.clone();
     let chunks_to_feed = chunks.to_vec();
     let rclone_bin_for_feeder = rclone_bin.clone();
+    let feeder_progress_tx = options.progress_sender.clone();
     let feeder_handle = tokio::spawn(async move {
-        let res = feed_video_chunks(
+        let res = feed_video_chunks_with_progress(
             &target_for_feeder,
             &chunks_to_feed,
             rclone_bin_for_feeder.as_deref(),
             &mut ffmpeg_stdin,
+            feeder_progress_tx.as_ref(),
         )
         .await;
         // Explicitly drop stdin to signal EOF to FFmpeg

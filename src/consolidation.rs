@@ -1,6 +1,14 @@
 pub mod chat;
 pub mod manifest;
+pub mod progress;
 pub mod video;
+
+pub use progress::{
+    ChatProgressSnapshot, ChatProgressUpdate, ConsolidationProgressCoordinator, CoordinatorOutput,
+    DEFAULT_BAR_WIDTH, MediaProgressSession, MilestoneTracker, PurgeProgressSession,
+    PurgeProgressSnapshot, PurgeProgressUpdate, VideoProgressSnapshot, VideoProgressUpdate,
+    format_bytes, format_number_with_commas, format_progress_bar,
+};
 
 pub use chat::{
     ChatConsolidationStats, ChatDeduplicator, ChatMessageKey, DEFAULT_CHAT_DEDUP_WINDOW_MS,
@@ -92,6 +100,27 @@ pub async fn delete_original_chunks_with_concurrency(
     concurrency: usize,
     rclone_bin: Option<&str>,
 ) -> anyhow::Result<()> {
+    delete_original_chunks_with_progress(
+        target,
+        video_chunks,
+        chat_chunks,
+        concurrency,
+        rclone_bin,
+        None,
+    )
+    .await
+}
+
+/// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded semaphore limit,
+/// sending progress updates as chunks are successfully deleted.
+pub async fn delete_original_chunks_with_progress(
+    target: &TargetLocation,
+    video_chunks: &[ConsolidationChunk],
+    chat_chunks: &[ConsolidationChunk],
+    concurrency: usize,
+    rclone_bin: Option<&str>,
+    progress_sender: Option<tokio::sync::mpsc::UnboundedSender<PurgeProgressUpdate>>,
+) -> anyhow::Result<()> {
     let mut eligible = Vec::with_capacity(video_chunks.len() + chat_chunks.len());
     for chunk in video_chunks {
         if chunk.name != "metadata.jsonl" && chunk.name.ends_with(".ts") {
@@ -142,10 +171,16 @@ pub async fn delete_original_chunks_with_concurrency(
         });
     }
 
+    let mut chunks_deleted = 0usize;
     let mut errors = Vec::new();
     while let Some(res) = join_set.join_next().await {
         match res {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                chunks_deleted += 1;
+                if let Some(ref tx) = progress_sender {
+                    let _ = tx.send(PurgeProgressUpdate { chunks_deleted });
+                }
+            }
             Ok(Err(err)) => {
                 errors.push(err);
             }
@@ -174,13 +209,21 @@ pub async fn delete_original_chunks_with_concurrency(
     Ok(())
 }
 
-/// Runs the post-recording consolidation workflow.
+/// Runs the post-recording consolidation workflow with the default progress coordinator.
+pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<ConsolidationSummary> {
+    run_consolidation_with_coordinator(args, ConsolidationProgressCoordinator::default()).await
+}
+
+/// Runs the post-recording consolidation workflow with a custom progress coordinator.
 ///
 /// Discovers and validates the manifest, concurrently executes streaming video remuxing
-/// and chat deduplication pipelines via `tokio::try_join!`, atomically finalizes staged `.part`
+/// and chat deduplication pipelines via `tokio::join!`, atomically finalizes staged `.part`
 /// files upon zero-exit completion of all active pipelines, and purges original chunks
 /// when `--keep-original` is false while strictly preserving `metadata.jsonl`.
-pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<ConsolidationSummary> {
+pub async fn run_consolidation_with_coordinator(
+    args: ConsolidateArgs,
+    coordinator: ConsolidationProgressCoordinator,
+) -> anyhow::Result<ConsolidationSummary> {
     let target = TargetLocation::parse(&args.path);
     let manifest = discover_manifest(&target, args.strict, args.overwrite).await?;
 
@@ -198,7 +241,14 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
     let has_video = !manifest.video_chunks.is_empty();
     let has_chat = !manifest.chat_chunks.is_empty();
 
-    let video_options = VideoConsolidationOptions::default();
+    let mut media_session =
+        coordinator.start_media(manifest.video_chunks.len(), manifest.chat_chunks.len());
+    let mut video_options = VideoConsolidationOptions::default();
+    if let Some(v_tx) = media_session.video_sender() {
+        video_options = video_options.with_progress_sender(v_tx);
+    }
+    let chat_progress_sender = media_session.chat_sender();
+
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let (video_result, chat_stats) = if has_video && has_chat {
@@ -208,17 +258,19 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
             &video_options,
             cancel_token.clone(),
         );
-        let chat_fut = consolidate_chat(
+        let chat_fut = chat::consolidate_chat_with_progress(
             &manifest.target,
             &manifest.chat_chunks,
             args.strict,
             None,
             cancel_token.clone(),
+            chat_progress_sender,
         );
 
         let (video_res, chat_res) = tokio::join!(video_fut, chat_fut);
         match (video_res, chat_res) {
             (Ok(v_res), Ok(c_res)) => {
+                media_session.finish(true).await;
                 // Both pipelines completed with zero-exit: atomically finalize both .part files
                 let finalize_res = async {
                     finalize_staged_video(&manifest.target, None).await?;
@@ -236,18 +288,21 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
             }
             (Err(v_err), Ok(_)) => {
                 cancel_token.cancel();
+                media_session.finish(false).await;
                 let _ = cleanup_staged_video(&manifest.target, None).await;
                 let _ = cleanup_staged_chat(&manifest.target, None).await;
                 return Err(v_err);
             }
             (Ok(_), Err(c_err)) => {
                 cancel_token.cancel();
+                media_session.finish(false).await;
                 let _ = cleanup_staged_video(&manifest.target, None).await;
                 let _ = cleanup_staged_chat(&manifest.target, None).await;
                 return Err(c_err);
             }
             (Err(v_err), Err(c_err)) => {
                 cancel_token.cancel();
+                media_session.finish(false).await;
                 let _ = cleanup_staged_video(&manifest.target, None).await;
                 let _ = cleanup_staged_chat(&manifest.target, None).await;
 
@@ -278,6 +333,7 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
         .await
         {
             Ok(res) => {
+                media_session.finish(true).await;
                 if let Err(e) = finalize_staged_video(&manifest.target, None).await {
                     let _ = cleanup_staged_video(&manifest.target, None).await;
                     return Err(e);
@@ -286,6 +342,7 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
             }
             Err(err) => {
                 cancel_token.cancel();
+                media_session.finish(false).await;
                 let _ = cleanup_staged_video(&manifest.target, None).await;
                 return Err(err);
             }
@@ -295,16 +352,18 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
         eprintln!(
             "[INFO] No video chunks found; skipping video consolidation pipeline (chat-only session)"
         );
-        let c_res = match consolidate_chat(
+        let c_res = match chat::consolidate_chat_with_progress(
             &manifest.target,
             &manifest.chat_chunks,
             args.strict,
             None,
             cancel_token.clone(),
+            chat_progress_sender,
         )
         .await
         {
             Ok(res) => {
+                media_session.finish(true).await;
                 if let Err(e) = finalize_staged_chat(&manifest.target, None).await {
                     let _ = cleanup_staged_chat(&manifest.target, None).await;
                     return Err(e);
@@ -313,12 +372,14 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
             }
             Err(err) => {
                 cancel_token.cancel();
+                media_session.finish(false).await;
                 let _ = cleanup_staged_chat(&manifest.target, None).await;
                 return Err(err);
             }
         };
         (None, Some(c_res))
     } else {
+        media_session.finish(true).await;
         (None, None)
     };
 
@@ -336,15 +397,40 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
     }
 
     if !args.keep_original {
-        delete_original_chunks_with_concurrency(
+        let total_purge = manifest
+            .video_chunks
+            .iter()
+            .filter(|c| c.name != "metadata.jsonl" && c.name.ends_with(".ts"))
+            .count()
+            + manifest
+                .chat_chunks
+                .iter()
+                .filter(|c| c.name != "metadata.jsonl" && c.name.ends_with(".jsonl"))
+                .count();
+
+        let mut purge_session = coordinator.start_purge(total_purge);
+        let purge_sender = purge_session.purge_sender();
+
+        let purge_res = delete_original_chunks_with_progress(
             &manifest.target,
             &manifest.video_chunks,
             &manifest.chat_chunks,
             args.delete_concurrency,
             None,
+            purge_sender,
         )
-        .await?;
-        println!("[INFO] Original chunks cleaned up successfully");
+        .await;
+
+        match purge_res {
+            Ok(()) => {
+                purge_session.finish(true).await;
+                println!("[INFO] Original chunks cleaned up successfully");
+            }
+            Err(err) => {
+                purge_session.finish(false).await;
+                return Err(err);
+            }
+        }
     }
 
     Ok(ConsolidationSummary {

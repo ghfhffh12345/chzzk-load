@@ -1,0 +1,701 @@
+use std::io::IsTerminal;
+use std::io::Write;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot};
+
+pub const DEFAULT_BAR_WIDTH: usize = 20;
+
+/// Formats a progress bar matching the Cloud Upload visual language:
+/// `━` (Unicode \u{2501}, filled) and `─` (Unicode \u{2500}, unfilled).
+pub fn format_progress_bar(width: usize, pct: u16) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let pct = pct.min(100);
+    let filled = ((pct as usize * width) / 100).min(width);
+    let unfilled = width.saturating_sub(filled);
+    format!("{}{}", "━".repeat(filled), "─".repeat(unfilled))
+}
+
+/// Formats byte quantities into human-readable strings with binary (1024-based) units.
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+/// Formats integers with comma thousands separators (e.g. 12,345).
+pub fn format_number_with_commas(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    let rem = s.len() % 3;
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (i % 3 == rem || (rem == 0 && i % 3 == 0)) {
+            result.push(',');
+        }
+        result.push(ch);
+    }
+    result
+}
+
+/// Progress metrics for video remuxing consolidation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VideoProgressSnapshot {
+    pub chunks_fed: usize,
+    pub total_chunks: usize,
+    pub bytes_fed: u64,
+    pub speed: Option<String>,
+}
+
+impl VideoProgressSnapshot {
+    pub fn pct(&self) -> u16 {
+        if self.total_chunks == 0 {
+            100
+        } else {
+            ((self.chunks_fed as f64 / self.total_chunks as f64) * 100.0)
+                .round()
+                .min(100.0) as u16
+        }
+    }
+
+    pub fn format_interactive(&self, bar_width: usize) -> String {
+        let pct = self.pct();
+        let bar = format_progress_bar(bar_width, pct);
+        let bytes_str = format_bytes(self.bytes_fed);
+        let speed_suffix = match &self.speed {
+            Some(s) if !s.trim().is_empty() => format!(" {s}"),
+            _ => String::new(),
+        };
+        format!(
+            "[VID]  {bar} {pct}% ({}/{total} chunks, {bytes_str}){speed_suffix}",
+            self.chunks_fed,
+            total = self.total_chunks
+        )
+    }
+
+    pub fn format_non_interactive(&self) -> String {
+        let pct = self.pct();
+        let bytes_str = format_bytes(self.bytes_fed);
+        let speed_suffix = match &self.speed {
+            Some(s) if !s.trim().is_empty() => format!(" speed: {s}"),
+            _ => String::new(),
+        };
+        format!(
+            "[INFO] [VID] Consolidation progress: {pct}% ({}/{total} chunks, {bytes_str}){speed_suffix}",
+            self.chunks_fed,
+            total = self.total_chunks
+        )
+    }
+}
+
+/// Progress metrics for chat deduplication consolidation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatProgressSnapshot {
+    pub chunks_read: usize,
+    pub total_chunks: usize,
+    pub total_messages: usize,
+    pub emitted_messages: usize,
+}
+
+impl ChatProgressSnapshot {
+    pub fn pct(&self) -> u16 {
+        if self.total_chunks == 0 {
+            100
+        } else {
+            ((self.chunks_read as f64 / self.total_chunks as f64) * 100.0)
+                .round()
+                .min(100.0) as u16
+        }
+    }
+
+    pub fn format_interactive(&self, bar_width: usize) -> String {
+        let pct = self.pct();
+        let bar = format_progress_bar(bar_width, pct);
+        let msgs_str = format_number_with_commas(self.emitted_messages);
+        format!(
+            "[CHAT] {bar} {pct}% ({}/{total} chunks, {msgs_str} msgs)",
+            self.chunks_read,
+            total = self.total_chunks
+        )
+    }
+
+    pub fn format_non_interactive(&self) -> String {
+        let pct = self.pct();
+        let msgs_str = format_number_with_commas(self.emitted_messages);
+        format!(
+            "[INFO] [CHAT] Consolidation progress: {pct}% ({}/{total} chunks, {msgs_str} msgs)",
+            self.chunks_read,
+            total = self.total_chunks
+        )
+    }
+}
+
+/// Progress metrics for original chunk purge.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PurgeProgressSnapshot {
+    pub chunks_deleted: usize,
+    pub total_chunks: usize,
+}
+
+impl PurgeProgressSnapshot {
+    pub fn pct(&self) -> u16 {
+        if self.total_chunks == 0 {
+            100
+        } else {
+            ((self.chunks_deleted as f64 / self.total_chunks as f64) * 100.0)
+                .round()
+                .min(100.0) as u16
+        }
+    }
+
+    pub fn format_interactive(&self, bar_width: usize) -> String {
+        let pct = self.pct();
+        let bar = format_progress_bar(bar_width, pct);
+        format!(
+            "[DEL]  {bar} {pct}% ({}/{total} chunks deleted)",
+            self.chunks_deleted,
+            total = self.total_chunks
+        )
+    }
+
+    pub fn format_non_interactive(&self) -> String {
+        let pct = self.pct();
+        format!(
+            "[INFO] [DEL] Purge progress: {pct}% ({}/{total} chunks deleted)",
+            self.chunks_deleted,
+            total = self.total_chunks
+        )
+    }
+}
+
+/// Tracks milestone triggers for non-interactive mode.
+///
+/// Triggers on:
+/// - 20% milestone boundaries: 0%, 20%, 40%, 60%, 80%, 100%.
+/// - 30-second heartbeat if progress has advanced since the last log line.
+#[derive(Debug, Clone)]
+pub struct MilestoneTracker {
+    last_logged_milestone: Option<u16>,
+    last_logged_at: Instant,
+    last_progress_value: u64,
+}
+
+impl MilestoneTracker {
+    pub fn new(start_time: Instant) -> Self {
+        Self {
+            last_logged_milestone: None,
+            last_logged_at: start_time,
+            last_progress_value: 0,
+        }
+    }
+
+    pub fn should_log_at(&mut self, current_pct: u16, progress_val: u64, now: Instant) -> bool {
+        let clamped_pct = current_pct.min(100);
+        let current_milestone = (clamped_pct / 20) * 20;
+
+        let is_new_milestone = match self.last_logged_milestone {
+            None => true,
+            Some(last) => current_milestone > last || (clamped_pct == 100 && last < 100),
+        };
+
+        if is_new_milestone {
+            self.last_logged_milestone = Some(if clamped_pct == 100 {
+                100
+            } else {
+                current_milestone
+            });
+            self.last_logged_at = now;
+            self.last_progress_value = progress_val;
+            return true;
+        }
+
+        // Heartbeat check: 30 seconds since last log with progress advancement
+        let elapsed = now.saturating_duration_since(self.last_logged_at);
+        if elapsed >= Duration::from_secs(30) && progress_val > self.last_progress_value {
+            self.last_logged_at = now;
+            self.last_progress_value = progress_val;
+            return true;
+        }
+
+        false
+    }
+
+    pub fn should_log(&mut self, current_pct: u16, progress_val: u64) -> bool {
+        self.should_log_at(current_pct, progress_val, Instant::now())
+    }
+}
+
+/// Video pipeline progress event sent to the telemetry coordinator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoProgressUpdate {
+    ChunkFed { chunks_fed: usize, bytes_fed: u64 },
+    Speed(String),
+}
+
+/// Chat pipeline progress event sent to the telemetry coordinator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatProgressUpdate {
+    pub chunks_read: usize,
+    pub total_messages: usize,
+    pub emitted_messages: usize,
+}
+
+/// Purge pipeline progress event sent to the telemetry coordinator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PurgeProgressUpdate {
+    pub chunks_deleted: usize,
+}
+
+/// Thread-safe output sink wrapper for telemetry rendering.
+#[derive(Clone)]
+pub struct CoordinatorOutput {
+    inner: Arc<std::sync::Mutex<Box<dyn Write + Send>>>,
+}
+
+impl CoordinatorOutput {
+    pub fn stdout() -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(Box::new(std::io::stdout()))),
+        }
+    }
+
+    pub fn buffer() -> (Self, Arc<std::sync::Mutex<Vec<u8>>>) {
+        let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = Self {
+            inner: Arc::new(std::sync::Mutex::new(Box::new(SharedBuffer(Arc::clone(
+                &buf,
+            ))))),
+        };
+        (writer, buf)
+    }
+
+    pub fn write_str(&self, s: &str) {
+        if let Ok(mut w) = self.inner.lock() {
+            let _ = w.write_all(s.as_bytes());
+            let _ = w.flush();
+        }
+    }
+}
+
+struct SharedBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+impl Write for SharedBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut inner = self.0.lock().map_err(|_| std::io::ErrorKind::Other)?;
+        inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut inner = self.0.lock().map_err(|_| std::io::ErrorKind::Other)?;
+        inner.flush()
+    }
+}
+
+/// Live progress session for concurrent video and chat consolidation.
+pub struct MediaProgressSession {
+    video_tx: Option<mpsc::UnboundedSender<VideoProgressUpdate>>,
+    chat_tx: Option<mpsc::UnboundedSender<ChatProgressUpdate>>,
+    finish_tx: Option<oneshot::Sender<bool>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl MediaProgressSession {
+    pub fn video_sender(&self) -> Option<mpsc::UnboundedSender<VideoProgressUpdate>> {
+        self.video_tx.clone()
+    }
+
+    pub fn chat_sender(&self) -> Option<mpsc::UnboundedSender<ChatProgressUpdate>> {
+        self.chat_tx.clone()
+    }
+
+    pub async fn finish(&mut self, success: bool) {
+        if let Some(tx) = self.finish_tx.take() {
+            let _ = tx.send(success);
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+/// Live progress session for chunk purging.
+pub struct PurgeProgressSession {
+    purge_tx: Option<mpsc::UnboundedSender<PurgeProgressUpdate>>,
+    finish_tx: Option<oneshot::Sender<bool>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl PurgeProgressSession {
+    pub fn purge_sender(&self) -> Option<mpsc::UnboundedSender<PurgeProgressUpdate>> {
+        self.purge_tx.clone()
+    }
+
+    pub async fn finish(&mut self, success: bool) {
+        if let Some(tx) = self.finish_tx.take() {
+            let _ = tx.send(success);
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+/// Central progress telemetry coordinator for post-recording consolidation.
+#[derive(Clone)]
+pub struct ConsolidationProgressCoordinator {
+    output: CoordinatorOutput,
+    is_tty: bool,
+    bar_width: usize,
+}
+
+impl Default for ConsolidationProgressCoordinator {
+    fn default() -> Self {
+        Self::new(std::io::stdout().is_terminal())
+    }
+}
+
+impl ConsolidationProgressCoordinator {
+    pub fn new(is_tty: bool) -> Self {
+        Self {
+            output: CoordinatorOutput::stdout(),
+            is_tty,
+            bar_width: DEFAULT_BAR_WIDTH,
+        }
+    }
+
+    pub fn with_output(output: CoordinatorOutput, is_tty: bool) -> Self {
+        Self {
+            output,
+            is_tty,
+            bar_width: DEFAULT_BAR_WIDTH,
+        }
+    }
+
+    pub fn with_bar_width(mut self, width: usize) -> Self {
+        self.bar_width = width;
+        self
+    }
+
+    pub fn is_tty(&self) -> bool {
+        self.is_tty
+    }
+
+    pub fn start_media(&self, total_video: usize, total_chat: usize) -> MediaProgressSession {
+        let has_video = total_video > 0;
+        let has_chat = total_chat > 0;
+
+        if !has_video && !has_chat {
+            return MediaProgressSession {
+                video_tx: None,
+                chat_tx: None,
+                finish_tx: None,
+                handle: None,
+            };
+        }
+
+        let (v_tx, mut v_rx) = mpsc::unbounded_channel::<VideoProgressUpdate>();
+        let (c_tx, mut c_rx) = mpsc::unbounded_channel::<ChatProgressUpdate>();
+        let (finish_tx, mut finish_rx) = oneshot::channel::<bool>();
+
+        let is_tty = self.is_tty;
+        let bar_width = self.bar_width;
+        let output = self.output.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut video_snapshot = VideoProgressSnapshot {
+                chunks_fed: 0,
+                total_chunks: total_video,
+                bytes_fed: 0,
+                speed: None,
+            };
+            let mut chat_snapshot = ChatProgressSnapshot {
+                chunks_read: 0,
+                total_chunks: total_chat,
+                total_messages: 0,
+                emitted_messages: 0,
+            };
+            let start_time = Instant::now();
+            let mut video_milestones = MilestoneTracker::new(start_time);
+            let mut chat_milestones = MilestoneTracker::new(start_time);
+
+            let mut first_render = true;
+            let mut dirty = true;
+            let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
+            tick_interval.tick().await;
+
+            if !is_tty {
+                if has_video && video_milestones.should_log(0, 0) {
+                    output.write_str(&format!("{}\n", video_snapshot.format_non_interactive()));
+                }
+                if has_chat && chat_milestones.should_log(0, 0) {
+                    output.write_str(&format!("{}\n", chat_snapshot.format_non_interactive()));
+                }
+            } else {
+                render_interactive_media(
+                    &output,
+                    &video_snapshot,
+                    &chat_snapshot,
+                    has_video,
+                    has_chat,
+                    bar_width,
+                    &mut first_render,
+                );
+                dirty = false;
+            }
+
+            let finished_success = loop {
+                tokio::select! {
+                    res = &mut finish_rx => {
+                        break res.unwrap_or(false);
+                    }
+                    Some(v_upd) = v_rx.recv() => {
+                        match v_upd {
+                            VideoProgressUpdate::ChunkFed { chunks_fed, bytes_fed } => {
+                                video_snapshot.chunks_fed = chunks_fed;
+                                video_snapshot.bytes_fed = bytes_fed;
+                            }
+                            VideoProgressUpdate::Speed(speed) => {
+                                video_snapshot.speed = Some(speed);
+                            }
+                        }
+                        if !is_tty {
+                            if video_milestones.should_log(video_snapshot.pct(), video_snapshot.chunks_fed as u64) {
+                                output.write_str(&format!("{}\n", video_snapshot.format_non_interactive()));
+                            }
+                        } else {
+                            dirty = true;
+                        }
+                    }
+                    Some(c_upd) = c_rx.recv() => {
+                        chat_snapshot.chunks_read = c_upd.chunks_read;
+                        chat_snapshot.total_messages = c_upd.total_messages;
+                        chat_snapshot.emitted_messages = c_upd.emitted_messages;
+                        if !is_tty {
+                            if chat_milestones.should_log(chat_snapshot.pct(), chat_snapshot.chunks_read as u64) {
+                                output.write_str(&format!("{}\n", chat_snapshot.format_non_interactive()));
+                            }
+                        } else {
+                            dirty = true;
+                        }
+                    }
+                    _ = tick_interval.tick() => {
+                        if is_tty && dirty {
+                            render_interactive_media(
+                                &output,
+                                &video_snapshot,
+                                &chat_snapshot,
+                                has_video,
+                                has_chat,
+                                bar_width,
+                                &mut first_render,
+                            );
+                            dirty = false;
+                        } else if !is_tty {
+                            if has_video && video_milestones.should_log(video_snapshot.pct(), video_snapshot.chunks_fed as u64) {
+                                output.write_str(&format!("{}\n", video_snapshot.format_non_interactive()));
+                            }
+                            if has_chat && chat_milestones.should_log(chat_snapshot.pct(), chat_snapshot.chunks_read as u64) {
+                                output.write_str(&format!("{}\n", chat_snapshot.format_non_interactive()));
+                            }
+                        }
+                    }
+                }
+            };
+
+            while let Ok(v_upd) = v_rx.try_recv() {
+                match v_upd {
+                    VideoProgressUpdate::ChunkFed {
+                        chunks_fed,
+                        bytes_fed,
+                    } => {
+                        video_snapshot.chunks_fed = chunks_fed;
+                        video_snapshot.bytes_fed = bytes_fed;
+                    }
+                    VideoProgressUpdate::Speed(speed) => {
+                        video_snapshot.speed = Some(speed);
+                    }
+                }
+                if !is_tty
+                    && video_milestones
+                        .should_log(video_snapshot.pct(), video_snapshot.chunks_fed as u64)
+                {
+                    output.write_str(&format!("{}\n", video_snapshot.format_non_interactive()));
+                }
+            }
+            while let Ok(c_upd) = c_rx.try_recv() {
+                chat_snapshot.chunks_read = c_upd.chunks_read;
+                chat_snapshot.total_messages = c_upd.total_messages;
+                chat_snapshot.emitted_messages = c_upd.emitted_messages;
+                if !is_tty
+                    && chat_milestones
+                        .should_log(chat_snapshot.pct(), chat_snapshot.chunks_read as u64)
+                {
+                    output.write_str(&format!("{}\n", chat_snapshot.format_non_interactive()));
+                }
+            }
+
+            if finished_success {
+                if has_video {
+                    video_snapshot.chunks_fed = total_video;
+                }
+                if has_chat {
+                    chat_snapshot.chunks_read = total_chat;
+                }
+            }
+
+            if is_tty {
+                render_interactive_media(
+                    &output,
+                    &video_snapshot,
+                    &chat_snapshot,
+                    has_video,
+                    has_chat,
+                    bar_width,
+                    &mut first_render,
+                );
+                output.write_str("\n");
+            } else if finished_success {
+                if has_video && video_milestones.should_log(100, total_video as u64) {
+                    output.write_str(&format!("{}\n", video_snapshot.format_non_interactive()));
+                }
+                if has_chat && chat_milestones.should_log(100, total_chat as u64) {
+                    output.write_str(&format!("{}\n", chat_snapshot.format_non_interactive()));
+                }
+            }
+        });
+
+        MediaProgressSession {
+            video_tx: if has_video { Some(v_tx) } else { None },
+            chat_tx: if has_chat { Some(c_tx) } else { None },
+            finish_tx: Some(finish_tx),
+            handle: Some(handle),
+        }
+    }
+
+    pub fn start_purge(&self, total_purge: usize) -> PurgeProgressSession {
+        if total_purge == 0 {
+            return PurgeProgressSession {
+                purge_tx: None,
+                finish_tx: None,
+                handle: None,
+            };
+        }
+
+        let (p_tx, mut p_rx) = mpsc::unbounded_channel::<PurgeProgressUpdate>();
+        let (finish_tx, mut finish_rx) = oneshot::channel::<bool>();
+
+        let is_tty = self.is_tty;
+        let bar_width = self.bar_width;
+        let output = self.output.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut purge_snapshot = PurgeProgressSnapshot {
+                chunks_deleted: 0,
+                total_chunks: total_purge,
+            };
+            let start_time = Instant::now();
+            let mut purge_milestones = MilestoneTracker::new(start_time);
+            let mut dirty = true;
+            let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
+            tick_interval.tick().await;
+
+            if !is_tty {
+                if purge_milestones.should_log(0, 0) {
+                    output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
+                }
+            } else {
+                let line = purge_snapshot.format_interactive(bar_width);
+                output.write_str(&format!("\r\x1b[2K{line}"));
+                dirty = false;
+            }
+
+            let finished_success = loop {
+                tokio::select! {
+                    res = &mut finish_rx => {
+                        break res.unwrap_or(false);
+                    }
+                    Some(upd) = p_rx.recv() => {
+                        purge_snapshot.chunks_deleted = upd.chunks_deleted;
+                        if !is_tty {
+                            if purge_milestones.should_log(purge_snapshot.pct(), purge_snapshot.chunks_deleted as u64) {
+                                output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
+                            }
+                        } else {
+                            dirty = true;
+                        }
+                    }
+                    _ = tick_interval.tick() => {
+                        if is_tty && dirty {
+                            let line = purge_snapshot.format_interactive(bar_width);
+                            output.write_str(&format!("\r\x1b[2K{line}"));
+                            dirty = false;
+                        } else if !is_tty && purge_milestones.should_log(purge_snapshot.pct(), purge_snapshot.chunks_deleted as u64) {
+                            output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
+                        }
+                    }
+                }
+            };
+
+            while let Ok(upd) = p_rx.try_recv() {
+                purge_snapshot.chunks_deleted = upd.chunks_deleted;
+                if !is_tty
+                    && purge_milestones
+                        .should_log(purge_snapshot.pct(), purge_snapshot.chunks_deleted as u64)
+                {
+                    output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
+                }
+            }
+
+            if finished_success {
+                purge_snapshot.chunks_deleted = total_purge;
+            }
+
+            if is_tty {
+                let line = purge_snapshot.format_interactive(bar_width);
+                output.write_str(&format!("\r\x1b[2K{line}\n"));
+            } else if finished_success && purge_milestones.should_log(100, total_purge as u64) {
+                output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
+            }
+        });
+
+        PurgeProgressSession {
+            purge_tx: Some(p_tx),
+            finish_tx: Some(finish_tx),
+            handle: Some(handle),
+        }
+    }
+}
+
+fn render_interactive_media(
+    output: &CoordinatorOutput,
+    v_snap: &VideoProgressSnapshot,
+    c_snap: &ChatProgressSnapshot,
+    has_video: bool,
+    has_chat: bool,
+    bar_width: usize,
+    first_render: &mut bool,
+) {
+    if has_video && has_chat {
+        let v_line = v_snap.format_interactive(bar_width);
+        let c_line = c_snap.format_interactive(bar_width);
+        if *first_render {
+            output.write_str(&format!("{v_line}\n{c_line}"));
+            *first_render = false;
+        } else {
+            output.write_str(&format!("\x1b[1A\r\x1b[2K{v_line}\n\r\x1b[2K{c_line}"));
+        }
+    } else if has_video {
+        let v_line = v_snap.format_interactive(bar_width);
+        output.write_str(&format!("\r\x1b[2K{v_line}"));
+        *first_render = false;
+    } else if has_chat {
+        let c_line = c_snap.format_interactive(bar_width);
+        output.write_str(&format!("\r\x1b[2K{c_line}"));
+        *first_render = false;
+    }
+}

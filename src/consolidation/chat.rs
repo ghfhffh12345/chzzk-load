@@ -12,6 +12,8 @@ use crate::consolidation::manifest::{
 use crate::uploader::{rename_local_file_with_retry, unlink_local_file_with_retry};
 use tokio_util::sync::CancellationToken;
 
+use super::progress::ChatProgressUpdate;
+
 /// Default sliding window duration for chat deduplication: 10 seconds (10,000 ms).
 pub const DEFAULT_CHAT_DEDUP_WINDOW_MS: u64 = 10_000;
 
@@ -265,17 +267,44 @@ pub async fn consolidate_chat(
     rclone_bin: Option<&str>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<ChatConsolidationStats> {
+    consolidate_chat_with_progress(target, chat_chunks, strict, rclone_bin, cancel_token, None)
+        .await
+}
+
+/// Consolidates chat chunks with optional progress telemetry reporting.
+pub async fn consolidate_chat_with_progress(
+    target: &TargetLocation,
+    chat_chunks: &[ConsolidationChunk],
+    strict: bool,
+    rclone_bin: Option<&str>,
+    cancel_token: CancellationToken,
+    progress_sender: Option<tokio::sync::mpsc::UnboundedSender<ChatProgressUpdate>>,
+) -> anyhow::Result<ChatConsolidationStats> {
     if chat_chunks.is_empty() {
         return Ok(ChatConsolidationStats::default());
     }
 
     match target {
         TargetLocation::Local(dir) => {
-            consolidate_chat_local(dir, chat_chunks, strict, cancel_token).await
+            consolidate_chat_local_with_progress(
+                dir,
+                chat_chunks,
+                strict,
+                cancel_token,
+                progress_sender,
+            )
+            .await
         }
         TargetLocation::Remote(remote_base) => {
-            consolidate_chat_remote(remote_base, chat_chunks, strict, rclone_bin, cancel_token)
-                .await
+            consolidate_chat_remote_with_progress(
+                remote_base,
+                chat_chunks,
+                strict,
+                rclone_bin,
+                cancel_token,
+                progress_sender,
+            )
+            .await
         }
     }
 }
@@ -286,6 +315,17 @@ pub async fn consolidate_chat_local(
     chat_chunks: &[ConsolidationChunk],
     strict: bool,
     cancel_token: CancellationToken,
+) -> anyhow::Result<ChatConsolidationStats> {
+    consolidate_chat_local_with_progress(dir, chat_chunks, strict, cancel_token, None).await
+}
+
+/// Consolidates local chat chunks into staged `consolidated.jsonl.part` with progress telemetry.
+pub async fn consolidate_chat_local_with_progress(
+    dir: &Path,
+    chat_chunks: &[ConsolidationChunk],
+    strict: bool,
+    cancel_token: CancellationToken,
+    progress_sender: Option<tokio::sync::mpsc::UnboundedSender<ChatProgressUpdate>>,
 ) -> anyhow::Result<ChatConsolidationStats> {
     let part_path = dir.join("consolidated.jsonl.part");
 
@@ -300,7 +340,7 @@ pub async fn consolidate_chat_local(
         })?;
         let mut writer = tokio::io::BufWriter::new(part_file);
 
-        for chunk in chat_chunks {
+        for (i, chunk) in chat_chunks.iter().enumerate() {
             if cancel_token.is_cancelled() {
                 anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");
             }
@@ -329,6 +369,15 @@ pub async fn consolidate_chat_local(
                     writer.write_all(deduped_line.as_bytes()).await?;
                     writer.write_all(b"\n").await?;
                 }
+            }
+
+            if let Some(ref tx) = progress_sender {
+                let stats = deduplicator.stats();
+                let _ = tx.send(ChatProgressUpdate {
+                    chunks_read: i + 1,
+                    total_messages: stats.total_messages,
+                    emitted_messages: stats.emitted_messages,
+                });
             }
         }
 
@@ -367,6 +416,26 @@ pub async fn consolidate_chat_remote(
     rclone_bin: Option<&str>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<ChatConsolidationStats> {
+    consolidate_chat_remote_with_progress(
+        remote_base,
+        chat_chunks,
+        strict,
+        rclone_bin,
+        cancel_token,
+        None,
+    )
+    .await
+}
+
+/// Consolidates remote chat chunks via pure streaming into staged `consolidated.jsonl.part` with progress telemetry.
+pub async fn consolidate_chat_remote_with_progress(
+    remote_base: &str,
+    chat_chunks: &[ConsolidationChunk],
+    strict: bool,
+    rclone_bin: Option<&str>,
+    cancel_token: CancellationToken,
+    progress_sender: Option<tokio::sync::mpsc::UnboundedSender<ChatProgressUpdate>>,
+) -> anyhow::Result<ChatConsolidationStats> {
     let bin = resolve_rclone_bin(rclone_bin);
     let remote_part_path = join_remote_path(remote_base, "consolidated.jsonl.part");
 
@@ -390,7 +459,7 @@ pub async fn consolidate_chat_remote(
         .context("Failed to open stdin pipe for rclone rcat")?;
 
     let stream_res = async {
-        for chunk in chat_chunks {
+        for (i, chunk) in chat_chunks.iter().enumerate() {
             if cancel_token.is_cancelled() {
                 anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");
             }
@@ -443,6 +512,15 @@ pub async fn consolidate_chat_remote(
                     cat_output.status,
                     stderr.trim()
                 );
+            }
+
+            if let Some(ref tx) = progress_sender {
+                let stats = deduplicator.stats();
+                let _ = tx.send(ChatProgressUpdate {
+                    chunks_read: i + 1,
+                    total_messages: stats.total_messages,
+                    emitted_messages: stats.emitted_messages,
+                });
             }
         }
 
