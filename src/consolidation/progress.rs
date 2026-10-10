@@ -761,6 +761,11 @@ impl ConsolidationProgressCoordinator {
         }
     }
 
+    /// Starts a live progress telemetry session for chunk purging (`DEL`).
+    ///
+    /// In interactive TTY mode, dynamically computes bar width responsive to terminal geometry
+    /// clamped within `[MIN_BAR_WIDTH, MAX_BAR_WIDTH]` on initial render, 10 Hz dirty ticks,
+    /// and final completion, or respects fixed `with_bar_width` overrides.
     pub fn start_purge(&self, total_purge: usize) -> PurgeProgressSession {
         if total_purge == 0 {
             return PurgeProgressSession {

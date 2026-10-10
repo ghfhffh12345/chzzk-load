@@ -350,8 +350,13 @@ fn visible_width(s: &str) -> usize {
 fn terminal_rows(s: &str) -> Vec<&str> {
     s.split('\n')
         .flat_map(|line| line.split("\x1b[1A"))
+        .flat_map(|line| line.split('\r'))
         .filter(|row| !row.is_empty())
         .collect()
+}
+
+fn track_width(s: &str) -> usize {
+    s.chars().filter(|&c| c == '━' || c == '─').count()
 }
 
 #[tokio::test]
@@ -457,6 +462,517 @@ async fn test_anti_wrapping_interactive_ansi_stability_on_80_col() {
             "Visible line length ({vis}) exceeded 79 columns: {row:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn test_terminal_geometry_scenario_80_col_no_wrap() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(80);
+
+    let mut session = coordinator.start_media(5000, 5000);
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 4500,
+        bytes_fed: 91_911_806_976, // 85.6 GB
+    });
+    let _ = v_tx.send(VideoProgressUpdate::Speed("18.4x".to_string()));
+    let _ = c_tx.send(ChatProgressUpdate {
+        chunks_read: 4500,
+        total_messages: 500_000,
+        deduplicated_messages: 50_000,
+        emitted_messages: 450_000,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+    assert!(!rows.is_empty(), "rows must not be empty");
+
+    for row in &rows {
+        let vis = visible_width(row);
+        assert!(
+            vis <= 79,
+            "Rendered row visible width ({vis}) must never exceed 79 columns on 80-col terminal: {row:?}"
+        );
+    }
+
+    let vid_lines: Vec<&str> = rows.iter().copied().filter(|l| l.contains("VID")).collect();
+    let chat_lines: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|l| l.contains("CHAT"))
+        .collect();
+    assert!(!vid_lines.is_empty());
+    assert!(!chat_lines.is_empty());
+
+    let last_vid = vid_lines.last().unwrap();
+    let last_chat = chat_lines.last().unwrap();
+
+    let v_track = track_width(last_vid);
+    let c_track = track_width(last_chat);
+    assert_eq!(
+        v_track, c_track,
+        "VID and CHAT tracks must have identical synchronized width"
+    );
+    assert!(
+        (15..=40).contains(&v_track),
+        "Track width ({v_track}) must be clamped within [15, 40]"
+    );
+}
+
+#[tokio::test]
+async fn test_terminal_geometry_scenario_120_col_full_expansion() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(120);
+
+    let mut session = coordinator.start_media(10, 10);
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 5,
+        bytes_fed: 50_000_000,
+    });
+    let _ = v_tx.send(VideoProgressUpdate::Speed("12.5x".to_string()));
+    let _ = c_tx.send(ChatProgressUpdate {
+        chunks_read: 5,
+        total_messages: 5_000,
+        deduplicated_messages: 500,
+        emitted_messages: 4_500,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+    let vid_lines: Vec<&str> = rows.iter().copied().filter(|l| l.contains("VID")).collect();
+    let chat_lines: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|l| l.contains("CHAT"))
+        .collect();
+
+    assert!(!vid_lines.is_empty());
+    assert!(!chat_lines.is_empty());
+
+    let last_vid = vid_lines.last().unwrap();
+    let last_chat = chat_lines.last().unwrap();
+
+    let v_track = track_width(last_vid);
+    let c_track = track_width(last_chat);
+
+    // On 120-column terminal, progress bar must expand to the full 40-column maximum width
+    assert_eq!(
+        v_track, MAX_BAR_WIDTH,
+        "VID track must expand to full 40 columns on wide terminal"
+    );
+    assert_eq!(
+        c_track, MAX_BAR_WIDTH,
+        "CHAT track must expand to full 40 columns on wide terminal"
+    );
+
+    for row in &rows {
+        let vis = visible_width(row);
+        assert!(
+            vis <= 119,
+            "Row visible width ({vis}) must be within 120 columns"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_terminal_geometry_scenario_60_col_compression() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(60);
+
+    let mut session = coordinator.start_media(10, 10);
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 6,
+        bytes_fed: 126_353_408, // 120.5 MB
+    });
+    let _ = v_tx.send(VideoProgressUpdate::Speed("14.5x".to_string()));
+    let _ = c_tx.send(ChatProgressUpdate {
+        chunks_read: 6,
+        total_messages: 15_000,
+        deduplicated_messages: 2_655,
+        emitted_messages: 12_345,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+
+    for row in &rows {
+        let vis = visible_width(row);
+        assert!(
+            vis <= 59,
+            "Visible line length ({vis}) must never exceed 59 columns on 60-col terminal: {row:?}"
+        );
+    }
+
+    let vid_lines: Vec<&str> = rows.iter().copied().filter(|l| l.contains("VID")).collect();
+    let chat_lines: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|l| l.contains("CHAT"))
+        .collect();
+    assert!(!vid_lines.is_empty());
+    assert!(!chat_lines.is_empty());
+
+    let v_track = track_width(vid_lines.last().unwrap());
+    let c_track = track_width(chat_lines.last().unwrap());
+    assert_eq!(v_track, c_track, "Tracks must be synchronized");
+    assert!(
+        v_track < MAX_BAR_WIDTH,
+        "Track width ({v_track}) must be compressed below MAX_BAR_WIDTH (40) on 60-col terminal"
+    );
+    assert!(
+        v_track >= MIN_BAR_WIDTH,
+        "Track width ({v_track}) must remain at or above MIN_BAR_WIDTH (15)"
+    );
+}
+
+#[tokio::test]
+async fn test_terminal_geometry_scenario_minimum_floor_compression() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(45);
+
+    let mut session = coordinator.start_media(10, 10);
+    let v_tx = session.video_sender().unwrap();
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 6,
+        bytes_fed: 126_353_408,
+    });
+    let _ = v_tx.send(VideoProgressUpdate::Speed("14.5x".to_string()));
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+    let vid_lines: Vec<&str> = rows.iter().copied().filter(|l| l.contains("VID")).collect();
+    assert!(!vid_lines.is_empty());
+
+    let v_track = track_width(vid_lines.last().unwrap());
+    assert_eq!(
+        v_track, MIN_BAR_WIDTH,
+        "Track width must clamp to minimum floor (15 columns) when terminal is severely constrained"
+    );
+}
+
+#[tokio::test]
+async fn test_terminal_geometry_scenario_error_fallback() {
+    // Probe returns Err
+    let (output_err, buf_err) = CoordinatorOutput::buffer();
+    let coord_err = ConsolidationProgressCoordinator::with_output(output_err, true)
+        .with_terminal_probe(|| Err(std::io::Error::other("incompatible console")));
+
+    let mut session = coord_err.start_media(10, 10);
+    let v_tx = session.video_sender().unwrap();
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 5,
+        bytes_fed: 50_000_000,
+    });
+    session.finish(true).await;
+
+    let text_err = String::from_utf8(buf_err.lock().unwrap().clone()).unwrap();
+    let rows_err = terminal_rows(&text_err);
+    let vid_lines_err: Vec<&str> = rows_err
+        .iter()
+        .copied()
+        .filter(|l| l.contains("VID"))
+        .collect();
+    assert!(!vid_lines_err.is_empty());
+    assert_eq!(
+        track_width(vid_lines_err.last().unwrap()),
+        DEFAULT_FALLBACK_BAR_WIDTH,
+        "Must fall back to 40-column default width on probe error"
+    );
+
+    // Verify purge on Err probe
+    let (p_output_err, p_buf_err) = CoordinatorOutput::buffer();
+    let p_coord_err = ConsolidationProgressCoordinator::with_output(p_output_err, true)
+        .with_terminal_probe(|| Err(std::io::Error::other("ioctl failed")));
+    let mut p_session = p_coord_err.start_purge(20);
+    let p_tx = p_session.purge_sender().unwrap();
+    let _ = p_tx.send(PurgeProgressUpdate { chunks_deleted: 10 });
+    p_session.finish(true).await;
+
+    let p_text_err = String::from_utf8(p_buf_err.lock().unwrap().clone()).unwrap();
+    let del_lines_err: Vec<&str> = terminal_rows(&p_text_err)
+        .into_iter()
+        .filter(|l| l.contains("DEL"))
+        .collect();
+    assert!(!del_lines_err.is_empty());
+    assert_eq!(
+        track_width(del_lines_err.last().unwrap()),
+        DEFAULT_FALLBACK_BAR_WIDTH,
+        "Purge must fall back to 40-column default width on probe error"
+    );
+
+    // Probe returns Ok(0)
+    let (output_zero, buf_zero) = CoordinatorOutput::buffer();
+    let coord_zero = ConsolidationProgressCoordinator::with_output(output_zero, true)
+        .with_terminal_probe(|| Ok(0));
+
+    let mut session_zero = coord_zero.start_media(10, 0);
+    let v_tx_zero = session_zero.video_sender().unwrap();
+    let _ = v_tx_zero.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 5,
+        bytes_fed: 50_000_000,
+    });
+    session_zero.finish(true).await;
+
+    let text_zero = String::from_utf8(buf_zero.lock().unwrap().clone()).unwrap();
+    let vid_lines_zero: Vec<&str> = terminal_rows(&text_zero)
+        .into_iter()
+        .filter(|l| l.contains("VID"))
+        .collect();
+    assert!(!vid_lines_zero.is_empty());
+    assert_eq!(
+        track_width(vid_lines_zero.last().unwrap()),
+        DEFAULT_FALLBACK_BAR_WIDTH,
+        "Must fall back to 40-column default width when probe returns 0 columns"
+    );
+}
+
+#[tokio::test]
+async fn test_purge_responsive_sizing_scenarios() {
+    // 80-column terminal
+    let (output_80, buf_80) = CoordinatorOutput::buffer();
+    let coord_80 =
+        ConsolidationProgressCoordinator::with_output(output_80, true).with_terminal_width(80);
+    let mut session_80 = coord_80.start_purge(25);
+    let p_tx_80 = session_80.purge_sender().unwrap();
+    let _ = p_tx_80.send(PurgeProgressUpdate { chunks_deleted: 10 });
+    session_80.finish(true).await;
+
+    let text_80 = String::from_utf8(buf_80.lock().unwrap().clone()).unwrap();
+    let rows_80 = terminal_rows(&text_80);
+    let del_80: Vec<&str> = rows_80.into_iter().filter(|l| l.contains("DEL")).collect();
+    assert!(!del_80.is_empty());
+    let last_80 = del_80.last().unwrap();
+    assert_eq!(
+        track_width(last_80),
+        MAX_BAR_WIDTH,
+        "Purge on 80-col terminal should render at 40 columns"
+    );
+    assert!(
+        visible_width(last_80) <= 79,
+        "Purge line on 80-col terminal must never exceed 79 columns"
+    );
+
+    // 120-column terminal
+    let (output_120, buf_120) = CoordinatorOutput::buffer();
+    let coord_120 =
+        ConsolidationProgressCoordinator::with_output(output_120, true).with_terminal_width(120);
+    let mut session_120 = coord_120.start_purge(100);
+    let p_tx_120 = session_120.purge_sender().unwrap();
+    let _ = p_tx_120.send(PurgeProgressUpdate { chunks_deleted: 50 });
+    session_120.finish(true).await;
+
+    let text_120 = String::from_utf8(buf_120.lock().unwrap().clone()).unwrap();
+    let rows_120 = terminal_rows(&text_120);
+    let del_120: Vec<&str> = rows_120.into_iter().filter(|l| l.contains("DEL")).collect();
+    assert!(!del_120.is_empty());
+    let last_120 = del_120.last().unwrap();
+    assert_eq!(
+        track_width(last_120),
+        MAX_BAR_WIDTH,
+        "Purge on 120-col terminal should render at 40 columns"
+    );
+    assert!(
+        visible_width(last_120) <= 119,
+        "Purge line on 120-col terminal must never exceed 119 columns"
+    );
+
+    // Constrained 60-column terminal
+    let (output_60, buf_60) = CoordinatorOutput::buffer();
+    let coord_60 =
+        ConsolidationProgressCoordinator::with_output(output_60, true).with_terminal_width(60);
+    let mut session_60 = coord_60.start_purge(50);
+    let p_tx_60 = session_60.purge_sender().unwrap();
+    let _ = p_tx_60.send(PurgeProgressUpdate { chunks_deleted: 25 });
+    session_60.finish(true).await;
+
+    let text_60 = String::from_utf8(buf_60.lock().unwrap().clone()).unwrap();
+    let rows_60 = terminal_rows(&text_60);
+    let del_60: Vec<&str> = rows_60.into_iter().filter(|l| l.contains("DEL")).collect();
+    assert!(!del_60.is_empty());
+    let last_60 = del_60.last().unwrap();
+    let track_60 = track_width(last_60);
+    // Suffix: " 100% (50/50 chunks deleted)" -> 28 chars.
+    // Available: 60 - (6 + 28 + 1) = 25 cols.
+    assert_eq!(
+        track_60, 25,
+        "Purge track on 60-col terminal should compress to 25 columns"
+    );
+    assert!(
+        visible_width(last_60) <= 59,
+        "Purge line on 60-col terminal ({}) must not exceed 59 columns",
+        visible_width(last_60)
+    );
+
+    // Severely constrained 45-column terminal (hitting 15-col minimum floor)
+    let (output_45, buf_45) = CoordinatorOutput::buffer();
+    let coord_45 =
+        ConsolidationProgressCoordinator::with_output(output_45, true).with_terminal_width(45);
+    let mut session_45 = coord_45.start_purge(50);
+    session_45.finish(true).await;
+
+    let text_45 = String::from_utf8(buf_45.lock().unwrap().clone()).unwrap();
+    let del_45: Vec<&str> = terminal_rows(&text_45)
+        .into_iter()
+        .filter(|l| l.contains("DEL"))
+        .collect();
+    assert!(!del_45.is_empty());
+    assert_eq!(
+        track_width(del_45.last().unwrap()),
+        MIN_BAR_WIDTH,
+        "Purge track on 45-col terminal must clamp to 15-col minimum floor"
+    );
+
+    // Fixed override mode (with_bar_width)
+    let (output_fixed, buf_fixed) = CoordinatorOutput::buffer();
+    let coord_fixed = ConsolidationProgressCoordinator::with_output(output_fixed, true)
+        .with_terminal_width(120)
+        .with_bar_width(22);
+    let mut session_fixed = coord_fixed.start_purge(50);
+    session_fixed.finish(true).await;
+
+    let text_fixed = String::from_utf8(buf_fixed.lock().unwrap().clone()).unwrap();
+    let del_fixed: Vec<&str> = terminal_rows(&text_fixed)
+        .into_iter()
+        .filter(|l| l.contains("DEL"))
+        .collect();
+    assert!(!del_fixed.is_empty());
+    assert_eq!(
+        track_width(del_fixed.last().unwrap()),
+        22,
+        "Purge track with with_bar_width(22) must render exactly 22 columns regardless of terminal width"
+    );
+}
+
+#[tokio::test]
+async fn test_multi_line_ansi_cursor_repositioning_stability() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(80);
+
+    let mut session = coordinator.start_media(10, 10);
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 3,
+        bytes_fed: 30_000_000,
+    });
+    let _ = c_tx.send(ChatProgressUpdate {
+        chunks_read: 3,
+        total_messages: 3_000,
+        deduplicated_messages: 300,
+        emitted_messages: 2_700,
+    });
+    session.finish(true).await;
+
+    let raw = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+
+    // First frame must NOT start with cursor-up
+    assert!(
+        !raw.starts_with("\x1b[1A"),
+        "First frame in dual-media render must not start with cursor-up escape"
+    );
+
+    // Subsequent dual-line renders must use cursor-up and line clears
+    assert!(
+        raw.contains("\x1b[1A\r\x1b[2K"),
+        "Subsequent dual-media renders must begin with \\x1b[1A\\r\\x1b[2K"
+    );
+    assert!(
+        raw.contains("\n\r\x1b[2K"),
+        "Dual-media second line clear must use \\n\\r\\x1b[2K"
+    );
+
+    // Single-media video-only must NEVER emit \x1b[1A cursor-up
+    let (vid_out, vid_buf) = CoordinatorOutput::buffer();
+    let vid_coord =
+        ConsolidationProgressCoordinator::with_output(vid_out, true).with_terminal_width(80);
+    let mut vid_session = vid_coord.start_media(5, 0);
+    let _ = vid_session
+        .video_sender()
+        .unwrap()
+        .send(VideoProgressUpdate::ChunkFed {
+            chunks_fed: 2,
+            bytes_fed: 20_000_000,
+        });
+    vid_session.finish(true).await;
+    let vid_raw = String::from_utf8(vid_buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        !vid_raw.contains("\x1b[1A"),
+        "Single-media video session must never emit \\x1b[1A cursor-up"
+    );
+
+    // Single-media chat-only must NEVER emit \x1b[1A cursor-up
+    let (chat_out, chat_buf) = CoordinatorOutput::buffer();
+    let chat_coord =
+        ConsolidationProgressCoordinator::with_output(chat_out, true).with_terminal_width(80);
+    let mut chat_session = chat_coord.start_media(0, 5);
+    let _ = chat_session
+        .chat_sender()
+        .unwrap()
+        .send(ChatProgressUpdate {
+            chunks_read: 2,
+            total_messages: 2_000,
+            deduplicated_messages: 200,
+            emitted_messages: 1_800,
+        });
+    chat_session.finish(true).await;
+    let chat_raw = String::from_utf8(chat_buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        !chat_raw.contains("\x1b[1A"),
+        "Single-media chat session must never emit \\x1b[1A cursor-up"
+    );
+
+    // Purge session must NEVER emit \x1b[1A cursor-up
+    let (del_out, del_buf) = CoordinatorOutput::buffer();
+    let del_coord =
+        ConsolidationProgressCoordinator::with_output(del_out, true).with_terminal_width(80);
+    let mut del_session = del_coord.start_purge(5);
+    let _ = del_session
+        .purge_sender()
+        .unwrap()
+        .send(PurgeProgressUpdate { chunks_deleted: 2 });
+    del_session.finish(true).await;
+    let del_raw = String::from_utf8(del_buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        !del_raw.contains("\x1b[1A"),
+        "Purge session must never emit \\x1b[1A cursor-up"
+    );
+
+    // Final termination ends with a newline
+    assert!(
+        raw.ends_with('\n'),
+        "Dual media must terminate with newline"
+    );
+    assert!(
+        vid_raw.ends_with('\n'),
+        "Single media video must terminate with newline"
+    );
+    assert!(
+        chat_raw.ends_with('\n'),
+        "Single media chat must terminate with newline"
+    );
+    assert!(del_raw.ends_with('\n'), "Purge must terminate with newline");
 }
 
 #[test]
