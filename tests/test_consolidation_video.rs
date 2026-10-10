@@ -2,7 +2,8 @@ mod common;
 
 use chzzk_load::consolidation::manifest::{ConsolidationChunk, TargetLocation};
 use chzzk_load::consolidation::video::{
-    VideoConsolidationOptions, build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command,
+    AUDIO_MONOTONIC_DTS_BSF, VIDEO_MONOTONIC_DTS_BSF, VideoConsolidationOptions,
+    build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command,
     build_remote_concat_ffmpeg_args, build_remote_concat_ffmpeg_command, cleanup_staged_video,
     consolidate_video, consolidate_video_local, consolidate_video_remote, finalize_staged_video,
     join_remote_path, resolve_ffmpeg_bin,
@@ -132,6 +133,74 @@ fn probe_format_start_time(path: &std::path::Path) -> f64 {
         .expect("parse start time")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PacketTimestamps {
+    dts: i64,
+    pts: i64,
+}
+
+fn probe_video_packets_dts_and_pts(path: &std::path::Path) -> Vec<PacketTimestamps> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts,dts",
+            "-of",
+            "csv=p=0",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("probe dts and pts");
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter_map(|l| {
+            let trimmed = l.trim().trim_end_matches(',');
+            let parts: Vec<&str> = trimmed.split(',').collect();
+            if parts.len() >= 2 {
+                let pts = parts[0].parse::<i64>().ok()?;
+                let dts = parts[1].parse::<i64>().ok()?;
+                Some(PacketTimestamps { dts, pts })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Verifies defensive stream mapping, discardcorrupt fflags, and monotonic bitstream filter parity.
+fn assert_concat_stream_and_bsf_args(args: &[String], i_pos: usize) {
+    // Verify explicit stream mapping immediately follows input manifest
+    assert_eq!(args[i_pos + 2], "-map");
+    assert_eq!(args[i_pos + 3], "0:v:0");
+    assert_eq!(args[i_pos + 4], "-map");
+    assert_eq!(args[i_pos + 5], "0:a:0?");
+
+    // Verify fflags discards corrupt packets without synthesized +genpts
+    let fflags_pos = args
+        .iter()
+        .position(|a| a == "-fflags")
+        .expect("-fflags present");
+    assert_eq!(args[fflags_pos + 1], "+discardcorrupt");
+    assert!(!args.iter().any(|a| a.contains("genpts")));
+
+    // Verify lossless copy & bitstream filters
+    assert!(args.contains(&"-c".to_string()));
+    assert!(args.contains(&"copy".to_string()));
+    let bsf_v_pos = args
+        .iter()
+        .position(|a| a == "-bsf:v")
+        .expect("-bsf:v present");
+    assert_eq!(args[bsf_v_pos + 1], VIDEO_MONOTONIC_DTS_BSF);
+    let bsf_a_pos = args
+        .iter()
+        .position(|a| a == "-bsf:a")
+        .expect("-bsf:a present");
+    assert_eq!(args[bsf_a_pos + 1], AUDIO_MONOTONIC_DTS_BSF);
+}
+
 #[test]
 fn test_ffmpeg_bin_resolution() {
     // 1. Direct override takes highest priority
@@ -178,11 +247,8 @@ fn test_build_local_concat_ffmpeg_args_contains_required_flags() {
     let i_pos = args.iter().position(|a| a == "-i").expect("-i present");
     assert_eq!(args[i_pos + 1], manifest_path.to_string_lossy().to_string());
 
-    // Verify lossless copy & ADTS-to-ASC bitstream filter
-    assert!(args.contains(&"-c".to_string()));
-    assert!(args.contains(&"copy".to_string()));
-    assert!(args.contains(&"-bsf:a".to_string()));
-    assert!(args.contains(&"aac_adtstoasc".to_string()));
+    // Verify stream mapping and monotonic bitstream filters
+    assert_concat_stream_and_bsf_args(&args, i_pos);
 
     // Verify timestamp normalization & faststart seek table
     assert!(args.contains(&"-avoid_negative_ts".to_string()));
@@ -231,11 +297,8 @@ fn test_build_remote_concat_ffmpeg_args_contains_required_flags() {
         .expect("-protocol_whitelist present");
     assert!(pw_pos < i_pos, "-protocol_whitelist must precede -i");
 
-    // Verify lossless copy & ADTS-to-ASC bitstream filter
-    assert!(args.contains(&"-c".to_string()));
-    assert!(args.contains(&"copy".to_string()));
-    assert!(args.contains(&"-bsf:a".to_string()));
-    assert!(args.contains(&"aac_adtstoasc".to_string()));
+    // Verify stream mapping and monotonic bitstream filters
+    assert_concat_stream_and_bsf_args(&args, i_pos);
 
     // Verify timestamp normalization & fragmented MP4 streaming flags
     assert!(args.contains(&"-avoid_negative_ts".to_string()));
@@ -1721,6 +1784,192 @@ async fn test_consolidate_video_local_relative_directory_path() {
         part_mp4.exists(),
         "Staged .part file must exist after local consolidation"
     );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+fn encode_pes_timestamp(ts: u64, marker: u8) -> [u8; 5] {
+    [
+        (marker << 4) | ((((ts >> 30) & 0x07) as u8) << 1) | 1,
+        ((ts >> 22) & 0xFF) as u8,
+        ((((ts >> 15) & 0x7F) as u8) << 1) | 1,
+        ((ts >> 7) & 0xFF) as u8,
+        (((ts & 0x7F) as u8) << 1) | 1,
+    ]
+}
+
+fn force_dts_collision_in_ts(data: &mut [u8], forced_dts: u64) {
+    let mut pes_offsets = Vec::new();
+    let mut i = 0;
+    while i + 188 <= data.len() {
+        if data[i] == 0x47 {
+            let pusi = (data[i + 1] & 0x40) != 0;
+            let afc = (data[i + 3] & 0x30) >> 4;
+            let mut off = i + 4;
+            if afc == 2 {
+                i += 188;
+                continue;
+            }
+            if afc == 3 {
+                off += 1 + data[i + 4] as usize;
+            }
+            if pusi
+                && off + 9 <= i + 188
+                && data[off..off + 3] == [0x00, 0x00, 0x01]
+                && data[off + 3] == 0xE0
+            {
+                let flags = data[off + 7];
+                let pts_dts = (flags & 0xC0) >> 6;
+                pes_offsets.push((off, pts_dts));
+            }
+        }
+        i += 188;
+    }
+
+    assert!(
+        pes_offsets.len() >= 3,
+        "Generated TS must contain at least 3 video PES packets"
+    );
+
+    // Overwrite DTS on consecutive PES packets (indices 1 and 2) to forced_dts
+    for &(off, pts_dts) in &pes_offsets[1..=2] {
+        if pts_dts == 3 {
+            let dts_bytes = encode_pes_timestamp(forced_dts, 1);
+            data[off + 14..off + 19].copy_from_slice(&dts_bytes);
+        } else if pts_dts == 2 {
+            let pts_bytes = encode_pes_timestamp(forced_dts, 2);
+            data[off + 9..off + 14].copy_from_slice(&pts_bytes);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_consolidate_video_monotonic_dts_collision_resolution() {
+    if !ensure_ffmpeg_available() {
+        eprintln!("[SKIP] ffmpeg not available, skipping test");
+        return;
+    }
+
+    let temp_dir = create_temp_test_dir("test_cons_dts_collision");
+    let ffmpeg_bin = resolve_ffmpeg_bin(None);
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+
+    // 1. Generate a valid MPEG-TS chunk with B-frames (-bf 2)
+    let raw_chunk = temp_dir.join("raw_chunk.ts");
+    let status = Command::new(&ffmpeg_bin)
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.5:size=160x120:rate=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:duration=0.5",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "2",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            raw_chunk.to_str().unwrap(),
+        ])
+        .output()
+        .expect("generate base chunk");
+    assert!(status.status.success(), "Failed to generate base chunk");
+
+    // 2. Synthesize identical consecutive DTS (8906 >= 8906) across packets in chunk0
+    let mut chunk0_bytes = fs::read(&raw_chunk).expect("read raw chunk");
+    force_dts_collision_in_ts(&mut chunk0_bytes, 8906);
+    fs::write(&chunk0, &chunk0_bytes).expect("write chunk0");
+
+    // chunk1 is also generated from the modified collision data
+    fs::write(&chunk1, &chunk0_bytes).expect("write chunk1");
+    let _ = fs::remove_file(&raw_chunk);
+
+    // 3. Verify that chunk0 contains forced consecutive DTS (8906 >= 8906)
+    if ensure_ffprobe_available() {
+        let input_packets = probe_video_packets_dts_and_pts(&chunk0);
+        let has_collision = input_packets
+            .windows(2)
+            .any(|w| w[0].dts == 8906 && w[1].dts == 8906);
+        assert!(
+            has_collision,
+            "Input chunk must contain consecutive packets with identical DTS (8906 >= 8906)"
+        );
+    }
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chunk_0000.ts".to_string(),
+            size: fs::metadata(&chunk0).unwrap().len(),
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chunk_0001.ts".to_string(),
+            size: fs::metadata(&chunk1).unwrap().len(),
+        },
+    ];
+
+    let target = TargetLocation::Local(temp_dir.clone());
+    let options = VideoConsolidationOptions::default();
+    let cancel_token = CancellationToken::new();
+
+    // 4. Consolidate: FFmpeg must remux with exit code 0 under monotonic bitstream filtering
+    let result = consolidate_video(&target, &chunks, &options, cancel_token)
+        .await
+        .expect("Consolidation with forced identical DTS collision must succeed");
+
+    assert_eq!(result.chunks_processed, 2);
+    assert!(result.bytes_written > 0);
+
+    // 5. Finalize staged video
+    finalize_staged_video(&target, None)
+        .await
+        .expect("finalize_staged_video must succeed");
+
+    let final_mp4 = temp_dir.join("consolidated.mp4");
+    assert!(final_mp4.exists(), "Final consolidated.mp4 must exist");
+
+    // 6. Verify container start time normalization and strictly monotonic output DTS
+    if ensure_ffprobe_available() {
+        let start_time = probe_format_start_time(&final_mp4);
+        assert!(
+            (start_time - 0.0).abs() < 0.001,
+            "Container start time must be normalized to 0.0s (got {start_time})"
+        );
+
+        let out_packets = probe_video_packets_dts_and_pts(&final_mp4);
+        assert!(
+            !out_packets.is_empty(),
+            "Consolidated video must contain packets"
+        );
+
+        // Verify strictly monotonic DTS (DTS strictly advances for every consecutive packet)
+        for window in out_packets.windows(2) {
+            let prev_dts = window[0].dts;
+            let curr_dts = window[1].dts;
+            assert!(
+                curr_dts > prev_dts,
+                "Output DTS must strictly increase: previous {prev_dts} < current {curr_dts}"
+            );
+        }
+
+        // Verify B-frame presentation ordering (PTS >= DTS for every packet)
+        for pkt in &out_packets {
+            assert!(
+                pkt.pts >= pkt.dts,
+                "B-frame presentation ordering must be preserved: PTS {} >= DTS {}",
+                pkt.pts,
+                pkt.dts
+            );
+        }
+    }
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }

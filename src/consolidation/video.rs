@@ -241,20 +241,46 @@ pub fn create_temp_concat_script_sync<S: AsRef<str>>(
     create_temp_concat_script_in_sync(&std::env::temp_dir(), entries)
 }
 
-/// Constructs the list of command line arguments for local mode FFmpeg Concat Demuxer remuxing (Spec #56, Ticket #58).
+/// Bitstream filter expression for strictly monotonic video DTS reconciliation.
+pub const VIDEO_MONOTONIC_DTS_BSF: &str =
+    "setts=dts=if(eq(N\\,0)\\,DTS\\,max(DTS\\,PREV_OUTDTS+1))";
+
+/// Bitstream filter expression for ADTS-to-ASC conversion and monotonic audio DTS/PTS reconciliation.
+pub const AUDIO_MONOTONIC_DTS_BSF: &str = "aac_adtstoasc,setts=dts=if(eq(N\\,0)\\,DTS\\,max(DTS\\,PREV_OUTDTS+1)):pts=if(eq(N\\,0)\\,PTS\\,max(PTS\\,PREV_OUTPTS+1))";
+
+/// Appends defensive stream isolation (`-map 0:v:0 -map 0:a:0?`), stream-copy (`-c copy`),
+/// and monotonic bitstream filters to the FFmpeg concat argument list.
+fn append_concat_stream_and_bsf_args(args: &mut Vec<String>) {
+    args.extend([
+        "-map".to_string(),
+        "0:v:0".to_string(),
+        "-map".to_string(),
+        "0:a:0?".to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+        "-bsf:v".to_string(),
+        VIDEO_MONOTONIC_DTS_BSF.to_string(),
+        "-bsf:a".to_string(),
+        AUDIO_MONOTONIC_DTS_BSF.to_string(),
+    ]);
+}
+
+/// Constructs the list of command line arguments for local mode FFmpeg Concat Demuxer remuxing (Spec #56, Ticket #58, Ticket #66).
 ///
 /// Features:
 /// - `-safe 0`: Allows arbitrary and absolute paths in the concat manifest script
 /// - `-f concat`: Invokes FFmpeg's native container-aware Concat Demuxer
 /// - `-i <manifest_path>`: Reads file entries from the manifest script
+/// - `-map 0:v:0 -map 0:a:0?`: Explicit stream mapping isolating primary video and optional audio streams
 /// - `-c copy`: Lossless stream-copy without transcoding
-/// - `-bsf:a aac_adtstoasc`: Converts ADTS AAC headers to AudioSpecificConfig (ASC) for MP4 container
+/// - `-bsf:v "setts=dts=if(eq(N\,0)\,DTS\,max(DTS\,PREV_OUTDTS+1))"`: Monotonic video DTS bitstream filter
+/// - `-bsf:a "aac_adtstoasc,setts=dts=if(eq(N\,0)\,DTS\,max(DTS\,PREV_OUTDTS+1)):pts=if(eq(N\,0)\,PTS\,max(PTS\,PREV_OUTPTS+1))"`: ADTS-to-ASC conversion and monotonic audio DTS/PTS bitstream filter
 /// - `-avoid_negative_ts make_zero`: Resets container timeline start to 0.0s, eliminating initial playback freezing
 /// - `-movflags +faststart`: Relocates `moov` atom seek table to beginning of MP4 for instant desktop seeking
 /// - `-progress pipe:2`: Emits progress telemetry key-value pairs to stderr
 /// - `<output_path>`: Direct staged file destination (`consolidated.mp4.part`) enabling seekable writes
 pub fn build_local_concat_ffmpeg_args(manifest_path: &Path, output_path: &Path) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
@@ -262,17 +288,16 @@ pub fn build_local_concat_ffmpeg_args(manifest_path: &Path, output_path: &Path) 
         "pipe:2".to_string(),
         "-y".to_string(),
         "-fflags".to_string(),
-        "+genpts+discardcorrupt".to_string(),
+        "+discardcorrupt".to_string(),
         "-safe".to_string(),
         "0".to_string(),
         "-f".to_string(),
         "concat".to_string(),
         "-i".to_string(),
         manifest_path.to_string_lossy().to_string(),
-        "-c".to_string(),
-        "copy".to_string(),
-        "-bsf:a".to_string(),
-        "aac_adtstoasc".to_string(),
+    ];
+    append_concat_stream_and_bsf_args(&mut args);
+    args.extend([
         "-avoid_negative_ts".to_string(),
         "make_zero".to_string(),
         "-movflags".to_string(),
@@ -280,7 +305,8 @@ pub fn build_local_concat_ffmpeg_args(manifest_path: &Path, output_path: &Path) 
         "-f".to_string(),
         "mp4".to_string(),
         output_path.to_string_lossy().to_string(),
-    ]
+    ]);
+    args
 }
 
 /// Builds the Tokio `Command` for the local mode FFmpeg Concat Demuxer process.
@@ -301,21 +327,23 @@ pub fn build_local_concat_ffmpeg_command(
     cmd
 }
 
-/// Constructs the list of command line arguments for remote mode FFmpeg Concat Demuxer remuxing (Spec #56, Ticket #59).
+/// Constructs the list of command line arguments for remote mode FFmpeg Concat Demuxer remuxing (Spec #56, Ticket #59, Ticket #66).
 ///
 /// Features:
 /// - `-protocol_whitelist file,http,tcp`: Whitelists file, http, and tcp protocols for reading the manifest and loopback chunk streams
 /// - `-safe 0`: Allows loopback HTTP URLs in the concat manifest script
 /// - `-f concat`: Invokes FFmpeg's native container-aware Concat Demuxer
 /// - `-i <manifest_path>`: Reads chunk URLs from the manifest script
+/// - `-map 0:v:0 -map 0:a:0?`: Explicit stream mapping isolating primary video and optional audio streams
 /// - `-c copy`: Lossless stream-copy without transcoding
-/// - `-bsf:a aac_adtstoasc`: Converts ADTS AAC headers to AudioSpecificConfig (ASC) for MP4 container
+/// - `-bsf:v "setts=dts=if(eq(N\,0)\,DTS\,max(DTS\,PREV_OUTDTS+1))"`: Monotonic video DTS bitstream filter
+/// - `-bsf:a "aac_adtstoasc,setts=dts=if(eq(N\,0)\,DTS\,max(DTS\,PREV_OUTDTS+1)):pts=if(eq(N\,0)\,PTS\,max(PTS\,PREV_OUTPTS+1))"`: ADTS-to-ASC conversion and monotonic audio DTS/PTS bitstream filter
 /// - `-avoid_negative_ts make_zero`: Resets container timeline start to 0.0s, eliminating initial playback freezing
 /// - `-movflags frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets`: Fragmented MP4 for live streaming writes
 /// - `-progress pipe:2`: Emits progress telemetry key-value pairs to stderr
 /// - `pipe:1`: Emits fragmented MP4 byte stream to stdout for rclone rcat
 pub fn build_remote_concat_ffmpeg_args(manifest_path: &Path) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "warning".to_string(),
@@ -323,7 +351,7 @@ pub fn build_remote_concat_ffmpeg_args(manifest_path: &Path) -> Vec<String> {
         "pipe:2".to_string(),
         "-y".to_string(),
         "-fflags".to_string(),
-        "+genpts+discardcorrupt".to_string(),
+        "+discardcorrupt".to_string(),
         "-protocol_whitelist".to_string(),
         "file,http,tcp".to_string(),
         "-safe".to_string(),
@@ -332,10 +360,9 @@ pub fn build_remote_concat_ffmpeg_args(manifest_path: &Path) -> Vec<String> {
         "concat".to_string(),
         "-i".to_string(),
         manifest_path.to_string_lossy().to_string(),
-        "-c".to_string(),
-        "copy".to_string(),
-        "-bsf:a".to_string(),
-        "aac_adtstoasc".to_string(),
+    ];
+    append_concat_stream_and_bsf_args(&mut args);
+    args.extend([
         "-avoid_negative_ts".to_string(),
         "make_zero".to_string(),
         "-movflags".to_string(),
@@ -343,7 +370,8 @@ pub fn build_remote_concat_ffmpeg_args(manifest_path: &Path) -> Vec<String> {
         "-f".to_string(),
         "mp4".to_string(),
         "pipe:1".to_string(),
-    ]
+    ]);
+    args
 }
 
 /// Builds the Tokio `Command` for the remote mode FFmpeg Concat Demuxer process.
