@@ -74,12 +74,24 @@ pub fn resolve_ffmpeg_bin(override_bin: Option<&str>) -> String {
 /// Escapes and normalizes a file path or URL for use in an FFmpeg concat demuxer script.
 ///
 /// Concat demuxer escaping rules:
+/// - Strips Windows verbatim UNC prefixes (`\\?\` and `\\?\UNC\`) to prevent FFmpeg syntax errors.
 /// - Normalizes Windows backslashes `\` to forward slashes `/`.
 /// - Escapes single quotes `'` as `'\\''` so that when wrapped in `'...'` by FFmpeg's
 ///   concat demuxer, single quotes are safely closed and escaped.
 /// - Preserves Unicode, Korean streamer names, spaces, brackets, and HTTP URLs cleanly.
 pub fn escape_concat_path(path: &str) -> String {
-    path.replace('\\', "/").replace('\'', r"'\''")
+    let clean: std::borrow::Cow<'_, str> = if let Some(stripped) = path.strip_prefix(r"\\?\UNC\") {
+        std::borrow::Cow::Owned(format!(r"\\{stripped}"))
+    } else if let Some(stripped) = path.strip_prefix("//?/UNC/") {
+        std::borrow::Cow::Owned(format!("//{stripped}"))
+    } else if let Some(stripped) = path.strip_prefix(r"\\?\") {
+        std::borrow::Cow::Borrowed(stripped)
+    } else if let Some(stripped) = path.strip_prefix("//?/") {
+        std::borrow::Cow::Borrowed(stripped)
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    };
+    clean.replace('\\', "/").replace('\'', r"'\''")
 }
 
 /// Generates the full content of an FFmpeg concat demuxer manifest script from a slice of paths or URLs.
@@ -649,10 +661,14 @@ pub async fn consolidate_video_local(
         anyhow::bail!("Video consolidation cancelled by cooperative cancellation token");
     }
 
+    // Canonicalize target directory to an absolute path before constructing manifest entry paths
+    let canonical_dir =
+        std::fs::canonicalize(dir).unwrap_or_else(|_| crate::app_path::resolve_path(dir));
+
     // 1. Generate entries for temporary concat script
     let entries: Vec<String> = chunks
         .iter()
-        .map(|c| dir.join(&c.name).to_string_lossy().to_string())
+        .map(|c| canonical_dir.join(&c.name).to_string_lossy().to_string())
         .collect();
 
     // 2. Create temporary concat script guarded by ConcatScriptGuard (RAII cleanup)

@@ -4,8 +4,8 @@ use chzzk_load::consolidation::manifest::{ConsolidationChunk, TargetLocation};
 use chzzk_load::consolidation::video::{
     VideoConsolidationOptions, build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command,
     build_remote_concat_ffmpeg_args, build_remote_concat_ffmpeg_command, cleanup_staged_video,
-    consolidate_video, consolidate_video_remote, finalize_staged_video, join_remote_path,
-    resolve_ffmpeg_bin,
+    consolidate_video, consolidate_video_local, consolidate_video_remote, finalize_staged_video,
+    join_remote_path, resolve_ffmpeg_bin,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -1600,6 +1600,126 @@ async fn test_consolidate_video_remote_hermetic_with_mock_rclone() {
     assert!(
         chunk0.exists() && chunk1.exists(),
         "Original chunks must remain untouched"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+fn make_relative_to_cwd(target: &std::path::Path) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let target = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+
+    let target_prefix = target.components().next()?;
+    let cwd_prefix = cwd.components().next()?;
+    if target_prefix != cwd_prefix {
+        return None;
+    }
+
+    let target_comps: Vec<_> = target.components().collect();
+    let cwd_comps: Vec<_> = cwd.components().collect();
+
+    let mut common_len = 0;
+    while common_len < target_comps.len()
+        && common_len < cwd_comps.len()
+        && target_comps[common_len] == cwd_comps[common_len]
+    {
+        common_len += 1;
+    }
+
+    let mut rel = PathBuf::new();
+    for _ in common_len..cwd_comps.len() {
+        rel.push("..");
+    }
+    for comp in &target_comps[common_len..] {
+        rel.push(comp.as_os_str());
+    }
+    Some(rel)
+}
+
+#[tokio::test]
+async fn test_consolidate_video_local_relative_directory_path() {
+    if !ensure_ffmpeg_available() {
+        eprintln!("[SKIP] ffmpeg not available, skipping test");
+        return;
+    }
+
+    let temp_dir = create_temp_test_dir("test_cons_rel_path");
+    let rel_dir = match make_relative_to_cwd(&temp_dir) {
+        Some(r) => r,
+        None => {
+            eprintln!(
+                "[SKIP] temp_dir and cwd are on different drives, skipping relative path test"
+            );
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            return;
+        }
+    };
+    assert!(rel_dir.is_relative(), "rel_dir must be relative");
+
+    // Generate 2 valid synthetic MPEG-TS chunks using resolved FFmpeg
+    let ffmpeg_bin = resolve_ffmpeg_bin(None);
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+
+    for chunk in [&chunk0, &chunk1] {
+        let status = Command::new(&ffmpeg_bin)
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=0.5:size=160x120:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=0.5",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-f",
+                "mpegts",
+                chunk.to_str().unwrap(),
+            ])
+            .output()
+            .expect("generate synthetic chunk");
+        assert!(
+            status.status.success(),
+            "Failed to generate chunk: {chunk:?}"
+        );
+    }
+
+    let size0 = fs::metadata(&chunk0).unwrap().len();
+    let size1 = fs::metadata(&chunk1).unwrap().len();
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chunk_0000.ts".to_string(),
+            size: size0,
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chunk_0001.ts".to_string(),
+            size: size1,
+        },
+    ];
+
+    let options = VideoConsolidationOptions::default();
+    let cancel_token = CancellationToken::new();
+
+    let result = consolidate_video_local(&rel_dir, &chunks, &options, cancel_token)
+        .await
+        .expect("Consolidation with relative directory path must succeed without 'Impossible to open' error");
+
+    assert_eq!(result.chunks_processed, 2);
+    assert!(result.bytes_written > 0);
+
+    let part_mp4 = temp_dir.join("consolidated.mp4.part");
+    assert!(
+        part_mp4.exists(),
+        "Staged .part file must exist after local consolidation"
     );
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;

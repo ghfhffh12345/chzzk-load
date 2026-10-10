@@ -47,6 +47,34 @@ fn test_escape_concat_path_http_url() {
 }
 
 #[test]
+fn test_escape_concat_path_windows_verbatim_unc_prefix() {
+    let input = r"\\?\C:\recordings\session_1\chunk_0000.ts";
+    let expected = "C:/recordings/session_1/chunk_0000.ts";
+    assert_eq!(escape_concat_path(input), expected);
+}
+
+#[test]
+fn test_escape_concat_path_windows_verbatim_unc_network_share() {
+    let input = r"\\?\UNC\nas_server\recordings\chunk_0001.ts";
+    let expected = "//nas_server/recordings/chunk_0001.ts";
+    assert_eq!(escape_concat_path(input), expected);
+}
+
+#[test]
+fn test_escape_concat_path_windows_verbatim_unc_with_quotes() {
+    let input = r"\\?\C:\recordings\It's Streamer\chunk_0002.ts";
+    let expected = r"C:/recordings/It'\''s Streamer/chunk_0002.ts";
+    assert_eq!(escape_concat_path(input), expected);
+}
+
+#[test]
+fn test_escape_concat_path_windows_verbatim_unc_korean() {
+    let input = r"\\?\D:\녹화\[2026-10-09] [스트리머] 방송 [1080p]\chunk_0003.ts";
+    let expected = "D:/녹화/[2026-10-09] [스트리머] 방송 [1080p]/chunk_0003.ts";
+    assert_eq!(escape_concat_path(input), expected);
+}
+
+#[test]
 fn test_generate_concat_script_format() {
     // Empty entries
     let empty: Vec<String> = vec![];
@@ -268,5 +296,54 @@ fn test_concat_script_guard_drop_tolerates_not_found() {
     } // drops here without panic
 
     assert!(!missing_file.exists());
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_concat_script_from_relative_path_contains_absolute_forward_slashes() {
+    let temp_dir = create_temp_test_dir("test_rel_manifest");
+    // Canonicalize directory to simulate what consolidate_video_local does
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap_or_else(|_| temp_dir.clone());
+
+    let entries = vec![
+        canonical_dir
+            .join("chunk_0000.ts")
+            .to_string_lossy()
+            .to_string(),
+        canonical_dir
+            .join("chunk_0001.ts")
+            .to_string_lossy()
+            .to_string(),
+    ];
+
+    let guard = create_temp_concat_script(&entries)
+        .await
+        .expect("create_temp_concat_script should succeed");
+
+    let content = fs::read_to_string(guard.path()).expect("read script");
+    assert!(
+        !content.contains(r"\\?\"),
+        "Manifest must not contain verbatim \\?\\ prefix"
+    );
+    assert!(
+        !content.contains('\\'),
+        "Manifest must not contain backslashes"
+    );
+
+    for line in content.lines() {
+        assert!(
+            line.starts_with("file '"),
+            "Each line must start with file '"
+        );
+        assert!(line.ends_with('\''), "Each line must end with '");
+        let path_str = &line[6..line.len() - 1];
+        let p = std::path::Path::new(path_str);
+        assert!(
+            p.is_absolute(),
+            "Path inside concat script must be absolute: {path_str}"
+        );
+    }
+
+    drop(guard);
     let _ = fs::remove_dir_all(&temp_dir);
 }

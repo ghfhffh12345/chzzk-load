@@ -332,6 +332,10 @@ pub async fn consolidate_chat_local_with_progress(
     // Clean up any stale .part file from previous aborted runs
     let _ = unlink_local_file_with_retry(&part_path).await;
 
+    if cancel_token.is_cancelled() {
+        anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");
+    }
+
     let mut deduplicator = ChatDeduplicator::new(DEFAULT_CHAT_DEDUP_WINDOW_MS, strict);
 
     let stream_res = async {
