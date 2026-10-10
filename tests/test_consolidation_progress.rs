@@ -3,10 +3,12 @@ use std::time::{Duration, Instant};
 
 use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::progress::{
-    COLOR_BLUE, COLOR_CYAN, COLOR_DIVIDER, COLOR_GREEN, ChatProgressSnapshot, ChatProgressUpdate,
-    ConsolidationProgressCoordinator, CoordinatorOutput, MilestoneTracker, PurgeProgressSnapshot,
-    PurgeProgressUpdate, STYLE_DIM, STYLE_RESET, VideoProgressSnapshot, VideoProgressUpdate,
-    format_bytes, format_interactive_bar, format_number_with_commas, format_progress_bar,
+    BADGE_LEN, COLOR_BLUE, COLOR_CYAN, COLOR_DIVIDER, COLOR_GREEN, ChatProgressSnapshot,
+    ChatProgressUpdate, ConsolidationProgressCoordinator, CoordinatorOutput,
+    DEFAULT_FALLBACK_BAR_WIDTH, MAX_BAR_WIDTH, MIN_BAR_WIDTH, MilestoneTracker,
+    ProgressBarWidthMode, PurgeProgressSnapshot, PurgeProgressUpdate, SAFETY_MARGIN, STYLE_DIM,
+    STYLE_RESET, VideoProgressSnapshot, VideoProgressUpdate, format_bytes, format_interactive_bar,
+    format_number_with_commas, format_progress_bar,
 };
 use chzzk_load::consolidation::{VideoProgressTelemetry, run_consolidation_with_coordinator};
 
@@ -200,6 +202,261 @@ fn test_purge_progress_snapshot_formatting() {
         partial.format_non_interactive(),
         "[INFO] [DEL] Purge progress: 20% (4/20 chunks deleted)"
     );
+}
+
+#[test]
+fn test_snapshots_metric_suffix_and_length() {
+    let vid_snap = VideoProgressSnapshot {
+        chunks_fed: 6,
+        total_chunks: 10,
+        bytes_fed: 126_353_408,
+        total_bytes: 0,
+        speed: Some("14.5x".to_string()),
+    };
+    let vid_suffix = vid_snap.metric_suffix();
+    assert_eq!(vid_suffix, " 60% (6/10 chunks, 120.5 MB) 14.5x");
+    assert_eq!(vid_snap.metric_suffix_len(), vid_suffix.chars().count());
+    assert_eq!(vid_snap.metric_suffix_len(), 34);
+
+    let vid_snap_no_speed = VideoProgressSnapshot {
+        chunks_fed: 2,
+        total_chunks: 10,
+        bytes_fed: 26_633_830,
+        total_bytes: 0,
+        speed: None,
+    };
+    let vid_no_speed_suffix = vid_snap_no_speed.metric_suffix();
+    assert_eq!(vid_no_speed_suffix, " 20% (2/10 chunks, 25.4 MB)");
+    assert_eq!(
+        vid_snap_no_speed.metric_suffix_len(),
+        vid_no_speed_suffix.chars().count()
+    );
+    assert_eq!(vid_snap_no_speed.metric_suffix_len(), 27);
+
+    let chat_snap = ChatProgressSnapshot {
+        chunks_read: 6,
+        total_chunks: 10,
+        total_messages: 15_000,
+        deduplicated_messages: 2_655,
+        emitted_messages: 12_345,
+    };
+    let chat_suffix = chat_snap.metric_suffix();
+    assert_eq!(chat_suffix, " 60% (6/10 chunks, 12,345 msgs)");
+    assert_eq!(chat_snap.metric_suffix_len(), chat_suffix.chars().count());
+    assert_eq!(chat_snap.metric_suffix_len(), 31);
+
+    let purge_snap = PurgeProgressSnapshot {
+        chunks_deleted: 20,
+        total_chunks: 20,
+    };
+    let purge_suffix = purge_snap.metric_suffix();
+    assert_eq!(purge_suffix, " 100% (20/20 chunks deleted)");
+    assert_eq!(purge_snap.metric_suffix_len(), purge_suffix.chars().count());
+    assert_eq!(purge_snap.metric_suffix_len(), 28);
+}
+
+#[test]
+fn test_dynamic_width_resolution_wide_terminal() {
+    assert_eq!(BADGE_LEN, 6);
+    assert_eq!(SAFETY_MARGIN, 1);
+
+    let coordinator = ConsolidationProgressCoordinator::new(true).with_terminal_width(120);
+    assert_eq!(coordinator.query_terminal_cols(), Some(120));
+    assert_eq!(coordinator.width_mode(), ProgressBarWidthMode::Dynamic);
+
+    // Suffix 30 cols: available = 120 - (6 + 30 + 1) = 83 -> clamped to MAX_BAR_WIDTH (40)
+    let bar_width = coordinator.resolve_bar_width(30);
+    assert_eq!(bar_width, MAX_BAR_WIDTH);
+    assert_eq!(bar_width, 40);
+}
+
+#[test]
+fn test_dynamic_width_resolution_narrow_terminal() {
+    let coordinator = ConsolidationProgressCoordinator::new(true).with_terminal_width(60);
+    assert_eq!(coordinator.query_terminal_cols(), Some(60));
+
+    // Suffix 35 cols: available = 60 - (6 + 35 + 1) = 18 -> within [15, 40]
+    let bar_width = coordinator.resolve_bar_width(35);
+    assert_eq!(bar_width, 18);
+}
+
+#[test]
+fn test_dynamic_width_resolution_minimum_floor() {
+    let coordinator = ConsolidationProgressCoordinator::new(true).with_terminal_width(50);
+    assert_eq!(coordinator.query_terminal_cols(), Some(50));
+
+    // Suffix 38 cols: available = 50 - (6 + 38 + 1) = 5 -> clamped to MIN_BAR_WIDTH (15)
+    let bar_width = coordinator.resolve_bar_width(38);
+    assert_eq!(bar_width, MIN_BAR_WIDTH);
+    assert_eq!(bar_width, 15);
+}
+
+#[test]
+fn test_dynamic_width_fallback_on_probe_error() {
+    // Failing probe
+    let err_coordinator = ConsolidationProgressCoordinator::new(true)
+        .with_terminal_probe(|| Err(std::io::Error::other("terminal size unavailable")));
+    assert_eq!(err_coordinator.query_terminal_cols(), None);
+    assert_eq!(
+        err_coordinator.resolve_bar_width(30),
+        DEFAULT_FALLBACK_BAR_WIDTH
+    );
+
+    // 0 columns probe
+    let zero_coordinator =
+        ConsolidationProgressCoordinator::new(true).with_terminal_probe(|| Ok(0));
+    assert_eq!(zero_coordinator.query_terminal_cols(), None);
+    assert_eq!(
+        zero_coordinator.resolve_bar_width(30),
+        DEFAULT_FALLBACK_BAR_WIDTH
+    );
+
+    // Non-TTY coordinator without custom probe
+    let non_tty = ConsolidationProgressCoordinator::new(false);
+    assert_eq!(non_tty.query_terminal_cols(), None);
+    assert_eq!(non_tty.resolve_bar_width(30), DEFAULT_FALLBACK_BAR_WIDTH);
+}
+
+#[test]
+fn test_builder_with_bar_width_fixed_override() {
+    let coordinator = ConsolidationProgressCoordinator::new(true)
+        .with_terminal_width(120)
+        .with_bar_width(25);
+
+    assert_eq!(coordinator.width_mode(), ProgressBarWidthMode::Fixed(25));
+    // Fixed width bypasses dynamic calculations regardless of terminal columns or suffix length
+    assert_eq!(coordinator.resolve_bar_width(10), 25);
+    assert_eq!(coordinator.resolve_bar_width(35), 25);
+    assert_eq!(coordinator.resolve_bar_width(50), 25);
+}
+
+fn visible_width(s: &str) -> usize {
+    let mut in_escape = false;
+    let mut count = 0;
+    for ch in s.chars() {
+        if ch == '\x1b' {
+            in_escape = true;
+        } else if in_escape {
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+        } else if ch != '\r' && ch != '\n' {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn terminal_rows(s: &str) -> Vec<&str> {
+    s.split('\n')
+        .flat_map(|line| line.split("\x1b[1A"))
+        .filter(|row| !row.is_empty())
+        .collect()
+}
+
+#[tokio::test]
+async fn test_synchronized_dual_media_track_alignment() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(80);
+
+    let mut session = coordinator.start_media(10, 10);
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 6,
+        bytes_fed: 126_353_408,
+    });
+    let _ = v_tx.send(VideoProgressUpdate::Speed("14.5x".to_string()));
+
+    let _ = c_tx.send(ChatProgressUpdate {
+        chunks_read: 6,
+        total_messages: 15_000,
+        deduplicated_messages: 2_655,
+        emitted_messages: 12_345,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+    let vid_lines: Vec<&str> = rows.iter().copied().filter(|l| l.contains("VID")).collect();
+    let chat_lines: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|l| l.contains("CHAT"))
+        .collect();
+
+    assert!(!vid_lines.is_empty(), "must render VID line");
+    assert!(!chat_lines.is_empty(), "must render CHAT line");
+
+    let last_vid = vid_lines.last().unwrap();
+    let last_chat = chat_lines.last().unwrap();
+
+    let vid_vis_len = visible_width(last_vid);
+    let chat_vis_len = visible_width(last_chat);
+    assert!(
+        vid_vis_len <= 79,
+        "VID line visible length ({vid_vis_len}) must never exceed 79 columns on 80-col terminal"
+    );
+    assert!(
+        chat_vis_len <= 79,
+        "CHAT line visible length ({chat_vis_len}) must never exceed 79 columns on 80-col terminal"
+    );
+
+    // Track width in both lines must match exactly
+    let vid_track_len = last_vid.chars().filter(|&c| c == '━' || c == '─').count();
+    let chat_track_len = last_chat.chars().filter(|&c| c == '━' || c == '─').count();
+
+    assert_eq!(
+        vid_track_len, chat_track_len,
+        "VID and CHAT tracks must have identical synchronized width"
+    );
+    assert!(
+        (15..=40).contains(&vid_track_len),
+        "Track width ({vid_track_len}) must be clamped within [15, 40]"
+    );
+}
+
+#[tokio::test]
+async fn test_anti_wrapping_interactive_ansi_stability_on_80_col() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(80);
+
+    let mut session = coordinator.start_media(9999, 9999);
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+        chunks_fed: 9999,
+        bytes_fed: 107_911_806_976, // 100.5 GB
+    });
+    let _ = v_tx.send(VideoProgressUpdate::Speed("120.3x".to_string()));
+    let _ = c_tx.send(ChatProgressUpdate {
+        chunks_read: 9999,
+        total_messages: 1_234_567,
+        deduplicated_messages: 234_567,
+        emitted_messages: 1_000_000,
+    });
+
+    session.finish(true).await;
+
+    let raw_output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+
+    assert!(
+        raw_output.contains("\x1b[1A"),
+        "multi-frame dual media render must include \\x1b[1A cursor-up sequence"
+    );
+
+    for row in terminal_rows(&raw_output) {
+        let vis = visible_width(row);
+        assert!(
+            vis <= 79,
+            "Visible line length ({vis}) exceeded 79 columns: {row:?}"
+        );
+    }
 }
 
 #[test]

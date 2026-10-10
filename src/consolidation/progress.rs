@@ -4,7 +4,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
-pub(crate) const DEFAULT_BAR_WIDTH: usize = 20;
+pub const MIN_BAR_WIDTH: usize = 15;
+pub const MAX_BAR_WIDTH: usize = 40;
+pub const DEFAULT_FALLBACK_BAR_WIDTH: usize = 40;
+pub const DEFAULT_BAR_WIDTH: usize = DEFAULT_FALLBACK_BAR_WIDTH;
+pub const BADGE_LEN: usize = 6;
+pub const SAFETY_MARGIN: usize = 1;
+
+/// Determines whether the progress bar width dynamically adapts to the terminal columns
+/// or uses a deterministic fixed width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressBarWidthMode {
+    Dynamic,
+    Fixed(usize),
+}
+
+/// Type alias for probing terminal column width in production or tests.
+pub type TerminalProbe = Arc<dyn Fn() -> std::io::Result<u16> + Send + Sync>;
 
 pub const COLOR_DIVIDER: &str = "\x1b[38;2;83;88;111m"; // #53586f (theme::DIVIDER)
 pub const COLOR_GREEN: &str = "\x1b[38;2;131;162;117m"; // #83a275 (theme::GREEN)
@@ -99,19 +115,29 @@ impl VideoProgressSnapshot {
         }
     }
 
-    pub fn format_interactive(&self, bar_width: usize) -> String {
+    pub fn metric_suffix(&self) -> String {
         let pct = self.pct();
-        let bar = format_interactive_bar(bar_width, pct);
         let bytes_str = format_bytes(self.bytes_fed);
         let speed_suffix = match &self.speed {
             Some(s) if !s.trim().is_empty() => format!(" {s}"),
             _ => String::new(),
         };
         format!(
-            "{COLOR_CYAN} VID  {STYLE_RESET}{bar}{STYLE_DIM} {pct}% ({}/{total} chunks, {bytes_str}){speed_suffix}{STYLE_RESET}",
+            " {pct}% ({}/{total} chunks, {bytes_str}){speed_suffix}",
             self.chunks_fed,
             total = self.total_chunks
         )
+    }
+
+    pub fn metric_suffix_len(&self) -> usize {
+        self.metric_suffix().chars().count()
+    }
+
+    pub fn format_interactive(&self, bar_width: usize) -> String {
+        let pct = self.pct();
+        let bar = format_interactive_bar(bar_width, pct);
+        let suffix = self.metric_suffix();
+        format!("{COLOR_CYAN} VID  {STYLE_RESET}{bar}{STYLE_DIM}{suffix}{STYLE_RESET}")
     }
 
     pub fn format_non_interactive(&self) -> String {
@@ -150,15 +176,25 @@ impl ChatProgressSnapshot {
         }
     }
 
-    pub fn format_interactive(&self, bar_width: usize) -> String {
+    pub fn metric_suffix(&self) -> String {
         let pct = self.pct();
-        let bar = format_interactive_bar(bar_width, pct);
         let msgs_str = format_number_with_commas(self.emitted_messages);
         format!(
-            "{COLOR_BLUE} CHAT {STYLE_RESET}{bar}{STYLE_DIM} {pct}% ({}/{total} chunks, {msgs_str} msgs){STYLE_RESET}",
+            " {pct}% ({}/{total} chunks, {msgs_str} msgs)",
             self.chunks_read,
             total = self.total_chunks
         )
+    }
+
+    pub fn metric_suffix_len(&self) -> usize {
+        self.metric_suffix().chars().count()
+    }
+
+    pub fn format_interactive(&self, bar_width: usize) -> String {
+        let pct = self.pct();
+        let bar = format_interactive_bar(bar_width, pct);
+        let suffix = self.metric_suffix();
+        format!("{COLOR_BLUE} CHAT {STYLE_RESET}{bar}{STYLE_DIM}{suffix}{STYLE_RESET}")
     }
 
     pub fn format_non_interactive(&self) -> String {
@@ -190,14 +226,24 @@ impl PurgeProgressSnapshot {
         }
     }
 
-    pub fn format_interactive(&self, bar_width: usize) -> String {
+    pub fn metric_suffix(&self) -> String {
         let pct = self.pct();
-        let bar = format_interactive_bar(bar_width, pct);
         format!(
-            "{COLOR_GREEN} DEL  {STYLE_RESET}{bar}{STYLE_DIM} {pct}% ({}/{total} chunks deleted){STYLE_RESET}",
+            " {pct}% ({}/{total} chunks deleted)",
             self.chunks_deleted,
             total = self.total_chunks
         )
+    }
+
+    pub fn metric_suffix_len(&self) -> usize {
+        self.metric_suffix().chars().count()
+    }
+
+    pub fn format_interactive(&self, bar_width: usize) -> String {
+        let pct = self.pct();
+        let bar = format_interactive_bar(bar_width, pct);
+        let suffix = self.metric_suffix();
+        format!("{COLOR_GREEN} DEL  {STYLE_RESET}{bar}{STYLE_DIM}{suffix}{STYLE_RESET}")
     }
 
     pub fn format_non_interactive(&self) -> String {
@@ -391,7 +437,8 @@ impl PurgeProgressSession {
 pub struct ConsolidationProgressCoordinator {
     output: CoordinatorOutput,
     is_tty: bool,
-    bar_width: usize,
+    width_mode: ProgressBarWidthMode,
+    terminal_probe: Option<TerminalProbe>,
 }
 
 impl Default for ConsolidationProgressCoordinator {
@@ -405,7 +452,8 @@ impl ConsolidationProgressCoordinator {
         Self {
             output: CoordinatorOutput::stdout(),
             is_tty,
-            bar_width: DEFAULT_BAR_WIDTH,
+            width_mode: ProgressBarWidthMode::Dynamic,
+            terminal_probe: None,
         }
     }
 
@@ -413,17 +461,69 @@ impl ConsolidationProgressCoordinator {
         Self {
             output,
             is_tty,
-            bar_width: DEFAULT_BAR_WIDTH,
+            width_mode: ProgressBarWidthMode::Dynamic,
+            terminal_probe: None,
         }
     }
 
+    /// Configures an explicit fixed progress bar width, bypassing dynamic terminal queries.
     pub fn with_bar_width(mut self, width: usize) -> Self {
-        self.bar_width = width;
+        self.width_mode = ProgressBarWidthMode::Fixed(width);
         self
+    }
+
+    /// Sets a simulated fixed terminal width for testing responsive geometry scenarios.
+    pub fn with_terminal_width(mut self, width: u16) -> Self {
+        self.terminal_probe = Some(Arc::new(move || Ok(width)));
+        self
+    }
+
+    /// Sets a custom terminal probe function for testing error fallbacks and dynamic queries.
+    pub fn with_terminal_probe<F>(mut self, probe: F) -> Self
+    where
+        F: Fn() -> std::io::Result<u16> + Send + Sync + 'static,
+    {
+        self.terminal_probe = Some(Arc::new(probe));
+        self
+    }
+
+    pub fn width_mode(&self) -> ProgressBarWidthMode {
+        self.width_mode
     }
 
     pub fn is_tty(&self) -> bool {
         self.is_tty
+    }
+
+    /// Queries the active terminal columns, returning None on probe failure, 0 columns, or non-TTY.
+    pub fn query_terminal_cols(&self) -> Option<usize> {
+        let res = match &self.terminal_probe {
+            Some(probe) => probe(),
+            None => {
+                if !self.is_tty {
+                    return None;
+                }
+                crossterm::terminal::size().map(|(w, _)| w)
+            }
+        };
+        match res {
+            Ok(cols) if cols > 0 => Some(cols as usize),
+            _ => None,
+        }
+    }
+
+    /// Resolves the progress bar width based on active width mode, terminal width, and metric suffix length.
+    pub fn resolve_bar_width(&self, max_suffix_len: usize) -> usize {
+        match self.width_mode {
+            ProgressBarWidthMode::Fixed(w) => w,
+            ProgressBarWidthMode::Dynamic => match self.query_terminal_cols() {
+                Some(cols) => {
+                    let available = cols.saturating_sub(BADGE_LEN + max_suffix_len + SAFETY_MARGIN);
+                    available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
+                }
+                None => DEFAULT_FALLBACK_BAR_WIDTH,
+            },
+        }
     }
 
     pub fn start_media(&self, total_video: usize, total_chat: usize) -> MediaProgressSession {
@@ -453,7 +553,7 @@ impl ConsolidationProgressCoordinator {
         let (finish_tx, mut finish_rx) = oneshot::channel::<bool>();
 
         let is_tty = self.is_tty;
-        let bar_width = self.bar_width;
+        let coordinator = self.clone();
         let output = self.output.clone();
 
         let handle = tokio::spawn(async move {
@@ -488,6 +588,15 @@ impl ConsolidationProgressCoordinator {
                     output.write_str(&format!("{}\n", chat_snapshot.format_non_interactive()));
                 }
             } else {
+                let max_suffix_len = match (has_video, has_chat) {
+                    (true, true) => video_snapshot
+                        .metric_suffix_len()
+                        .max(chat_snapshot.metric_suffix_len()),
+                    (true, false) => video_snapshot.metric_suffix_len(),
+                    (false, true) => chat_snapshot.metric_suffix_len(),
+                    (false, false) => 0,
+                };
+                let bar_width = coordinator.resolve_bar_width(max_suffix_len);
                 render_interactive_media(
                     &output,
                     &video_snapshot,
@@ -538,6 +647,15 @@ impl ConsolidationProgressCoordinator {
                     }
                     _ = tick_interval.tick() => {
                         if is_tty && dirty {
+                            let max_suffix_len = match (has_video, has_chat) {
+                                (true, true) => {
+                                    video_snapshot.metric_suffix_len().max(chat_snapshot.metric_suffix_len())
+                                }
+                                (true, false) => video_snapshot.metric_suffix_len(),
+                                (false, true) => chat_snapshot.metric_suffix_len(),
+                                (false, false) => 0,
+                            };
+                            let bar_width = coordinator.resolve_bar_width(max_suffix_len);
                             render_interactive_media(
                                 &output,
                                 &video_snapshot,
@@ -606,6 +724,15 @@ impl ConsolidationProgressCoordinator {
             }
 
             if is_tty {
+                let max_suffix_len = match (has_video, has_chat) {
+                    (true, true) => video_snapshot
+                        .metric_suffix_len()
+                        .max(chat_snapshot.metric_suffix_len()),
+                    (true, false) => video_snapshot.metric_suffix_len(),
+                    (false, true) => chat_snapshot.metric_suffix_len(),
+                    (false, false) => 0,
+                };
+                let bar_width = coordinator.resolve_bar_width(max_suffix_len);
                 render_interactive_media(
                     &output,
                     &video_snapshot,
@@ -647,7 +774,7 @@ impl ConsolidationProgressCoordinator {
         let (finish_tx, mut finish_rx) = oneshot::channel::<bool>();
 
         let is_tty = self.is_tty;
-        let bar_width = self.bar_width;
+        let coordinator = self.clone();
         let output = self.output.clone();
 
         let handle = tokio::spawn(async move {
@@ -666,6 +793,7 @@ impl ConsolidationProgressCoordinator {
                     output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
                 }
             } else {
+                let bar_width = coordinator.resolve_bar_width(purge_snapshot.metric_suffix_len());
                 let line = purge_snapshot.format_interactive(bar_width);
                 output.write_str(&format!("\r\x1b[2K{line}"));
                 dirty = false;
@@ -688,6 +816,7 @@ impl ConsolidationProgressCoordinator {
                     }
                     _ = tick_interval.tick() => {
                         if is_tty && dirty {
+                            let bar_width = coordinator.resolve_bar_width(purge_snapshot.metric_suffix_len());
                             let line = purge_snapshot.format_interactive(bar_width);
                             output.write_str(&format!("\r\x1b[2K{line}"));
                             dirty = false;
@@ -713,6 +842,7 @@ impl ConsolidationProgressCoordinator {
             }
 
             if is_tty {
+                let bar_width = coordinator.resolve_bar_width(purge_snapshot.metric_suffix_len());
                 let line = purge_snapshot.format_interactive(bar_width);
                 output.write_str(&format!("\r\x1b[2K{line}\n"));
             } else if finished_success && purge_milestones.should_log(100, total_purge as u64) {
