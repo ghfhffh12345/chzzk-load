@@ -58,3 +58,26 @@ We establish container-aware **Concat Demuxer Timestamp Normalization** across b
 - Locally consolidated MP4 files feature a centralized `moov` atom seek table (`+faststart`) for instant seeking in VLC, QuickTime, and Windows Media Player.
 - Remote consolidation retains zero local disk usage and bounded $O(1)$ RAM consumption while gaining the exact same stitching fidelity as local mode.
 - RAII guards (`ConcatScriptGuard`, `EphemeralLoopbackServer`) guarantee zero resource leakage under all execution paths (success, error, panic, or cancellation).
+
+## Addendum: Demuxer Hardening, Bitstream Filtering, and Manifest Sanitization
+
+Following field verification and edge-case integration hardening across Windows, Linux, and synthetic stream fixtures (Tickets #65 and #66), ADR 0010 is augmented with the following invariants:
+
+1. **Removal of Redundant `+genpts` Input Flag**:
+   - Initial designs considered `-fflags +genpts` to synthesize missing timestamps. However, when remuxing fragmented MPEG-TS streams containing B-frames via FFmpeg's concat demuxer, `+genpts` attempts to reconstruct PTS directly from DTS, which can invert Presentation Timestamps relative to Decoding Timestamps ($PTS < DTS$) and destabilize container timelines.
+   - The concat demuxer natively parses and preserves existing MPEG-TS PTS and DTS. Demuxer input flags are therefore simplified to `-fflags +discardcorrupt`, eliminating `+genpts`.
+
+2. **Explicit Single-Stream Mapping (`-map 0:v:0 -map 0:a:0?`)**:
+   - FFmpeg's default stream selection heuristics dynamically pick the highest quality streams or attempt to map all ancillary tracks (e.g., timed metadata, secondary audio tracks, or teletext). If any segment in a stream session contains unexpected metadata streams or if audio tracks vary across segments, default mapping can cause stream configuration mismatches or fail the remux.
+   - We enforce explicit stream isolation via `-map 0:v:0 -map 0:a:0?`. This guarantees that only the primary video track and an optional first audio track are mapped into the output MP4 container. Audio is marked optional (`?`) so that video-only broadcasts consolidate cleanly without failing due to missing audio streams.
+
+3. **Bitstream Filter Monotonic DTS Reconciliation (`setts`)**:
+   - Chzzk live HLS broadcasts occasionally exhibit micro-discontinuities across chunk boundaries, resulting in duplicate packets or identical consecutive Decoding Timestamps (e.g., $DTS_N = DTS_{N-1} = 8906$). When remuxing with stream copy (`-c copy`) into an MP4 container, FFmpeg's MP4 muxer strictly rejects non-monotonic DTS progressions, throwing `Non-monotonic DTS in output stream 0:0; previous: X, current: Y`.
+   - To resolve DTS collisions while strictly preserving B-frame display order without video transcoding:
+     - **Video**: Apply `-bsf:v "setts=dts=if(eq(N\,0)\,DTS\,max(DTS\,PREV_OUTDTS+1))"`. This ensures Decoding Timestamps strictly advance ($DTS_{out} = \max(DTS, PREV\_OUTDTS + 1)$ for $N > 0$) while leaving PTS untouched, guaranteeing that $PTS \ge DTS$ remains valid for B-frames.
+     - **Audio**: Apply `-bsf:a "aac_adtstoasc,setts=dts=if(eq(N\,0)\,DTS\,max(DTS\,PREV_OUTDTS+1)):pts=if(eq(N\,0)\,PTS\,max(PTS\,PREV_OUTPTS+1))"`. This converts ADTS headers to MPEG-4 AudioSpecificConfig (ASC) bitstream format required by the MP4 container and enforces strictly monotonic progression for both DTS and PTS ($PTS_{out} = \max(PTS, PREV\_OUTPTS + 1)$), as AAC audio frames lack B-frame reordering ($DTS = PTS$).
+
+4. **Concat Manifest Path Canonicalization and Windows `\\?\` UNC Prefix Stripping**:
+   - On Windows, canonicalizing file paths via `std::fs::canonicalize` prepends the verbatim extended-length prefix `\\?\` (e.g., `\\?\C:\recordings\...`) or `\\?\UNC\` (for network shares). FFmpeg's concat demuxer parser fails to recognize Windows verbatim `\\?\` prefixes inside manifest `file '...'` entries, throwing fatal `Impossible to open '\\?\...'` demuxer errors.
+   - In local consolidation, recording directory paths are canonicalized upfront to guarantee absolute path resolution regardless of relative working directories.
+   - When generating concat manifest entries (`escape_concat_path`), any `\\?\UNC\` prefix is converted into standard network share forward-slash syntax (`//server/share...`), any `\\?\` prefix is stripped (yielding `C:/path...`), backslashes (`\`) are normalized to forward slashes (`/`), and single quotes (`'`) are escaped as `'\''`. This guarantees universal cross-platform compatibility across Windows drive letters, UNC shares, and POSIX filesystems.

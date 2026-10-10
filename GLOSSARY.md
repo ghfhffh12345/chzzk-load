@@ -61,7 +61,7 @@ The batch post-processing task that losslessly merges and remuxes fragmented vid
 _Avoid_: Cloud merge, remote stitch, post-processing script
 
 **Timestamp Normalization**:
-The batch timeline reconciliation process in Post-Recording Consolidation that resets container start offsets to zero and linearly aligns Presentation Timestamps (PTS) and Decoding Timestamps (DTS) across fragmented chunk boundaries to prevent audio/video desync and playback freezes without video re-encoding.
+The batch timeline reconciliation process in Post-Recording Consolidation that resets container start offsets to zero, linearly aligns Presentation Timestamps (PTS), and enforces packet-level strictly monotonic Decoding Timestamp (DTS) progression and duplicate packet suppression across fragmented chunk boundaries to prevent audio/video desync, playback freezes, and non-monotonic timestamp remux errors without video re-encoding.
 _Avoid_: Timestamp reset, clock sync, re-mux timing, timeline patch
 
 **Staged Remote Part**:
