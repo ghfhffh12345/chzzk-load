@@ -6,11 +6,11 @@ cargo fmt --check
 RUSTFLAGS="-D warnings" cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 # Pre-build fast unit test binaries to isolate test execution time from compiler linking latency
-cargo test --no-run --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state
+cargo test --no-run --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state --test test_consolidation_progress
 
 # Enforce fast unit test tier execution budget (< 3s total runtime)
 START_TIME=$(date +%s)
-cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state
+cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state --test test_consolidation_progress
 END_TIME=$(date +%s)
 
 ELAPSED=$((END_TIME - START_TIME))

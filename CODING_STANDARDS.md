@@ -50,6 +50,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Zero Terminal Pollution**: Never use `println!`, `eprintln!`, or unredirected subprocess outputs in the engine, recorder, or uploader layers.
 - **Non-Blocking Telemetry**: Telemetry sent to the TUI must use bounded channels with `try_send` or non-blocking forwarders; recording and WebSocket loops must never block on terminal rendering.
 - **Typed Semantic Outcomes**: Use typed enums (`FfmpegExit::Clean`, `FfmpegExit::Killed`, `RestrictionReason`) rather than unstructured error strings for state transitions and logging.
+- **Line Budget Containment for Interactive ANSI Terminal Emitters**: Renderers using cursor-up (`\x1b[1A`) repositioning must ensure visible character width is strictly bounded ($\le \text{cols} - 1$) by computing dynamic suffix budgets and clamping progress bars to prevent line wrapping and cursor desynchronization.
+  - *Hard Violation*: Emitting unconstrained or dynamically sized progress lines without column clamping in multi-line ANSI terminal loops, risking terminal line wrapping and cursor vertical desynchronization.
+  - *Resolution*: Compute dynamic prefix and suffix display budgets, allocate remaining column width ($\text{cols} - \text{prefix} - \text{suffix} - 1$) to progress bars with safe clamping (`available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)`), and clamp or omit bar elements when available width is exhausted.
 
 ---
 
