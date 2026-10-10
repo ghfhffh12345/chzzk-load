@@ -746,121 +746,62 @@ async fn test_terminal_geometry_scenario_error_fallback() {
     );
 }
 
+async fn assert_purge_scenario(
+    terminal_width: Option<u16>,
+    bar_width_override: Option<usize>,
+    expected_bar_width: usize,
+) {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let mut coord = ConsolidationProgressCoordinator::with_output(output, true);
+    if let Some(tw) = terminal_width {
+        coord = coord.with_terminal_width(tw);
+    }
+    if let Some(bw) = bar_width_override {
+        coord = coord.with_bar_width(bw);
+    }
+    let mut session = coord.start_purge(50);
+    let p_tx = session.purge_sender().unwrap();
+    let _ = p_tx.send(PurgeProgressUpdate { chunks_deleted: 25 });
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+    let del: Vec<&str> = rows.into_iter().filter(|l| l.contains("DEL")).collect();
+    assert!(!del.is_empty());
+    let last = del.last().unwrap();
+    assert_eq!(
+        track_width(last),
+        expected_bar_width,
+        "Purge track width mismatch for terminal_width={terminal_width:?}, bar_width_override={bar_width_override:?}"
+    );
+    if let Some(w) = terminal_width {
+        if bar_width_override.is_none() && expected_bar_width > MIN_BAR_WIDTH {
+            assert!(
+                visible_width(last) <= (w as usize).saturating_sub(1),
+                "Purge line on {w}-col terminal ({}) must not exceed {} columns",
+                visible_width(last),
+                w - 1
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_purge_responsive_sizing_scenarios() {
     // 80-column terminal
-    let (output_80, buf_80) = CoordinatorOutput::buffer();
-    let coord_80 =
-        ConsolidationProgressCoordinator::with_output(output_80, true).with_terminal_width(80);
-    let mut session_80 = coord_80.start_purge(25);
-    let p_tx_80 = session_80.purge_sender().unwrap();
-    let _ = p_tx_80.send(PurgeProgressUpdate { chunks_deleted: 10 });
-    session_80.finish(true).await;
-
-    let text_80 = String::from_utf8(buf_80.lock().unwrap().clone()).unwrap();
-    let rows_80 = terminal_rows(&text_80);
-    let del_80: Vec<&str> = rows_80.into_iter().filter(|l| l.contains("DEL")).collect();
-    assert!(!del_80.is_empty());
-    let last_80 = del_80.last().unwrap();
-    assert_eq!(
-        track_width(last_80),
-        MAX_BAR_WIDTH,
-        "Purge on 80-col terminal should render at 40 columns"
-    );
-    assert!(
-        visible_width(last_80) <= 79,
-        "Purge line on 80-col terminal must never exceed 79 columns"
-    );
+    assert_purge_scenario(Some(80), None, MAX_BAR_WIDTH).await;
 
     // 120-column terminal
-    let (output_120, buf_120) = CoordinatorOutput::buffer();
-    let coord_120 =
-        ConsolidationProgressCoordinator::with_output(output_120, true).with_terminal_width(120);
-    let mut session_120 = coord_120.start_purge(100);
-    let p_tx_120 = session_120.purge_sender().unwrap();
-    let _ = p_tx_120.send(PurgeProgressUpdate { chunks_deleted: 50 });
-    session_120.finish(true).await;
-
-    let text_120 = String::from_utf8(buf_120.lock().unwrap().clone()).unwrap();
-    let rows_120 = terminal_rows(&text_120);
-    let del_120: Vec<&str> = rows_120.into_iter().filter(|l| l.contains("DEL")).collect();
-    assert!(!del_120.is_empty());
-    let last_120 = del_120.last().unwrap();
-    assert_eq!(
-        track_width(last_120),
-        MAX_BAR_WIDTH,
-        "Purge on 120-col terminal should render at 40 columns"
-    );
-    assert!(
-        visible_width(last_120) <= 119,
-        "Purge line on 120-col terminal must never exceed 119 columns"
-    );
+    assert_purge_scenario(Some(120), None, MAX_BAR_WIDTH).await;
 
     // Constrained 60-column terminal
-    let (output_60, buf_60) = CoordinatorOutput::buffer();
-    let coord_60 =
-        ConsolidationProgressCoordinator::with_output(output_60, true).with_terminal_width(60);
-    let mut session_60 = coord_60.start_purge(50);
-    let p_tx_60 = session_60.purge_sender().unwrap();
-    let _ = p_tx_60.send(PurgeProgressUpdate { chunks_deleted: 25 });
-    session_60.finish(true).await;
-
-    let text_60 = String::from_utf8(buf_60.lock().unwrap().clone()).unwrap();
-    let rows_60 = terminal_rows(&text_60);
-    let del_60: Vec<&str> = rows_60.into_iter().filter(|l| l.contains("DEL")).collect();
-    assert!(!del_60.is_empty());
-    let last_60 = del_60.last().unwrap();
-    let track_60 = track_width(last_60);
-    // Suffix: " 100% (50/50 chunks deleted)" -> 28 chars.
-    // Available: 60 - (6 + 28 + 1) = 25 cols.
-    assert_eq!(
-        track_60, 25,
-        "Purge track on 60-col terminal should compress to 25 columns"
-    );
-    assert!(
-        visible_width(last_60) <= 59,
-        "Purge line on 60-col terminal ({}) must not exceed 59 columns",
-        visible_width(last_60)
-    );
+    assert_purge_scenario(Some(60), None, 25).await;
 
     // Severely constrained 45-column terminal (hitting 15-col minimum floor)
-    let (output_45, buf_45) = CoordinatorOutput::buffer();
-    let coord_45 =
-        ConsolidationProgressCoordinator::with_output(output_45, true).with_terminal_width(45);
-    let mut session_45 = coord_45.start_purge(50);
-    session_45.finish(true).await;
-
-    let text_45 = String::from_utf8(buf_45.lock().unwrap().clone()).unwrap();
-    let del_45: Vec<&str> = terminal_rows(&text_45)
-        .into_iter()
-        .filter(|l| l.contains("DEL"))
-        .collect();
-    assert!(!del_45.is_empty());
-    assert_eq!(
-        track_width(del_45.last().unwrap()),
-        MIN_BAR_WIDTH,
-        "Purge track on 45-col terminal must clamp to 15-col minimum floor"
-    );
+    assert_purge_scenario(Some(45), None, MIN_BAR_WIDTH).await;
 
     // Fixed override mode (with_bar_width)
-    let (output_fixed, buf_fixed) = CoordinatorOutput::buffer();
-    let coord_fixed = ConsolidationProgressCoordinator::with_output(output_fixed, true)
-        .with_terminal_width(120)
-        .with_bar_width(22);
-    let mut session_fixed = coord_fixed.start_purge(50);
-    session_fixed.finish(true).await;
-
-    let text_fixed = String::from_utf8(buf_fixed.lock().unwrap().clone()).unwrap();
-    let del_fixed: Vec<&str> = terminal_rows(&text_fixed)
-        .into_iter()
-        .filter(|l| l.contains("DEL"))
-        .collect();
-    assert!(!del_fixed.is_empty());
-    assert_eq!(
-        track_width(del_fixed.last().unwrap()),
-        22,
-        "Purge track with with_bar_width(22) must render exactly 22 columns regardless of terminal width"
-    );
+    assert_purge_scenario(Some(120), Some(22), 22).await;
 }
 
 #[tokio::test]

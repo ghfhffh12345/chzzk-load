@@ -526,6 +526,23 @@ impl ConsolidationProgressCoordinator {
         }
     }
 
+    /// Resolves synchronized progress bar width for concurrent video and chat tracks.
+    pub(crate) fn resolve_media_bar_width(
+        &self,
+        video: &VideoProgressSnapshot,
+        chat: &ChatProgressSnapshot,
+        has_video: bool,
+        has_chat: bool,
+    ) -> usize {
+        let max_suffix_len = match (has_video, has_chat) {
+            (true, true) => video.metric_suffix_len().max(chat.metric_suffix_len()),
+            (true, false) => video.metric_suffix_len(),
+            (false, true) => chat.metric_suffix_len(),
+            (false, false) => 0,
+        };
+        self.resolve_bar_width(max_suffix_len)
+    }
+
     pub fn start_media(&self, total_video: usize, total_chat: usize) -> MediaProgressSession {
         self.start_media_with_bytes(total_video, total_chat, 0)
     }
@@ -588,15 +605,12 @@ impl ConsolidationProgressCoordinator {
                     output.write_str(&format!("{}\n", chat_snapshot.format_non_interactive()));
                 }
             } else {
-                let max_suffix_len = match (has_video, has_chat) {
-                    (true, true) => video_snapshot
-                        .metric_suffix_len()
-                        .max(chat_snapshot.metric_suffix_len()),
-                    (true, false) => video_snapshot.metric_suffix_len(),
-                    (false, true) => chat_snapshot.metric_suffix_len(),
-                    (false, false) => 0,
-                };
-                let bar_width = coordinator.resolve_bar_width(max_suffix_len);
+                let bar_width = coordinator.resolve_media_bar_width(
+                    &video_snapshot,
+                    &chat_snapshot,
+                    has_video,
+                    has_chat,
+                );
                 render_interactive_media(
                     &output,
                     &video_snapshot,
@@ -647,15 +661,12 @@ impl ConsolidationProgressCoordinator {
                     }
                     _ = tick_interval.tick() => {
                         if is_tty && dirty {
-                            let max_suffix_len = match (has_video, has_chat) {
-                                (true, true) => {
-                                    video_snapshot.metric_suffix_len().max(chat_snapshot.metric_suffix_len())
-                                }
-                                (true, false) => video_snapshot.metric_suffix_len(),
-                                (false, true) => chat_snapshot.metric_suffix_len(),
-                                (false, false) => 0,
-                            };
-                            let bar_width = coordinator.resolve_bar_width(max_suffix_len);
+                            let bar_width = coordinator.resolve_media_bar_width(
+                                &video_snapshot,
+                                &chat_snapshot,
+                                has_video,
+                                has_chat,
+                            );
                             render_interactive_media(
                                 &output,
                                 &video_snapshot,
@@ -724,15 +735,12 @@ impl ConsolidationProgressCoordinator {
             }
 
             if is_tty {
-                let max_suffix_len = match (has_video, has_chat) {
-                    (true, true) => video_snapshot
-                        .metric_suffix_len()
-                        .max(chat_snapshot.metric_suffix_len()),
-                    (true, false) => video_snapshot.metric_suffix_len(),
-                    (false, true) => chat_snapshot.metric_suffix_len(),
-                    (false, false) => 0,
-                };
-                let bar_width = coordinator.resolve_bar_width(max_suffix_len);
+                let bar_width = coordinator.resolve_media_bar_width(
+                    &video_snapshot,
+                    &chat_snapshot,
+                    has_video,
+                    has_chat,
+                );
                 render_interactive_media(
                     &output,
                     &video_snapshot,
@@ -798,9 +806,7 @@ impl ConsolidationProgressCoordinator {
                     output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
                 }
             } else {
-                let bar_width = coordinator.resolve_bar_width(purge_snapshot.metric_suffix_len());
-                let line = purge_snapshot.format_interactive(bar_width);
-                output.write_str(&format!("\r\x1b[2K{line}"));
+                render_interactive_purge(&output, &coordinator, &purge_snapshot);
                 dirty = false;
             }
 
@@ -821,9 +827,7 @@ impl ConsolidationProgressCoordinator {
                     }
                     _ = tick_interval.tick() => {
                         if is_tty && dirty {
-                            let bar_width = coordinator.resolve_bar_width(purge_snapshot.metric_suffix_len());
-                            let line = purge_snapshot.format_interactive(bar_width);
-                            output.write_str(&format!("\r\x1b[2K{line}"));
+                            render_interactive_purge(&output, &coordinator, &purge_snapshot);
                             dirty = false;
                         } else if !is_tty && purge_milestones.should_log(purge_snapshot.pct(), purge_snapshot.chunks_deleted as u64) {
                             output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
@@ -847,9 +851,8 @@ impl ConsolidationProgressCoordinator {
             }
 
             if is_tty {
-                let bar_width = coordinator.resolve_bar_width(purge_snapshot.metric_suffix_len());
-                let line = purge_snapshot.format_interactive(bar_width);
-                output.write_str(&format!("\r\x1b[2K{line}\n"));
+                render_interactive_purge(&output, &coordinator, &purge_snapshot);
+                output.write_str("\n");
             } else if finished_success && purge_milestones.should_log(100, total_purge as u64) {
                 output.write_str(&format!("{}\n", purge_snapshot.format_non_interactive()));
             }
@@ -892,9 +895,61 @@ fn render_interactive_media(
     }
 }
 
+fn render_interactive_purge(
+    output: &CoordinatorOutput,
+    coordinator: &ConsolidationProgressCoordinator,
+    snapshot: &PurgeProgressSnapshot,
+) {
+    let bar_width = coordinator.resolve_bar_width(snapshot.metric_suffix_len());
+    let line = snapshot.format_interactive(bar_width);
+    output.write_str(&format!("\r\x1b[2K{line}"));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_resolve_media_bar_width() {
+        let coordinator = ConsolidationProgressCoordinator::new(true).with_terminal_width(80);
+        let video = VideoProgressSnapshot {
+            chunks_fed: 5,
+            total_chunks: 10,
+            bytes_fed: 1000,
+            total_bytes: 2000,
+            speed: Some("10x".to_string()),
+        };
+        let chat = ChatProgressSnapshot {
+            chunks_read: 2,
+            total_chunks: 10,
+            total_messages: 50,
+            deduplicated_messages: 5,
+            emitted_messages: 45,
+        };
+
+        // When both video and chat are active, it selects the max suffix length
+        let both_width = coordinator.resolve_media_bar_width(&video, &chat, true, true);
+        let max_len = video.metric_suffix_len().max(chat.metric_suffix_len());
+        assert_eq!(both_width, coordinator.resolve_bar_width(max_len));
+
+        // When only video is active
+        let video_only_width = coordinator.resolve_media_bar_width(&video, &chat, true, false);
+        assert_eq!(
+            video_only_width,
+            coordinator.resolve_bar_width(video.metric_suffix_len())
+        );
+
+        // When only chat is active
+        let chat_only_width = coordinator.resolve_media_bar_width(&video, &chat, false, true);
+        assert_eq!(
+            chat_only_width,
+            coordinator.resolve_bar_width(chat.metric_suffix_len())
+        );
+
+        // When neither is active
+        let neither_width = coordinator.resolve_media_bar_width(&video, &chat, false, false);
+        assert_eq!(neither_width, coordinator.resolve_bar_width(0));
+    }
 
     #[test]
     fn test_format_progress_bar_internal() {
