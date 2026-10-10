@@ -3,9 +3,10 @@ use std::time::{Duration, Instant};
 
 use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::progress::{
-    ChatProgressSnapshot, ChatProgressUpdate, ConsolidationProgressCoordinator, CoordinatorOutput,
-    MilestoneTracker, PurgeProgressSnapshot, PurgeProgressUpdate, VideoProgressSnapshot,
-    VideoProgressUpdate, format_bytes, format_number_with_commas, format_progress_bar,
+    COLOR_BLUE, COLOR_CYAN, COLOR_DIVIDER, COLOR_GREEN, ChatProgressSnapshot, ChatProgressUpdate,
+    ConsolidationProgressCoordinator, CoordinatorOutput, MilestoneTracker, PurgeProgressSnapshot,
+    PurgeProgressUpdate, STYLE_DIM, STYLE_RESET, VideoProgressSnapshot, VideoProgressUpdate,
+    format_bytes, format_interactive_bar, format_number_with_commas, format_progress_bar,
 };
 use chzzk_load::consolidation::{VideoProgressTelemetry, run_consolidation_with_coordinator};
 
@@ -20,6 +21,23 @@ fn test_format_progress_bar() {
     assert_eq!(format_progress_bar(20, 100), "━━━━━━━━━━━━━━━━━━━━");
     assert_eq!(format_progress_bar(20, 120), "━━━━━━━━━━━━━━━━━━━━");
     assert_eq!(format_progress_bar(0, 50), "");
+}
+
+#[test]
+fn test_format_interactive_bar() {
+    assert_eq!(
+        format_interactive_bar(20, 0),
+        format!("{STYLE_RESET}{COLOR_DIVIDER}────────────────────{STYLE_RESET}")
+    );
+    assert_eq!(
+        format_interactive_bar(20, 50),
+        format!("{STYLE_RESET}━━━━━━━━━━{COLOR_DIVIDER}──────────{STYLE_RESET}")
+    );
+    assert_eq!(
+        format_interactive_bar(20, 100),
+        format!("{STYLE_RESET}━━━━━━━━━━━━━━━━━━━━{COLOR_DIVIDER}{STYLE_RESET}")
+    );
+    assert_eq!(format_interactive_bar(0, 50), "");
 }
 
 #[test]
@@ -50,12 +68,16 @@ fn test_video_progress_snapshot_formatting() {
         chunks_fed: 6,
         total_chunks: 10,
         bytes_fed: 126_353_408,
+        total_bytes: 0,
         speed: Some("14.5x".to_string()),
     };
     assert_eq!(snapshot.pct(), 60);
     assert_eq!(
         snapshot.format_interactive(20),
-        "[VID]  ━━━━━━━━━━━━──────── 60% (6/10 chunks, 120.5 MB) 14.5x"
+        format!(
+            "{COLOR_CYAN} VID  {STYLE_RESET}{}{STYLE_DIM} 60% (6/10 chunks, 120.5 MB) 14.5x{STYLE_RESET}",
+            format_interactive_bar(20, 60)
+        )
     );
     assert_eq!(
         snapshot.format_non_interactive(),
@@ -66,16 +88,57 @@ fn test_video_progress_snapshot_formatting() {
         chunks_fed: 2,
         total_chunks: 10,
         bytes_fed: 26_633_830,
+        total_bytes: 0,
         speed: None,
     };
     assert_eq!(snapshot_no_speed.pct(), 20);
     assert_eq!(
         snapshot_no_speed.format_interactive(20),
-        "[VID]  ━━━━──────────────── 20% (2/10 chunks, 25.4 MB)"
+        format!(
+            "{COLOR_CYAN} VID  {STYLE_RESET}{}{STYLE_DIM} 20% (2/10 chunks, 25.4 MB){STYLE_RESET}",
+            format_interactive_bar(20, 20)
+        )
     );
     assert_eq!(
         snapshot_no_speed.format_non_interactive(),
         "[INFO] [VID] Consolidation progress: 20% (2/10 chunks, 25.4 MB)"
+    );
+
+    // Byte-smooth percentage progression matching Cloud Upload parity
+    let snapshot_byte_smooth = VideoProgressSnapshot {
+        chunks_fed: 0,
+        total_chunks: 2,
+        bytes_fed: 25_000_000,
+        total_bytes: 100_000_000,
+        speed: None,
+    };
+    assert_eq!(snapshot_byte_smooth.pct(), 25);
+}
+
+#[test]
+fn test_interactive_progress_bar_cloud_upload_parity() {
+    let snapshot = VideoProgressSnapshot {
+        chunks_fed: 6,
+        total_chunks: 10,
+        bytes_fed: 126_353_408,
+        total_bytes: 0,
+        speed: Some("14.5x".to_string()),
+    };
+    let interactive = snapshot.format_interactive(20);
+    // Unfilled track must be styled with theme::DIVIDER (#53586f -> \x1b[38;2;83;88;111m)
+    assert!(
+        interactive.contains("\x1b[38;2;83;88;111m────────"),
+        "Unfilled track must be styled with theme::DIVIDER to prevent vertical misalignment: {interactive:?}"
+    );
+    // Badge must be styled with theme::CYAN (#699c9a -> \x1b[38;2;105;156;154m)
+    assert!(
+        interactive.contains("\x1b[38;2;105;156;154m VID  \x1b[0m"),
+        "Badge must match Cloud Upload convention with theme::CYAN: {interactive:?}"
+    );
+    // Metrics must be styled with Modifier::DIM (\x1b[2m)
+    assert!(
+        interactive.contains("\x1b[2m 60%"),
+        "Metrics must be styled with DIM modifier: {interactive:?}"
     );
 }
 
@@ -91,7 +154,10 @@ fn test_chat_progress_snapshot_formatting() {
     assert_eq!(snapshot.pct(), 60);
     assert_eq!(
         snapshot.format_interactive(20),
-        "[CHAT] ━━━━━━━━━━━━──────── 60% (6/10 chunks, 12,345 msgs)"
+        format!(
+            "{COLOR_BLUE} CHAT {STYLE_RESET}{}{STYLE_DIM} 60% (6/10 chunks, 12,345 msgs){STYLE_RESET}",
+            format_interactive_bar(20, 60)
+        )
     );
     assert_eq!(
         snapshot.format_non_interactive(),
@@ -108,7 +174,10 @@ fn test_purge_progress_snapshot_formatting() {
     assert_eq!(snapshot.pct(), 100);
     assert_eq!(
         snapshot.format_interactive(20),
-        "[DEL]  ━━━━━━━━━━━━━━━━━━━━ 100% (20/20 chunks deleted)"
+        format!(
+            "{COLOR_GREEN} DEL  {STYLE_RESET}{}{STYLE_DIM} 100% (20/20 chunks deleted){STYLE_RESET}",
+            format_interactive_bar(20, 100)
+        )
     );
     assert_eq!(
         snapshot.format_non_interactive(),
@@ -122,7 +191,10 @@ fn test_purge_progress_snapshot_formatting() {
     assert_eq!(partial.pct(), 20);
     assert_eq!(
         partial.format_interactive(20),
-        "[DEL]  ━━━━──────────────── 20% (4/20 chunks deleted)"
+        format!(
+            "{COLOR_GREEN} DEL  {STYLE_RESET}{}{STYLE_DIM} 20% (4/20 chunks deleted){STYLE_RESET}",
+            format_interactive_bar(20, 20)
+        )
     );
     assert_eq!(
         partial.format_non_interactive(),
@@ -199,6 +271,7 @@ fn test_ansi_suppression_non_interactive() {
         chunks_fed: 6,
         total_chunks: 10,
         bytes_fed: 126_353_408,
+        total_bytes: 0,
         speed: Some("14.5x".to_string()),
     };
     let chat = ChatProgressSnapshot {
@@ -247,8 +320,8 @@ async fn test_coordinator_interactive_dual_media() {
     session.finish(true).await;
 
     let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    assert!(text.contains("[VID]"), "must render [VID] in output");
-    assert!(text.contains("[CHAT]"), "must render [CHAT] in output");
+    assert!(text.contains("VID"), "must render VID in output");
+    assert!(text.contains("CHAT"), "must render CHAT in output");
     assert!(text.contains("100%"), "final render must show 100%");
     assert!(text.contains("━"), "must contain filled bar character ━");
     assert!(
@@ -276,11 +349,8 @@ async fn test_coordinator_interactive_single_media_video_only() {
     session.finish(true).await;
 
     let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    assert!(text.contains("[VID]"), "must render [VID]");
-    assert!(
-        !text.contains("[CHAT]"),
-        "video-only must NOT render [CHAT]"
-    );
+    assert!(text.contains("VID"), "must render VID");
+    assert!(!text.contains("CHAT"), "video-only must NOT render CHAT");
     assert!(
         !text.contains("\x1b[1A"),
         "single-media must not use dual-line cursor up \\x1b[1A"
@@ -307,8 +377,8 @@ async fn test_coordinator_interactive_single_media_chat_only() {
     session.finish(true).await;
 
     let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    assert!(text.contains("[CHAT]"), "must render [CHAT]");
-    assert!(!text.contains("[VID]"), "chat-only must NOT render [VID]");
+    assert!(text.contains("CHAT"), "must render CHAT");
+    assert!(!text.contains("VID"), "chat-only must NOT render VID");
     assert!(
         !text.contains("\x1b[1A"),
         "single-media must not use dual-line cursor up \\x1b[1A"
@@ -369,7 +439,7 @@ async fn test_coordinator_interactive_purge() {
     session.finish(true).await;
 
     let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    assert!(text.contains("[DEL]"), "must render [DEL]");
+    assert!(text.contains("DEL"), "must render DEL");
     assert!(
         text.contains("(20/20 chunks deleted)"),
         "final render must show 20/20"
@@ -458,18 +528,12 @@ async fn test_run_consolidation_with_coordinator_interactive_e2e() {
     assert!(!chat0.exists(), "chat_0000.jsonl must be purged");
 
     let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("VID"), "must render VID in interactive mode");
     assert!(
-        text.contains("[VID]"),
-        "must render [VID] in interactive mode"
+        text.contains("CHAT"),
+        "must render CHAT in interactive mode"
     );
-    assert!(
-        text.contains("[CHAT]"),
-        "must render [CHAT] in interactive mode"
-    );
-    assert!(
-        text.contains("[DEL]"),
-        "must render [DEL] in interactive mode"
-    );
+    assert!(text.contains("DEL"), "must render DEL in interactive mode");
     assert!(
         text.contains('━'),
         "must contain Cloud Upload filled bar character ━"
@@ -477,6 +541,58 @@ async fn test_run_consolidation_with_coordinator_interactive_e2e() {
     assert!(
         text.contains('\x1b'),
         "must contain ANSI escape codes for interactive TTY mode"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_run_consolidation_with_coordinator_interactive_video_only() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    unsafe {
+        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", mock_bin);
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_cons_coord_tty_vidonly_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+
+    let meta = temp_dir.join("metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 4,
+    };
+
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, true);
+
+    let summary = run_consolidation_with_coordinator(args, coordinator)
+        .await
+        .expect("video-only consolidation should succeed");
+
+    assert!(summary.video_result.is_some());
+    assert!(summary.chat_stats.is_none());
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("VID"), "must render VID in interactive mode");
+    assert!(
+        !text.contains("CHAT"),
+        "must NOT render CHAT in video-only session"
+    );
+    assert!(text.contains("DEL"), "must render DEL in interactive mode");
+    assert!(
+        !text.contains("\x1b[1A"),
+        "single-media must not use dual-line cursor up"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -687,7 +803,7 @@ async fn test_remux_progress_telemetry_proportional_chunk_mapping() {
     session.finish(true).await;
 
     let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    assert!(text.contains("[VID]"), "must render [VID]");
+    assert!(text.contains("VID"), "must render VID");
     assert!(text.contains("100%"), "must reach 100%");
     assert!(text.contains("5/5 chunks"), "must show 5/5 chunks");
     assert!(
@@ -719,7 +835,7 @@ async fn test_coordinator_interactive_remux_speed_and_progress_rendering() {
     session.finish(true).await;
 
     let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-    assert!(text.contains("[VID]"), "must render [VID] in output");
+    assert!(text.contains("VID"), "must render VID in output");
     assert!(text.contains("16.8x"), "must display remux speed 16.8x");
     assert!(text.contains("100%"), "final finish must display 100%");
     assert!(

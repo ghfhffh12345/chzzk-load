@@ -274,8 +274,22 @@ pub async fn run_consolidation_with_coordinator(
     let has_video = !manifest.video_chunks.is_empty();
     let has_chat = !manifest.chat_chunks.is_empty();
 
-    let mut media_session =
-        coordinator.start_media(manifest.video_chunks.len(), manifest.chat_chunks.len());
+    if has_video && !has_chat {
+        eprintln!(
+            "[INFO] No chat chunks found; skipping chat consolidation pipeline (video-only session)"
+        );
+    } else if !has_video && has_chat {
+        eprintln!(
+            "[INFO] No video chunks found; skipping video consolidation pipeline (chat-only session)"
+        );
+    }
+
+    let total_video_bytes: u64 = manifest.video_chunks.iter().map(|c| c.size).sum();
+    let mut media_session = coordinator.start_media_with_bytes(
+        manifest.video_chunks.len(),
+        manifest.chat_chunks.len(),
+        total_video_bytes,
+    );
     let mut video_options = VideoConsolidationOptions::default();
     if let Some(v_tx) = media_session.video_sender() {
         video_options = video_options.with_progress_sender(v_tx);
@@ -354,9 +368,6 @@ pub async fn run_consolidation_with_coordinator(
             }
         }
     } else if has_video {
-        eprintln!(
-            "[INFO] No chat chunks found; skipping chat consolidation pipeline (video-only session)"
-        );
         let v_res = match consolidate_video(
             &manifest.target,
             &manifest.video_chunks,
@@ -382,9 +393,6 @@ pub async fn run_consolidation_with_coordinator(
         };
         (Some(v_res), None)
     } else if has_chat {
-        eprintln!(
-            "[INFO] No video chunks found; skipping video consolidation pipeline (chat-only session)"
-        );
         let c_res = match chat::consolidate_chat_with_progress(
             &manifest.target,
             &manifest.chat_chunks,

@@ -6,7 +6,14 @@ use tokio::sync::{mpsc, oneshot};
 
 pub(crate) const DEFAULT_BAR_WIDTH: usize = 20;
 
-/// Formats a progress bar matching the Cloud Upload visual language:
+pub const COLOR_DIVIDER: &str = "\x1b[38;2;83;88;111m"; // #53586f (theme::DIVIDER)
+pub const COLOR_GREEN: &str = "\x1b[38;2;131;162;117m"; // #83a275 (theme::GREEN)
+pub const COLOR_CYAN: &str = "\x1b[38;2;105;156;154m"; // #699c9a (theme::CYAN)
+pub const COLOR_BLUE: &str = "\x1b[38;2;112;135;188m"; // #7087bc (theme::BLUE)
+pub const STYLE_DIM: &str = "\x1b[2m";
+pub const STYLE_RESET: &str = "\x1b[0m";
+
+/// Formats a plain, unstyled progress bar matching the Cloud Upload glyph language:
 /// `━` (Unicode \u{2501}, filled) and `─` (Unicode \u{2500}, unfilled).
 #[doc(hidden)]
 pub fn format_progress_bar(width: usize, pct: u16) -> String {
@@ -17,6 +24,25 @@ pub fn format_progress_bar(width: usize, pct: u16) -> String {
     let filled = ((pct as usize * width) / 100).min(width);
     let unfilled = width.saturating_sub(filled);
     format!("{}{}", "━".repeat(filled), "─".repeat(unfilled))
+}
+
+/// Formats an interactive progress bar styled with TrueColor ANSI escapes matching
+/// the TUI Cloud Upload visual language:
+/// `━` (Unicode \u{2501}, filled) in standard foreground and `─` (Unicode \u{2500}, unfilled)
+/// styled with `theme::DIVIDER` (`#53586f`).
+#[doc(hidden)]
+pub fn format_interactive_bar(width: usize, pct: u16) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let pct = pct.min(100);
+    let filled = ((pct as usize * width) / 100).min(width);
+    let unfilled = width.saturating_sub(filled);
+    format!(
+        "{STYLE_RESET}{}{COLOR_DIVIDER}{}{STYLE_RESET}",
+        "━".repeat(filled),
+        "─".repeat(unfilled)
+    )
 }
 
 /// Formats byte quantities into human-readable strings with binary (1024-based) units.
@@ -54,30 +80,35 @@ pub struct VideoProgressSnapshot {
     pub chunks_fed: usize,
     pub total_chunks: usize,
     pub bytes_fed: u64,
+    pub total_bytes: u64,
     pub speed: Option<String>,
 }
 
 impl VideoProgressSnapshot {
     pub fn pct(&self) -> u16 {
-        if self.total_chunks == 0 {
-            100
-        } else {
+        if self.total_bytes > 0 {
+            ((self.bytes_fed as f64 / self.total_bytes as f64) * 100.0)
+                .round()
+                .min(100.0) as u16
+        } else if self.total_chunks > 0 {
             ((self.chunks_fed as f64 / self.total_chunks as f64) * 100.0)
                 .round()
                 .min(100.0) as u16
+        } else {
+            100
         }
     }
 
     pub fn format_interactive(&self, bar_width: usize) -> String {
         let pct = self.pct();
-        let bar = format_progress_bar(bar_width, pct);
+        let bar = format_interactive_bar(bar_width, pct);
         let bytes_str = format_bytes(self.bytes_fed);
         let speed_suffix = match &self.speed {
             Some(s) if !s.trim().is_empty() => format!(" {s}"),
             _ => String::new(),
         };
         format!(
-            "[VID]  {bar} {pct}% ({}/{total} chunks, {bytes_str}){speed_suffix}",
+            "{COLOR_CYAN} VID  {STYLE_RESET}{bar}{STYLE_DIM} {pct}% ({}/{total} chunks, {bytes_str}){speed_suffix}{STYLE_RESET}",
             self.chunks_fed,
             total = self.total_chunks
         )
@@ -121,10 +152,10 @@ impl ChatProgressSnapshot {
 
     pub fn format_interactive(&self, bar_width: usize) -> String {
         let pct = self.pct();
-        let bar = format_progress_bar(bar_width, pct);
+        let bar = format_interactive_bar(bar_width, pct);
         let msgs_str = format_number_with_commas(self.emitted_messages);
         format!(
-            "[CHAT] {bar} {pct}% ({}/{total} chunks, {msgs_str} msgs)",
+            "{COLOR_BLUE} CHAT {STYLE_RESET}{bar}{STYLE_DIM} {pct}% ({}/{total} chunks, {msgs_str} msgs){STYLE_RESET}",
             self.chunks_read,
             total = self.total_chunks
         )
@@ -161,9 +192,9 @@ impl PurgeProgressSnapshot {
 
     pub fn format_interactive(&self, bar_width: usize) -> String {
         let pct = self.pct();
-        let bar = format_progress_bar(bar_width, pct);
+        let bar = format_interactive_bar(bar_width, pct);
         format!(
-            "[DEL]  {bar} {pct}% ({}/{total} chunks deleted)",
+            "{COLOR_GREEN} DEL  {STYLE_RESET}{bar}{STYLE_DIM} {pct}% ({}/{total} chunks deleted){STYLE_RESET}",
             self.chunks_deleted,
             total = self.total_chunks
         )
@@ -396,6 +427,15 @@ impl ConsolidationProgressCoordinator {
     }
 
     pub fn start_media(&self, total_video: usize, total_chat: usize) -> MediaProgressSession {
+        self.start_media_with_bytes(total_video, total_chat, 0)
+    }
+
+    pub fn start_media_with_bytes(
+        &self,
+        total_video: usize,
+        total_chat: usize,
+        total_video_bytes: u64,
+    ) -> MediaProgressSession {
         let has_video = total_video > 0;
         let has_chat = total_chat > 0;
 
@@ -421,6 +461,7 @@ impl ConsolidationProgressCoordinator {
                 chunks_fed: 0,
                 total_chunks: total_video,
                 bytes_fed: 0,
+                total_bytes: total_video_bytes,
                 speed: None,
             };
             let mut chat_snapshot = ChatProgressSnapshot {
@@ -555,6 +596,9 @@ impl ConsolidationProgressCoordinator {
             if finished_success {
                 if has_video {
                     video_snapshot.chunks_fed = total_video;
+                    if total_video_bytes > 0 {
+                        video_snapshot.bytes_fed = total_video_bytes;
+                    }
                 }
                 if has_chat {
                     chat_snapshot.chunks_read = total_chat;
