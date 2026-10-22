@@ -57,8 +57,12 @@ The invariant enforced exclusively by `SessionCustodian` requiring a session fol
 _Avoid_: Empty check, heuristic delete, metadata purge
 
 **Post-Recording Consolidation**:
-The batch post-processing task that losslessly merges and remuxes fragmented video chunks (`.ts` to `.mp4`) and deduplicates chat logs (`.jsonl`) entirely over network pipes or local files with a strictly bounded memory footprint, circumventing local disk staging.
-_Avoid_: Cloud merge, remote stitch, post-processing script
+The batch post-processing task that losslessly merges and remuxes fragmented video chunks (`.ts` to `.mp4`) and deduplicates chat logs (`.jsonl`) into normalized, seekable containers with a strictly bounded 1× local disk footprint before cloud synchronization.
+_Avoid_: Cloud merge, remote stitch, post-processing script, legacy streaming pipeline
+
+**Staged Local Consolidation Target**:
+The temporary local files (`consolidated.mp4.part`, `consolidated.jsonl.part`) where normalized seekable media is assembled with a bounded 1× disk footprint prior to cloud upload.
+_Avoid_: Temp file, intermediate cache, scratch chunk
 
 **Timestamp Normalization**:
 The batch timeline reconciliation process in Post-Recording Consolidation that resets container start offsets to zero, linearly aligns Presentation Timestamps (PTS), and enforces packet-level strictly monotonic Decoding Timestamp (DTS) progression and duplicate packet suppression across fragmented chunk boundaries to prevent audio/video desync, playback freezes, and non-monotonic timestamp remux errors without video re-encoding.

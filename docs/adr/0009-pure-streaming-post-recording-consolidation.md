@@ -1,6 +1,6 @@
 # 0009 - Pure-Streaming Post-Recording Consolidation
 
-**Status**: Accepted
+**Status**: Superseded by ADR 0011
 
 Following a recording session, stream archives in remote storage exist as hundreds of fragmented video chunks (`chunk_%04d.ts`) and chat fragments (`chat_%04d.jsonl`). Merging these fragments on low-resource environments (e.g., 512MB/1GB VPS instances) without exhausting local disk capacity or memory requires a specialized consolidation pipeline.
 

@@ -1,6 +1,6 @@
 # 0010 - Concat Demuxer Timestamp Normalization for Post-Recording Consolidation
 
-**Status**: Accepted
+**Status**: Partially superseded by ADR 0011 (streaming output replaced by locally-staged seekable output)
 
 Following a recording session, stream archives consist of fragmented video chunks (`chunk_%04d.ts`) and chat fragments (`chat_%04d.jsonl`). Under ADR 0009, post-recording consolidation (`chzzk-load consolidate <path>`) merged video chunks by sequentially streaming raw byte streams of consecutive MPEG-TS files into FFmpeg's `stdin` (`pipe:0`) and losslessly remuxing to MP4.
 
