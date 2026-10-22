@@ -2,7 +2,14 @@ pub mod chat;
 pub mod loopback;
 pub mod manifest;
 pub mod progress;
+pub mod staging;
 pub mod video;
+
+pub use staging::{
+    STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes, compute_target_hash,
+    resolve_staging_dir, staging_folder_name, verify_staging_capacity,
+    verify_staging_capacity_with_space,
+};
 
 pub use loopback::{
     DEFAULT_LOOPBACK_STARTUP_TIMEOUT, EphemeralLoopbackServer, parse_loopback_port,
@@ -285,6 +292,13 @@ pub async fn run_consolidation_with_coordinator(
     }
 
     let total_video_bytes: u64 = manifest.video_chunks.iter().map(|c| c.size).sum();
+
+    // Pre-flight disk capacity verification for remote recordings
+    if manifest.target.is_remote() {
+        let staging_dir = resolve_staging_dir(&manifest.target, args.temp_dir.as_deref());
+        verify_staging_capacity(&staging_dir, total_video_bytes)?;
+    }
+
     let mut media_session = coordinator.start_media_with_bytes(
         manifest.video_chunks.len(),
         manifest.chat_chunks.len(),

@@ -1223,6 +1223,7 @@ async fn test_run_consolidation_with_coordinator_interactive_e2e() {
         overwrite: false,
         strict: false,
         delete_concurrency: 4,
+        temp_dir: None,
     };
 
     let (output, buf) = CoordinatorOutput::buffer();
@@ -1285,6 +1286,7 @@ async fn test_run_consolidation_with_coordinator_interactive_video_only() {
         overwrite: false,
         strict: false,
         delete_concurrency: 4,
+        temp_dir: None,
     };
 
     let (output, buf) = CoordinatorOutput::buffer();
@@ -1342,6 +1344,7 @@ async fn test_run_consolidation_with_coordinator_non_interactive_e2e() {
         overwrite: false,
         strict: false,
         delete_concurrency: 4,
+        temp_dir: None,
     };
 
     let (output, buf) = CoordinatorOutput::buffer();

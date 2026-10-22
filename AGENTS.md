@@ -48,6 +48,7 @@ cargo build --release
   - `src/consolidation/video.rs`: Concat demuxer remuxing and FFmpeg telemetry monitor.
   - `src/consolidation/chat.rs`: Streaming deduplication and part-file staging.
   - `src/consolidation/manifest.rs`: Chunk gap discovery and validation.
+  - `src/consolidation/staging.rs`: Staging workspace path resolution and pre-flight capacity verification.
   - `src/consolidation/loopback.rs`: Ephemeral read-only HTTP loopback server for remote remuxing.
 
 ### 2.2. Live Chat Archiving (`src/chzzk/chat.rs`, `src/recorder/chat_writer.rs`)

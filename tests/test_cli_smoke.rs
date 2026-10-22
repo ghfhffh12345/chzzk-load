@@ -336,6 +336,7 @@ fn test_cli_consolidate_subcommand_parsing() {
             overwrite: false,
             strict: false,
             delete_concurrency: 16,
+            temp_dir: None,
         }))
     );
 
@@ -349,6 +350,8 @@ fn test_cli_consolidate_subcommand_parsing() {
         "--strict",
         "--delete-concurrency",
         "8",
+        "--temp-dir",
+        "/mnt/staging",
     ])
     .expect("Parsing consolidate command with all flags should succeed");
     assert_eq!(
@@ -359,10 +362,32 @@ fn test_cli_consolidate_subcommand_parsing() {
             overwrite: true,
             strict: true,
             delete_concurrency: 8,
+            temp_dir: Some(std::path::PathBuf::from("/mnt/staging")),
         }))
     );
 
-    // 3. Binary smoke --help contains consolidate subcommand
+    // 3. Custom --temp-dir flag alone
+    let cli_temp = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/my_stream",
+        "--temp-dir",
+        "/custom/staging",
+    ])
+    .expect("Parsing consolidate command with --temp-dir should succeed");
+    assert_eq!(
+        cli_temp.command,
+        Some(Commands::Consolidate(ConsolidateArgs {
+            path: "recordings/my_stream".to_string(),
+            keep_original: false,
+            overwrite: false,
+            strict: false,
+            delete_concurrency: 16,
+            temp_dir: Some(std::path::PathBuf::from("/custom/staging")),
+        }))
+    );
+
+    // 4. Binary smoke --help contains consolidate subcommand
     let bin_path = env!("CARGO_BIN_EXE_chzzk-load");
     let output = Command::new(bin_path)
         .arg("--help")
@@ -397,6 +422,10 @@ fn test_cli_consolidate_subcommand_parsing() {
     assert!(
         sub_stdout.contains("--delete-concurrency"),
         "Subcommand help must contain --delete-concurrency: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--temp-dir"),
+        "Subcommand help must contain --temp-dir: {sub_stdout}"
     );
 }
 
@@ -462,6 +491,7 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
             overwrite: false,
             strict: false,
             delete_concurrency: 16,
+            temp_dir: None,
         }))
     );
 
@@ -477,6 +507,7 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
             overwrite: false,
             strict: false,
             delete_concurrency: 16,
+            temp_dir: None,
         }))
     );
 }

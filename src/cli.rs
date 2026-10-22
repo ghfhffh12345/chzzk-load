@@ -61,6 +61,13 @@ pub struct ConsolidateArgs {
         help = "Maximum concurrent deletion tasks when purging original chunks"
     )]
     pub delete_concurrency: usize,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Custom staging directory for temporary consolidation files (defaults to system temp)"
+    )]
+    pub temp_dir: Option<PathBuf>,
 }
 
 fn parse_delete_concurrency(s: &str) -> Result<usize, String> {
