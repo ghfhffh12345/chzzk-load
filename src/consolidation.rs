@@ -46,7 +46,8 @@ pub use video::{
     spawn_stderr_telemetry_monitor,
 };
 
-use crate::cli::ConsolidateArgs;
+/// Re-exported CLI argument model for consolidation operations. Defined in [`crate::cli::ConsolidateArgs`].
+pub use crate::cli::ConsolidateArgs;
 use crate::uploader::{parse_rclone_log_line, unlink_local_file_with_retry};
 use anyhow::Context;
 use tokio::io::AsyncBufReadExt;
@@ -1253,5 +1254,20 @@ consolidate_extra_args = ["--low-level-retries", "10"]
 
         // Cleanup
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_consolidate_args_reexport() {
+        let args = super::ConsolidateArgs {
+            path: "remote:bucket/stream".to_string(),
+            keep_original: false,
+            overwrite: true,
+            strict: false,
+            delete_concurrency: 16,
+            temp_dir: None,
+            config: None,
+        };
+        assert_eq!(args.path, "remote:bucket/stream");
+        assert_eq!(args.delete_concurrency, 16);
     }
 }
