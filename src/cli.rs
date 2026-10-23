@@ -65,6 +65,14 @@ pub struct ConsolidateArgs {
         help = "Custom staging directory for temporary consolidation files (defaults to system temp)"
     )]
     pub temp_dir: Option<PathBuf>,
+
+    #[arg(
+        short,
+        long,
+        value_name = "PATH",
+        help = "Path to dedicated settings.toml file"
+    )]
+    pub config: Option<PathBuf>,
 }
 
 fn parse_delete_concurrency(s: &str) -> Result<usize, String> {

@@ -81,6 +81,7 @@ async fn test_graceful_shutdown_cleans_session_folder_with_metadata_and_last_chu
         upload_concurrency: 1,
         rclone_bin: "rclone".to_string(),
         extra_args: vec!["--retries=1".to_string()],
+        consolidate_extra_args: vec![],
         skip_connection_check: true,
     };
     let rclone_backend = Arc::new(chzzk_load::uploader::RcloneBackend::new(rclone_config));
@@ -323,6 +324,7 @@ async fn test_real_ffmpeg_shutdown_cleanup() {
         upload_concurrency: 1,
         rclone_bin: "rclone".to_string(),
         extra_args: vec!["--retries=1".to_string()],
+        consolidate_extra_args: vec![],
         skip_connection_check: true,
     };
     let rclone_backend = Arc::new(chzzk_load::uploader::RcloneBackend::new(rclone_config));
@@ -418,6 +420,7 @@ async fn test_upload_and_unlink_with_transient_file_lock() {
         upload_concurrency: 1,
         rclone_bin: "rclone".to_string(),
         extra_args: vec!["--retries=1".to_string()],
+        consolidate_extra_args: vec![],
         skip_connection_check: true,
     };
     let backend = chzzk_load::uploader::RcloneBackend::new(rclone_config);
@@ -486,6 +489,7 @@ async fn test_live_chzzk_shutdown_cleanup() {
         upload_concurrency: 3,
         rclone_bin: "rclone".to_string(),
         extra_args: vec![],
+        consolidate_extra_args: vec![],
         skip_connection_check: true,
     };
     let rclone_backend = Arc::new(chzzk_load::uploader::RcloneBackend::new(rclone_config));

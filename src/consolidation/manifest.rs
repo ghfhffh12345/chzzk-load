@@ -337,8 +337,11 @@ pub fn parse_rclone_lsjson(json_bytes: &[u8]) -> anyhow::Result<Vec<RawManifestE
 }
 
 /// Resolves the rclone binary to execute:
-/// override_bin > `CHZZK_LOAD_RCLONE_BIN` env var > `"rclone"`.
-pub fn resolve_rclone_bin(override_bin: Option<&str>) -> String {
+/// override_bin > `CHZZK_LOAD_RCLONE_BIN` env var > config_bin > `"rclone"`.
+pub fn resolve_rclone_bin_with_config(
+    override_bin: Option<&str>,
+    config_bin: Option<&str>,
+) -> String {
     if let Some(bin) = override_bin {
         if !bin.trim().is_empty() {
             return bin.to_string();
@@ -350,7 +353,18 @@ pub fn resolve_rclone_bin(override_bin: Option<&str>) -> String {
     {
         return bin;
     }
+    if let Some(bin) = config_bin {
+        if !bin.trim().is_empty() {
+            return bin.to_string();
+        }
+    }
     "rclone".to_string()
+}
+
+/// Resolves the rclone binary to execute:
+/// override_bin > `CHZZK_LOAD_RCLONE_BIN` env var > `"rclone"`.
+pub fn resolve_rclone_bin(override_bin: Option<&str>) -> String {
+    resolve_rclone_bin_with_config(override_bin, None)
 }
 
 /// Discovers the manifest for a remote target via `rclone lsjson`.

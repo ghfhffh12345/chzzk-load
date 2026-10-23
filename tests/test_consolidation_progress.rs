@@ -1224,6 +1224,7 @@ async fn test_run_consolidation_with_coordinator_interactive_e2e() {
         strict: false,
         delete_concurrency: 4,
         temp_dir: None,
+        config: None,
     };
 
     let (output, buf) = CoordinatorOutput::buffer();
@@ -1287,6 +1288,7 @@ async fn test_run_consolidation_with_coordinator_interactive_video_only() {
         strict: false,
         delete_concurrency: 4,
         temp_dir: None,
+        config: None,
     };
 
     let (output, buf) = CoordinatorOutput::buffer();
@@ -1345,6 +1347,7 @@ async fn test_run_consolidation_with_coordinator_non_interactive_e2e() {
         strict: false,
         delete_concurrency: 4,
         temp_dir: None,
+        config: None,
     };
 
     let (output, buf) = CoordinatorOutput::buffer();

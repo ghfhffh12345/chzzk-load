@@ -6,7 +6,10 @@ use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 use common::mock_rclone::get_mock_rclone_bin;
 
 use chzzk_load::cli::ConsolidateArgs;
-use chzzk_load::consolidation::{run_consolidation, upload_remote_staged_file};
+use chzzk_load::consolidation::{
+    build_remote_staged_upload_command, run_consolidation, upload_remote_staged_file,
+    upload_remote_staged_file_with_args,
+};
 
 fn create_temp_test_dir(prefix: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}_{}", rand::random::<u32>()));
@@ -108,6 +111,7 @@ async fn test_remote_consolidation_complete_pipeline_loopback_upload_and_purge()
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let summary = run_consolidation(args)
@@ -182,6 +186,7 @@ async fn test_remote_consolidation_keep_original_retains_chunks_and_cleans_stagi
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let summary = run_consolidation(args)
@@ -244,6 +249,7 @@ async fn test_remote_consolidation_dual_pipeline_failure_preserves_remote_chunks
         strict: true,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let res = run_consolidation(args).await;
@@ -295,6 +301,7 @@ async fn test_remote_consolidation_upload_failure_cleans_up_remote_part_and_pres
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let res = run_consolidation(args).await;
@@ -379,6 +386,7 @@ async fn test_remote_consolidation_resume_upload_bypasses_ffmpeg_on_valid_stagin
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let summary = run_consolidation(args)
@@ -452,6 +460,7 @@ async fn test_remote_consolidation_overwrite_forces_clean_remux() {
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let res = run_consolidation(args).await;
@@ -513,6 +522,7 @@ async fn test_remote_consolidation_upload_failure_then_resume_without_ffmpeg_end
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let res1 = run_consolidation(args1).await;
@@ -562,6 +572,7 @@ async fn test_remote_consolidation_upload_failure_then_resume_without_ffmpeg_end
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let summary2 = run_consolidation(args2)
@@ -635,6 +646,7 @@ async fn test_remote_consolidation_upload_cancellation_preserves_local_files() {
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
+        config: None,
     };
 
     let handle = tokio::spawn(async move { run_consolidation(args).await });
@@ -662,5 +674,218 @@ async fn test_remote_consolidation_upload_cancellation_preserves_local_files() {
     assert!(
         local_jsonl.exists(),
         "Local chat.jsonl must be preserved upon upload cancellation"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_staged_upload_high_throughput_args_and_custom_extra_args() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let mock_rclone = get_mock_rclone_bin();
+    let temp_dir = create_temp_test_dir("test_upload_staged_args");
+    let local_file = temp_dir.join("local.txt");
+    let remote_dest_file = temp_dir.join("remote.txt");
+
+    fs::write(&local_file, b"sample high throughput payload").unwrap();
+
+    let remote_dest = format!(
+        "mock_remote:{}",
+        remote_dest_file.to_string_lossy().replace('\\', "/")
+    );
+
+    let extra_args = vec![
+        "--low-level-retries".to_string(),
+        "10".to_string(),
+        "--fast-list".to_string(),
+    ];
+
+    // 1. Verify command construction via public Command builder
+    let cmd = build_remote_staged_upload_command(
+        mock_rclone.to_str().unwrap(),
+        &local_file,
+        &remote_dest,
+        &extra_args,
+    );
+    let std_cmd = cmd.as_std();
+    let args: Vec<String> = std_cmd
+        .get_args()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+
+    assert_eq!(args[0], "copyto");
+    assert_eq!(args[1], local_file.to_string_lossy().to_string());
+    assert_eq!(args[2], remote_dest);
+    assert!(args.contains(&"--drive-chunk-size".to_string()));
+    assert!(args.contains(&"128M".to_string()));
+    assert!(args.contains(&"--s3-chunk-size".to_string()));
+    assert!(args.contains(&"64M".to_string()));
+    assert!(args.contains(&"--s3-upload-concurrency".to_string()));
+    assert!(args.contains(&"4".to_string()));
+    assert!(args.contains(&"--buffer-size".to_string()));
+    assert!(args.contains(&"64M".to_string()));
+    assert!(args.contains(&"--multi-thread-streams".to_string()));
+    assert!(args.contains(&"4".to_string()));
+    assert!(args.contains(&"--multi-thread-cutoff".to_string()));
+    assert!(args.contains(&"250M".to_string()));
+    assert!(args.contains(&"--low-level-retries".to_string()));
+    assert!(args.contains(&"10".to_string()));
+    assert!(args.contains(&"--fast-list".to_string()));
+
+    // 2. Verify domain execution with mock rclone
+    let res = upload_remote_staged_file_with_args(
+        mock_rclone.to_str().unwrap(),
+        &local_file,
+        &remote_dest,
+        &extra_args,
+    )
+    .await;
+
+    assert!(res.is_ok(), "Upload should succeed: {:?}", res.err());
+    assert_eq!(
+        fs::read_to_string(&remote_dest_file).unwrap(),
+        "sample high throughput payload"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_with_custom_config_file_and_extra_args() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_cfg");
+    let staging_parent = create_temp_test_dir("test_remote_cons_cfg_staging");
+    let config_dir = create_temp_test_dir("test_remote_cons_cfg_dir");
+
+    // Create remote chunks
+    let chunk0 = remote_dir.join("chunk_0000.ts");
+    let chat0 = remote_dir.join("chat_0000.jsonl");
+    let meta = remote_dir.join("metadata.jsonl");
+
+    fs::write(&chunk0, b"mock_video_chunk_cfg").unwrap();
+    let line1 = make_chat_line(10_000, "user1", "msg1");
+    fs::write(&chat0, format!("{line1}\n")).unwrap();
+    fs::write(&meta, r#"{"type":"SESSION_START","stream_offset_ms":0}"#).unwrap();
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    // Create custom settings.toml file specifying consolidate_extra_args
+    let config_file = config_dir.join("custom_settings.toml");
+    let toml_content = r#"
+[general]
+recordings_dir = "recordings"
+
+[rclone]
+remote_path = "mock_remote:test"
+rclone_bin = "mock_rclone"
+consolidate_extra_args = ["--checkers", "12", "--stats", "500ms"]
+"#;
+    fs::write(&config_file, toml_content).unwrap();
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: Some(config_file),
+    };
+
+    let summary = run_consolidation(args).await;
+    let summary = summary.expect("run_consolidation with custom config should succeed");
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Domain outcome assertions
+    assert!(
+        remote_dir.join("stream.mp4").exists(),
+        "Remote stream.mp4 must exist after finalization"
+    );
+    assert!(
+        remote_dir.join("chat.jsonl").exists(),
+        "Remote chat.jsonl must exist after finalization"
+    );
+    assert!(
+        !remote_dir.join("stream.mp4.part").exists(),
+        "Remote stream.mp4.part must be finalized"
+    );
+    assert!(
+        !remote_dir.join("chat.jsonl.part").exists(),
+        "Remote chat.jsonl.part must be finalized"
+    );
+    assert!(!chunk0.exists(), "Original chunk_0000.ts must be purged");
+    assert!(!chat0.exists(), "Original chat_0000.jsonl must be purged");
+    assert!(meta.exists(), "metadata.jsonl must be preserved");
+    assert!(
+        !staging_parent.exists(),
+        "Staging directory must be unlinked post-upload"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_without_config_uses_default_high_performance_args() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_default");
+    let staging_parent = create_temp_test_dir("test_remote_cons_default_staging");
+
+    // Create remote chunks
+    let chunk0 = remote_dir.join("chunk_0000.ts");
+    let chat0 = remote_dir.join("chat_0000.jsonl");
+    let meta = remote_dir.join("metadata.jsonl");
+
+    fs::write(&chunk0, b"mock_video_chunk_default").unwrap();
+    let line1 = make_chat_line(10_000, "user1", "msg1");
+    fs::write(&chat0, format!("{line1}\n")).unwrap();
+    fs::write(&meta, r#"{"type":"SESSION_START","stream_offset_ms":0}"#).unwrap();
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: None,
+    };
+
+    let summary = run_consolidation(args).await;
+    let summary = summary.expect("run_consolidation without config should succeed");
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Domain outcome assertions
+    assert!(
+        remote_dir.join("stream.mp4").exists(),
+        "Remote stream.mp4 must exist after finalization"
+    );
+    assert!(
+        remote_dir.join("chat.jsonl").exists(),
+        "Remote chat.jsonl must exist after finalization"
+    );
+    assert!(
+        !remote_dir.join("stream.mp4.part").exists(),
+        "Remote stream.mp4.part must be finalized"
+    );
+    assert!(
+        !remote_dir.join("chat.jsonl.part").exists(),
+        "Remote chat.jsonl.part must be finalized"
+    );
+    assert!(!chunk0.exists(), "Original chunk_0000.ts must be purged");
+    assert!(!chat0.exists(), "Original chat_0000.jsonl must be purged");
+    assert!(meta.exists(), "metadata.jsonl must be preserved");
+    assert!(
+        !staging_parent.exists(),
+        "Staging directory must be unlinked post-upload"
     );
 }

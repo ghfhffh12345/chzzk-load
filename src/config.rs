@@ -67,6 +67,8 @@ pub struct RcloneConfig {
     pub rclone_bin: String,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    #[serde(default)]
+    pub consolidate_extra_args: Vec<String>,
     #[serde(default = "default_skip_connection_check")]
     pub skip_connection_check: bool,
 }
@@ -91,6 +93,7 @@ impl Default for RcloneConfig {
             upload_concurrency: default_upload_concurrency(),
             rclone_bin: default_rclone_bin(),
             extra_args: Vec::new(),
+            consolidate_extra_args: Vec::new(),
             skip_connection_check: default_skip_connection_check(),
         }
     }
@@ -133,6 +136,8 @@ rclone_bin = "rclone"
 skip_connection_check = false
 # Additional arguments passed to rclone child process
 extra_args = []
+# Additional arguments passed specifically during consolidation cloud uploads
+consolidate_extra_args = []
 
 [chzzk]
 # Optional Naver session cookies for age-restricted (19+) or subscriber streams
@@ -232,6 +237,34 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Loads and parses settings from a TOML file path without creating files if missing.
+    pub fn load_from_path(path: &Path) -> anyhow::Result<Self> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read settings from '{}'", path.display()))?;
+        toml::from_str(&content)
+            .with_context(|| format!("Failed to parse TOML in '{}'", path.display()))
+    }
+
+    /// Resolves configuration for consolidation.
+    ///
+    /// Priority:
+    /// 1. Explicit path in `config_path` (e.g., from `--config <path>`)
+    /// 2. Auto-detected `settings.toml` in current directory or executable directory
+    /// 3. If neither exists, returns default settings (with empty `consolidate_extra_args` and default `rclone_bin`)
+    pub fn resolve_for_consolidation(config_path: Option<&Path>) -> anyhow::Result<Self> {
+        if let Some(custom) = config_path {
+            let resolved = crate::app_path::resolve_path(custom);
+            Self::load_from_path(&resolved)
+        } else {
+            let default_path = crate::app_path::resolve_path(Path::new("settings.toml"));
+            if default_path.is_file() {
+                Self::load_from_path(&default_path)
+            } else {
+                Ok(Self::default())
+            }
+        }
+    }
+
     pub fn load_or_create_default(path: &Path) -> anyhow::Result<Self> {
         match fs::read_to_string(path) {
             Ok(content) => {

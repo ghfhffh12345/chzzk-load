@@ -54,6 +54,7 @@ fn create_local_rclone_backend(remote_dir: &Path) -> RcloneBackend {
         upload_concurrency: 1,
         rclone_bin: "rclone".to_string(),
         extra_args: vec!["--retries=1".to_string()],
+        consolidate_extra_args: vec![],
         skip_connection_check: false,
     };
     RcloneBackend::new(config)

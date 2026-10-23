@@ -32,7 +32,7 @@ pub use manifest::{
     ChunkGap, ConsolidationChunk, ConsolidationManifest, RawManifestEntry, TargetLocation,
     build_manifest_from_entries, detect_index_gaps, discover_manifest, discover_manifest_with_bin,
     is_remote_path, join_remote_path, parse_chat_chunk_index, parse_video_chunk_index,
-    resolve_rclone_bin,
+    resolve_rclone_bin, resolve_rclone_bin_with_config,
 };
 pub use video::{
     ConcatScriptGuard, VideoConsolidationOptions, VideoConsolidationResult, VideoProgressTelemetry,
@@ -252,18 +252,63 @@ pub async fn delete_original_chunks_with_progress(
     Ok(())
 }
 
-/// Uploads a local file to a remote destination via `rclone copyto`.
-pub async fn upload_remote_staged_file(
+/// Default rclone flags applied to consolidation remote uploads for large-file throughput optimization.
+pub const HIGH_THROUGHPUT_UPLOAD_ARGS: &[&str] = &[
+    "--drive-chunk-size",
+    "128M",
+    "--s3-chunk-size",
+    "64M",
+    "--s3-upload-concurrency",
+    "4",
+    "--buffer-size",
+    "64M",
+    "--multi-thread-streams",
+    "4",
+    "--multi-thread-cutoff",
+    "250M",
+];
+
+/// Builds command arguments for high-throughput consolidation staged file upload,
+/// appending any user-defined `consolidate_extra_args`.
+pub fn build_consolidate_upload_args(extra_args: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = HIGH_THROUGHPUT_UPLOAD_ARGS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for extra in extra_args {
+        args.push(extra.clone());
+    }
+    args
+}
+
+/// Builds a `tokio::process::Command` configured for high-throughput `rclone copyto`.
+pub fn build_remote_staged_upload_command(
     bin: &str,
     local_path: &std::path::Path,
     remote_dest: &str,
-) -> anyhow::Result<()> {
+    extra_args: &[String],
+) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.kill_on_drop(true);
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::piped());
     cmd.arg("copyto").arg(local_path).arg(remote_dest);
+    for arg in build_consolidate_upload_args(extra_args) {
+        cmd.arg(arg);
+    }
+    cmd
+}
+
+/// Uploads a local file to a remote destination via `rclone copyto` using default
+/// high-throughput transfer options and optional user-specified extra arguments.
+pub async fn upload_remote_staged_file_with_args(
+    bin: &str,
+    local_path: &std::path::Path,
+    remote_dest: &str,
+    extra_args: &[String],
+) -> anyhow::Result<()> {
+    let mut cmd = build_remote_staged_upload_command(bin, local_path, remote_dest, extra_args);
 
     let output = cmd.output().await.with_context(|| {
         format!(
@@ -284,6 +329,28 @@ pub async fn upload_remote_staged_file(
     Ok(())
 }
 
+/// Uploads a local file to a remote destination via `rclone copyto` using default
+/// high-throughput transfer options.
+pub async fn upload_remote_staged_file(
+    bin: &str,
+    local_path: &std::path::Path,
+    remote_dest: &str,
+) -> anyhow::Result<()> {
+    upload_remote_staged_file_with_args(bin, local_path, remote_dest, &[]).await
+}
+
+/// Resolves configuration for consolidation.
+///
+/// Priority:
+/// 1. Explicit path in `config_path` (e.g., from `--config <path>`)
+/// 2. Auto-detected `settings.toml` in current directory or executable directory
+/// 3. If neither exists, returns default settings (with empty `consolidate_extra_args` and default `rclone_bin`)
+pub fn resolve_consolidation_settings(
+    config_path: Option<&std::path::Path>,
+) -> anyhow::Result<crate::config::Settings> {
+    crate::config::Settings::resolve_for_consolidation(config_path)
+}
+
 /// Runs the post-recording consolidation workflow with the default progress coordinator.
 pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<ConsolidationSummary> {
     run_consolidation_with_coordinator(args, ConsolidationProgressCoordinator::default()).await
@@ -299,8 +366,12 @@ pub async fn run_consolidation_with_coordinator(
     args: ConsolidateArgs,
     coordinator: ConsolidationProgressCoordinator,
 ) -> anyhow::Result<ConsolidationSummary> {
+    let settings = resolve_consolidation_settings(args.config.as_deref())?;
+    let rclone_bin = resolve_rclone_bin_with_config(None, Some(&settings.rclone.rclone_bin));
+
     let target = TargetLocation::parse(&args.path);
-    let manifest = discover_manifest(&target, args.strict, args.overwrite).await?;
+    let manifest =
+        discover_manifest_with_bin(&target, args.strict, args.overwrite, Some(&rclone_bin)).await?;
 
     println!(
         "[INFO] Discovered manifest for '{}': {} video chunk(s), {} chat chunk(s) (metadata: {})",
@@ -357,7 +428,7 @@ pub async fn run_consolidation_with_coordinator(
         manifest.chat_chunks.len(),
         total_video_bytes,
     );
-    let mut video_options = VideoConsolidationOptions::default();
+    let mut video_options = VideoConsolidationOptions::default().with_rclone_bin(&rclone_bin);
     if let Some(v_tx) = media_session.video_sender() {
         video_options = video_options.with_progress_sender(v_tx);
     }
@@ -365,7 +436,7 @@ pub async fn run_consolidation_with_coordinator(
         video_options = video_options.with_staging_dir(dir.clone());
     }
 
-    let mut chat_options = ChatConsolidationOptions::default();
+    let mut chat_options = ChatConsolidationOptions::default().with_rclone_bin(&rclone_bin);
     if let Some(c_tx) = media_session.chat_sender() {
         chat_options = chat_options.with_progress_sender(c_tx);
     }
@@ -547,7 +618,6 @@ pub async fn run_consolidation_with_coordinator(
     // Upload & Finalization Stage
     if manifest.target.is_remote() {
         let remote_base = manifest.target.raw();
-        let rclone_bin = resolve_rclone_bin(None);
         let staging_dir = staging_dir
             .as_ref()
             .expect("staging_dir must be resolved for remote consolidation");
@@ -557,12 +627,24 @@ pub async fn run_consolidation_with_coordinator(
             if has_video {
                 let local_mp4 = staging_dir.join("stream.mp4");
                 let remote_part = join_remote_path(remote_base, "stream.mp4.part");
-                upload_remote_staged_file(&rclone_bin, &local_mp4, &remote_part).await?;
+                upload_remote_staged_file_with_args(
+                    &rclone_bin,
+                    &local_mp4,
+                    &remote_part,
+                    &settings.rclone.consolidate_extra_args,
+                )
+                .await?;
             }
             if has_chat {
                 let local_jsonl = staging_dir.join("chat.jsonl");
                 let remote_part = join_remote_path(remote_base, "chat.jsonl.part");
-                upload_remote_staged_file(&rclone_bin, &local_jsonl, &remote_part).await?;
+                upload_remote_staged_file_with_args(
+                    &rclone_bin,
+                    &local_jsonl,
+                    &remote_part,
+                    &settings.rclone.consolidate_extra_args,
+                )
+                .await?;
             }
             Ok::<(), anyhow::Error>(())
         };
@@ -673,7 +755,7 @@ pub async fn run_consolidation_with_coordinator(
             &manifest.video_chunks,
             &manifest.chat_chunks,
             args.delete_concurrency,
-            None,
+            Some(&rclone_bin),
             purge_sender,
         )
         .await;
@@ -785,5 +867,160 @@ mod tests {
 
         let eligible = collect_purgeable_chunks(&v_chunks, &c_chunks);
         assert_eq!(eligible, vec!["chunk_0000.ts", "chat_0000.jsonl"]);
+    }
+
+    #[test]
+    fn test_build_consolidate_upload_args_defaults() {
+        let args = build_consolidate_upload_args(&[]);
+        assert_eq!(
+            args,
+            vec![
+                "--drive-chunk-size",
+                "128M",
+                "--s3-chunk-size",
+                "64M",
+                "--s3-upload-concurrency",
+                "4",
+                "--buffer-size",
+                "64M",
+                "--multi-thread-streams",
+                "4",
+                "--multi-thread-cutoff",
+                "250M",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_consolidate_upload_args_appends_extra() {
+        let extra = vec![
+            "--drive-chunk-size".to_string(),
+            "256M".to_string(),
+            "--fast-list".to_string(),
+        ];
+        let args = build_consolidate_upload_args(&extra);
+        assert_eq!(
+            args,
+            vec![
+                "--drive-chunk-size",
+                "128M",
+                "--s3-chunk-size",
+                "64M",
+                "--s3-upload-concurrency",
+                "4",
+                "--buffer-size",
+                "64M",
+                "--multi-thread-streams",
+                "4",
+                "--multi-thread-cutoff",
+                "250M",
+                "--drive-chunk-size",
+                "256M",
+                "--fast-list",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_remote_staged_upload_command_structure() {
+        let local_path = std::path::Path::new("local/stream.mp4");
+        let remote_dest = "remote:bucket/stream.mp4.part";
+        let extra = vec!["--checkers".to_string(), "8".to_string()];
+        let cmd = build_remote_staged_upload_command("my_rclone", local_path, remote_dest, &extra);
+        let std_cmd = cmd.as_std();
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+
+        assert_eq!(args[0], "copyto");
+        assert_eq!(args[1], local_path.to_string_lossy().to_string());
+        assert_eq!(args[2], remote_dest);
+        assert_eq!(args[3], "--drive-chunk-size");
+        assert_eq!(args[4], "128M");
+        assert_eq!(args[5], "--s3-chunk-size");
+        assert_eq!(args[6], "64M");
+        assert_eq!(args[7], "--s3-upload-concurrency");
+        assert_eq!(args[8], "4");
+        assert_eq!(args[9], "--buffer-size");
+        assert_eq!(args[10], "64M");
+        assert_eq!(args[11], "--multi-thread-streams");
+        assert_eq!(args[12], "4");
+        assert_eq!(args[13], "--multi-thread-cutoff");
+        assert_eq!(args[14], "250M");
+        assert_eq!(args[15], "--checkers");
+        assert_eq!(args[16], "8");
+    }
+
+    #[test]
+    fn test_resolve_rclone_bin_with_config_precedence() {
+        // 1. override_bin takes absolute precedence
+        assert_eq!(
+            resolve_rclone_bin_with_config(Some("direct_bin"), Some("cfg_bin")),
+            "direct_bin"
+        );
+
+        // 2. config_bin used when no override or env
+        assert_eq!(
+            resolve_rclone_bin_with_config(None, Some("cfg_rclone")),
+            if let Ok(env_bin) = std::env::var("CHZZK_LOAD_RCLONE_BIN") {
+                if !env_bin.trim().is_empty() {
+                    env_bin
+                } else {
+                    "cfg_rclone".to_string()
+                }
+            } else {
+                "cfg_rclone".to_string()
+            }
+        );
+
+        // 3. Fallback to "rclone" when config_bin is empty/None (and env var absent)
+        assert_eq!(
+            resolve_rclone_bin_with_config(None, None),
+            if let Ok(env_bin) = std::env::var("CHZZK_LOAD_RCLONE_BIN") {
+                if !env_bin.trim().is_empty() {
+                    env_bin
+                } else {
+                    "rclone".to_string()
+                }
+            } else {
+                "rclone".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_resolve_consolidation_settings_custom_and_fallback() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_resolve_cfg_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // 1. Explicit valid custom path
+        let custom_file = temp_dir.join("my_settings.toml");
+        std::fs::write(
+            &custom_file,
+            r#"
+[rclone]
+rclone_bin = "custom_bin"
+consolidate_extra_args = ["--low-level-retries", "10"]
+"#,
+        )
+        .unwrap();
+
+        let loaded = resolve_consolidation_settings(Some(&custom_file))
+            .expect("Explicit custom path should load");
+        assert_eq!(loaded.rclone.rclone_bin, "custom_bin");
+        assert_eq!(
+            loaded.rclone.consolidate_extra_args,
+            vec!["--low-level-retries".to_string(), "10".to_string()]
+        );
+
+        // 2. Explicit non-existent path errors
+        let non_existent = temp_dir.join("missing.toml");
+        let err = resolve_consolidation_settings(Some(&non_existent));
+        assert!(err.is_err(), "Non-existent explicit config path must error");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }

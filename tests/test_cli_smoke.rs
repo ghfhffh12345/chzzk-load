@@ -162,6 +162,44 @@ fn test_config_validation_rules() {
 }
 
 #[test]
+fn test_config_consolidate_extra_args_parsing_and_defaults() {
+    // 1. Default RcloneConfig has empty consolidate_extra_args
+    let default_rclone = chzzk_load::config::RcloneConfig::default();
+    assert!(default_rclone.consolidate_extra_args.is_empty());
+
+    // 2. Parse TOML with consolidate_extra_args
+    let toml_with_args = r#"
+[rclone]
+remote_path = "remote:test"
+consolidate_extra_args = ["--drive-chunk-size", "256M", "--fast-list"]
+"#;
+    let settings: Settings =
+        toml::from_str(toml_with_args).expect("Should parse TOML with consolidate_extra_args");
+    assert_eq!(
+        settings.rclone.consolidate_extra_args,
+        vec![
+            "--drive-chunk-size".to_string(),
+            "256M".to_string(),
+            "--fast-list".to_string()
+        ]
+    );
+
+    // 3. Parse TOML omitting consolidate_extra_args defaults to empty
+    let toml_omitted = r#"
+[rclone]
+remote_path = "remote:test"
+"#;
+    let settings_omitted: Settings =
+        toml::from_str(toml_omitted).expect("Should parse TOML omitting consolidate_extra_args");
+    assert!(settings_omitted.rclone.consolidate_extra_args.is_empty());
+
+    // 4. Default settings template includes consolidate_extra_args
+    let template_settings: Settings = toml::from_str(chzzk_load::config::DEFAULT_SETTINGS_TOML)
+        .expect("Default settings TOML template should parse");
+    assert!(template_settings.rclone.consolidate_extra_args.is_empty());
+}
+
+#[test]
 fn test_cli_binary_smoke_help() {
     let bin_path = env!("CARGO_BIN_EXE_chzzk-load");
     let output = Command::new(bin_path)
@@ -337,6 +375,7 @@ fn test_cli_consolidate_subcommand_parsing() {
             strict: false,
             delete_concurrency: 16,
             temp_dir: None,
+            config: None,
         }))
     );
 
@@ -363,6 +402,7 @@ fn test_cli_consolidate_subcommand_parsing() {
             strict: true,
             delete_concurrency: 8,
             temp_dir: Some(std::path::PathBuf::from("/mnt/staging")),
+            config: None,
         }))
     );
 
@@ -384,6 +424,7 @@ fn test_cli_consolidate_subcommand_parsing() {
             strict: false,
             delete_concurrency: 16,
             temp_dir: Some(std::path::PathBuf::from("/custom/staging")),
+            config: None,
         }))
     );
 
@@ -426,6 +467,10 @@ fn test_cli_consolidate_subcommand_parsing() {
     assert!(
         sub_stdout.contains("--temp-dir"),
         "Subcommand help must contain --temp-dir: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--config"),
+        "Subcommand help must contain --config: {sub_stdout}"
     );
 }
 
@@ -474,6 +519,45 @@ fn test_cli_consolidate_delete_concurrency_validation() {
 }
 
 #[test]
+fn test_cli_consolidate_config_flag_parsing() {
+    // 1. Long flag: --config
+    let cli_long = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/stream",
+        "--config",
+        "custom/settings.toml",
+    ])
+    .expect("--config should parse successfully on consolidate subcommand");
+    if let Some(Commands::Consolidate(args)) = cli_long.command {
+        assert_eq!(
+            args.config,
+            Some(std::path::PathBuf::from("custom/settings.toml"))
+        );
+    } else {
+        panic!("Expected Commands::Consolidate");
+    }
+
+    // 2. Short flag: -c
+    let cli_short = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/stream",
+        "-c",
+        "my_config.toml",
+    ])
+    .expect("-c should parse successfully on consolidate subcommand");
+    if let Some(Commands::Consolidate(args)) = cli_short.command {
+        assert_eq!(
+            args.config,
+            Some(std::path::PathBuf::from("my_config.toml"))
+        );
+    } else {
+        panic!("Expected Commands::Consolidate");
+    }
+}
+
+#[test]
 fn test_cli_consolidate_with_headless_and_no_tui() {
     let cli_headless = Cli::try_parse_from([
         "chzzk-load",
@@ -492,6 +576,7 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
             strict: false,
             delete_concurrency: 16,
             temp_dir: None,
+            config: None,
         }))
     );
 
@@ -508,6 +593,7 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
             strict: false,
             delete_concurrency: 16,
             temp_dir: None,
+            config: None,
         }))
     );
 }
