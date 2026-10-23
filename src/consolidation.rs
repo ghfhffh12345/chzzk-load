@@ -48,6 +48,7 @@ pub use video::{
 use crate::cli::ConsolidateArgs;
 use crate::uploader::unlink_local_file_with_retry;
 use anyhow::Context;
+use tokio_util::sync::CancellationToken;
 
 /// Summary report returned upon consolidation completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,6 +340,78 @@ pub async fn upload_remote_staged_file(
     upload_remote_staged_file_with_args(bin, local_path, remote_dest, &[]).await
 }
 
+/// Concurrently uploads staged media files (`stream.mp4` and `chat.jsonl`) to remote destinations
+/// (`remote_base/stream.mp4.part` and `remote_base/chat.jsonl.part`) via `rclone copyto`.
+///
+/// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
+/// is promptly aborted and killed (`kill_on_drop`).
+///
+/// Listens to cooperative cancellation via `cancel_token`: if cancelled, active upload
+/// processes are immediately terminated.
+///
+/// On upload failure or cancellation, remote `.part` files are deleted via `rclone deletefile`
+/// while finalized local staging files are strictly preserved.
+pub async fn upload_remote_staged_media(
+    bin: &str,
+    remote_base: &str,
+    staging_dir: &std::path::Path,
+    has_video: bool,
+    has_chat: bool,
+    extra_args: &[String],
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
+    if !has_video && !has_chat {
+        return Ok(());
+    }
+
+    let remote_video_part = join_remote_path(remote_base, "stream.mp4.part");
+    let remote_chat_part = join_remote_path(remote_base, "chat.jsonl.part");
+
+    let video_upload_fut = async {
+        if has_video {
+            let local_mp4 = staging_dir.join("stream.mp4");
+            upload_remote_staged_file_with_args(bin, &local_mp4, &remote_video_part, extra_args)
+                .await
+        } else {
+            Ok(())
+        }
+    };
+
+    let chat_upload_fut = async {
+        if has_chat {
+            let local_jsonl = staging_dir.join("chat.jsonl");
+            upload_remote_staged_file_with_args(bin, &local_jsonl, &remote_chat_part, extra_args)
+                .await
+        } else {
+            Ok(())
+        }
+    };
+
+    let upload_res = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            Err(anyhow::anyhow!("Cloud upload cancelled by cooperative cancellation token"))
+        }
+        res = async {
+            tokio::try_join!(video_upload_fut, chat_upload_fut)
+        } => {
+            res.map(|_| ())
+        }
+    };
+
+    if let Err(upload_err) = upload_res {
+        // Remote partial cleanup: delete any incomplete remote .part files via rclone deletefile
+        if has_video {
+            delete_remote_file(bin, &remote_video_part).await;
+        }
+        if has_chat {
+            delete_remote_file(bin, &remote_chat_part).await;
+        }
+        return Err(upload_err);
+    }
+
+    Ok(())
+}
+
 /// Resolves configuration for consolidation.
 ///
 /// Priority:
@@ -356,15 +429,49 @@ pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<Consolid
     run_consolidation_with_coordinator(args, ConsolidationProgressCoordinator::default()).await
 }
 
-/// Runs the post-recording consolidation workflow with a custom progress coordinator.
-///
-/// Discovers and validates the manifest, concurrently executes streaming video remuxing
-/// and chat deduplication pipelines via `tokio::join!`, atomically finalizes staged `.part`
-/// files upon zero-exit completion of all active pipelines, and purges original chunks
-/// when `--keep-original` is false while strictly preserving `metadata.jsonl`.
+/// Runs the post-recording consolidation workflow with an external cancellation token.
+pub async fn run_consolidation_with_cancel(
+    args: ConsolidateArgs,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<ConsolidationSummary> {
+    run_consolidation_with_coordinator_and_cancel(
+        args,
+        ConsolidationProgressCoordinator::default(),
+        cancel_token,
+    )
+    .await
+}
+
+/// Runs the post-recording consolidation workflow with a custom progress coordinator,
+/// automatically wiring Ctrl+C signal handling to cooperative cancellation.
 pub async fn run_consolidation_with_coordinator(
     args: ConsolidateArgs,
     coordinator: ConsolidationProgressCoordinator,
+) -> anyhow::Result<ConsolidationSummary> {
+    let cancel_token = CancellationToken::new();
+    let cancel_token_clone = cancel_token.clone();
+    let ctrl_c_handle = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel_token_clone.cancel();
+        }
+    });
+    let result =
+        run_consolidation_with_coordinator_and_cancel(args, coordinator, cancel_token).await;
+    ctrl_c_handle.abort();
+    result
+}
+
+/// Runs the post-recording consolidation workflow with a custom progress coordinator and cancellation token.
+///
+/// Discovers and validates the manifest, concurrently executes streaming video remuxing
+/// and chat deduplication pipelines via `tokio::join!`, atomically finalizes staged `.part`
+/// files upon zero-exit completion of all active pipelines, concurrently uploads finalized
+/// media files to cloud remotes with fail-fast sibling abort, and purges original chunks
+/// when `--keep-original` is false while strictly preserving `metadata.jsonl`.
+pub async fn run_consolidation_with_coordinator_and_cancel(
+    args: ConsolidateArgs,
+    coordinator: ConsolidationProgressCoordinator,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<ConsolidationSummary> {
     let settings = resolve_consolidation_settings(args.config.as_deref())?;
     let rclone_bin = resolve_rclone_bin_with_config(None, Some(&settings.rclone.rclone_bin));
@@ -443,8 +550,6 @@ pub async fn run_consolidation_with_coordinator(
     if let Some(ref dir) = staging_dir {
         chat_options = chat_options.with_staging_dir(dir.clone());
     }
-
-    let cancel_token = tokio_util::sync::CancellationToken::new();
 
     let (video_result, chat_stats) = if can_resume {
         let staging_dir = staging_dir
@@ -622,53 +727,19 @@ pub async fn run_consolidation_with_coordinator(
             .as_ref()
             .expect("staging_dir must be resolved for remote consolidation");
 
-        // 1. Two-stage cloud upload: upload local files to remote .part destinations via rclone copyto
-        let upload_fut = async {
-            if has_video {
-                let local_mp4 = staging_dir.join("stream.mp4");
-                let remote_part = join_remote_path(remote_base, "stream.mp4.part");
-                upload_remote_staged_file_with_args(
-                    &rclone_bin,
-                    &local_mp4,
-                    &remote_part,
-                    &settings.rclone.consolidate_extra_args,
-                )
-                .await?;
-            }
-            if has_chat {
-                let local_jsonl = staging_dir.join("chat.jsonl");
-                let remote_part = join_remote_path(remote_base, "chat.jsonl.part");
-                upload_remote_staged_file_with_args(
-                    &rclone_bin,
-                    &local_jsonl,
-                    &remote_part,
-                    &settings.rclone.consolidate_extra_args,
-                )
-                .await?;
-            }
-            Ok::<(), anyhow::Error>(())
-        };
-
-        let upload_res = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                Err(anyhow::anyhow!("Cloud upload cancelled by cooperative cancellation token"))
-            }
-            res = upload_fut => res,
-        };
+        // 1. Two-stage cloud upload: upload local files to remote .part destinations concurrently via rclone copyto
+        let upload_res = upload_remote_staged_media(
+            &rclone_bin,
+            remote_base,
+            staging_dir,
+            has_video,
+            has_chat,
+            &settings.rclone.consolidate_extra_args,
+            cancel_token.clone(),
+        )
+        .await;
 
         if let Err(upload_err) = upload_res {
-            let _ = cleanup_staged_video_in(
-                &manifest.target,
-                args.temp_dir.as_deref(),
-                Some(&rclone_bin),
-            )
-            .await;
-            let _ = cleanup_staged_chat_in(
-                &manifest.target,
-                args.temp_dir.as_deref(),
-                Some(&rclone_bin),
-            )
-            .await;
             eprintln!(
                 "[INFO] Cloud upload failed or was interrupted, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload without re-running FFmpeg.",
                 staging_dir.display()

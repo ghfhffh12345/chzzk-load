@@ -7,9 +7,10 @@ use common::mock_rclone::get_mock_rclone_bin;
 
 use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::{
-    build_remote_staged_upload_command, run_consolidation, upload_remote_staged_file,
-    upload_remote_staged_file_with_args,
+    build_remote_staged_upload_command, run_consolidation, run_consolidation_with_cancel,
+    upload_remote_staged_file, upload_remote_staged_file_with_args, upload_remote_staged_media,
 };
+use tokio_util::sync::CancellationToken;
 
 fn create_temp_test_dir(prefix: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("{prefix}_{}", rand::random::<u32>()));
@@ -31,6 +32,19 @@ fn make_chat_line(time_ms: u64, user: &str, content: &str) -> String {
         raw: serde_json::json!({}),
     })
     .unwrap()
+}
+
+fn setup_test_stream_chunks(dir: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
+    let chunk0 = dir.join("chunk_0000.ts");
+    let chat0 = dir.join("chat_0000.jsonl");
+    let meta = dir.join("metadata.jsonl");
+
+    fs::write(&chunk0, b"mock_video_chunk").unwrap();
+    let line1 = make_chat_line(10_000, "user1", "msg1");
+    fs::write(&chat0, format!("{line1}\n")).unwrap();
+    fs::write(&meta, r#"{"type":"SESSION_START","stream_offset_ms":0}"#).unwrap();
+
+    (chunk0, chat0, meta)
 }
 
 static REMOTE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -888,4 +902,354 @@ async fn test_remote_consolidation_without_config_uses_default_high_performance_
         !staging_parent.exists(),
         "Staging directory must be unlinked post-upload"
     );
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_uploads_concurrently_parallel() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_assert_parallel");
+    let staging_parent = create_temp_test_dir("test_remote_cons_parallel_staging");
+
+    let (chunk0, chat0, meta) = setup_test_stream_chunks(&remote_dir);
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: None,
+    };
+
+    let summary = run_consolidation(args).await;
+    let summary = summary.expect("run_consolidation with parallel upload should succeed");
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify remote final files and cleanup
+    assert!(remote_dir.join("stream.mp4").exists());
+    assert!(remote_dir.join("chat.jsonl").exists());
+    assert!(!remote_dir.join("stream.mp4.part").exists());
+    assert!(!remote_dir.join("chat.jsonl.part").exists());
+    assert!(!chunk0.exists(), "Original chunk0 must be purged");
+    assert!(!chat0.exists(), "Original chat0 must be purged");
+    assert!(meta.exists(), "Metadata must be preserved");
+    assert!(
+        !staging_parent.exists(),
+        "Staging directory must be unlinked post-upload"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_chat_failure_aborts_hanging_video_immediately() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_fail_hang_vid_and_fail_err_chat");
+    let staging_parent = create_temp_test_dir("test_remote_cons_abort_staging");
+
+    setup_test_stream_chunks(&remote_dir);
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: None,
+    };
+
+    let start = std::time::Instant::now();
+    let res = run_consolidation(args).await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_err(), "Chat failure must fail consolidation");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "Sibling video hanging process must be aborted immediately, but took {:?}",
+        elapsed
+    );
+
+    // Verify remote .part files were removed
+    assert!(!remote_dir.join("stream.mp4.part").exists());
+    assert!(!remote_dir.join("chat.jsonl.part").exists());
+
+    // Verify finalized local staging files are preserved
+    assert!(staging_parent.join("stream.mp4").exists());
+    assert!(staging_parent.join("chat.jsonl").exists());
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_video_failure_aborts_hanging_chat_immediately() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_fail_hang_chat_and_fail_err_vid");
+    let staging_parent = create_temp_test_dir("test_remote_cons_abort_vid_staging");
+
+    setup_test_stream_chunks(&remote_dir);
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: None,
+    };
+
+    let start = std::time::Instant::now();
+    let res = run_consolidation(args).await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_err(), "Video failure must fail consolidation");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "Sibling chat hanging process must be aborted immediately, but took {:?}",
+        elapsed
+    );
+
+    // Verify remote .part files were removed
+    assert!(!remote_dir.join("stream.mp4.part").exists());
+    assert!(!remote_dir.join("chat.jsonl.part").exists());
+
+    // Verify finalized local staging files are preserved
+    assert!(staging_parent.join("stream.mp4").exists());
+    assert!(staging_parent.join("chat.jsonl").exists());
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_cancellation_token_promptly_terminates_active_uploads() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_fail_copy_hang_cancel");
+    let staging_parent = create_temp_test_dir("test_remote_cons_cancel_tok_staging");
+
+    setup_test_stream_chunks(&remote_dir);
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        keep_original: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let cancel_trigger = cancel_token.clone();
+
+    // Trigger cancellation after 100ms
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_trigger.cancel();
+    });
+
+    let start = std::time::Instant::now();
+    let res = run_consolidation_with_cancel(args, cancel_token).await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_err(), "Cancelled consolidation must return error");
+    let err_msg = format!("{:#}", res.unwrap_err());
+    assert!(
+        err_msg.contains("cancelled by cooperative cancellation token"),
+        "Error message should mention cancellation: {err_msg}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "Cancellation must terminate active uploads promptly, but took {:?}",
+        elapsed
+    );
+
+    // Remote .part files must be cleaned up
+    assert!(!remote_dir.join("stream.mp4.part").exists());
+    assert!(!remote_dir.join("chat.jsonl.part").exists());
+
+    // Finalized local staging files must be preserved
+    assert!(staging_parent.join("stream.mp4").exists());
+    assert!(staging_parent.join("chat.jsonl").exists());
+}
+
+#[tokio::test]
+async fn test_upload_remote_staged_media_seam_success_and_concurrency() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let mock_rclone = get_mock_rclone_bin();
+    let temp_dir = create_temp_test_dir("test_seam_upload_assert_parallel");
+    let staging_dir = temp_dir.join("staging");
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let local_mp4 = staging_dir.join("stream.mp4");
+    let local_jsonl = staging_dir.join("chat.jsonl");
+    fs::write(&local_mp4, b"test_stream_content").unwrap();
+    fs::write(&local_jsonl, b"test_chat_content\n").unwrap();
+
+    let remote_dest_dir = temp_dir.join("remote_target");
+    fs::create_dir_all(&remote_dest_dir).unwrap();
+    let remote_base = format!(
+        "mock_remote:{}",
+        remote_dest_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let cancel_token = CancellationToken::new();
+    let res = upload_remote_staged_media(
+        mock_rclone.to_str().unwrap(),
+        &remote_base,
+        &staging_dir,
+        true,
+        true,
+        &[],
+        cancel_token,
+    )
+    .await;
+
+    assert!(
+        res.is_ok(),
+        "Concurrent upload must succeed: {:?}",
+        res.err()
+    );
+
+    // Verify .part files exist on remote
+    assert!(remote_dest_dir.join("stream.mp4.part").exists());
+    assert!(remote_dest_dir.join("chat.jsonl.part").exists());
+
+    // Verify local staging files were preserved
+    assert!(local_mp4.exists());
+    assert!(local_jsonl.exists());
+}
+
+#[tokio::test]
+async fn test_upload_remote_staged_media_seam_sibling_abort_and_remote_cleanup() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let mock_rclone = get_mock_rclone_bin();
+    let temp_dir = create_temp_test_dir("test_seam_fail_hang_vid_and_fail_err_chat");
+    let staging_dir = temp_dir.join("staging");
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let local_mp4 = staging_dir.join("stream.mp4");
+    let local_jsonl = staging_dir.join("chat.jsonl");
+    fs::write(&local_mp4, b"test_stream_content").unwrap();
+    fs::write(&local_jsonl, b"test_chat_content\n").unwrap();
+
+    let remote_dest_dir = temp_dir.join("remote_target");
+    fs::create_dir_all(&remote_dest_dir).unwrap();
+    let remote_base = format!(
+        "mock_remote:{}",
+        remote_dest_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let cancel_token = CancellationToken::new();
+    let start = std::time::Instant::now();
+    let res = upload_remote_staged_media(
+        mock_rclone.to_str().unwrap(),
+        &remote_base,
+        &staging_dir,
+        true,
+        true,
+        &[],
+        cancel_token,
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_err(), "Upload must fail due to chat failure");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "Sibling video hanging process must be aborted immediately, but took {:?}",
+        elapsed
+    );
+
+    // Verify remote .part files were removed via rclone deletefile
+    assert!(!remote_dest_dir.join("stream.mp4.part").exists());
+    assert!(!remote_dest_dir.join("chat.jsonl.part").exists());
+
+    // Verify local staging files remain intact
+    assert!(local_mp4.exists());
+    assert!(local_jsonl.exists());
+}
+
+#[tokio::test]
+async fn test_upload_remote_staged_media_seam_cancellation_and_remote_cleanup() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let mock_rclone = get_mock_rclone_bin();
+    let temp_dir = create_temp_test_dir("test_seam_fail_copy_hang_cancel");
+    let staging_dir = temp_dir.join("staging");
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let local_mp4 = staging_dir.join("stream.mp4");
+    let local_jsonl = staging_dir.join("chat.jsonl");
+    fs::write(&local_mp4, b"test_stream_content").unwrap();
+    fs::write(&local_jsonl, b"test_chat_content\n").unwrap();
+
+    let remote_dest_dir = temp_dir.join("remote_target");
+    fs::create_dir_all(&remote_dest_dir).unwrap();
+    let remote_base = format!(
+        "mock_remote:{}",
+        remote_dest_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let cancel_token = CancellationToken::new();
+    let trigger = cancel_token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        trigger.cancel();
+    });
+
+    let start = std::time::Instant::now();
+    let res = upload_remote_staged_media(
+        mock_rclone.to_str().unwrap(),
+        &remote_base,
+        &staging_dir,
+        true,
+        true,
+        &[],
+        cancel_token,
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_err(), "Cancelled upload must return error");
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "Cancellation must terminate uploads promptly, but took {:?}",
+        elapsed
+    );
+
+    // Verify remote .part files were cleaned up
+    assert!(!remote_dest_dir.join("stream.mp4.part").exists());
+    assert!(!remote_dest_dir.join("chat.jsonl.part").exists());
+
+    // Verify local staging files remain intact
+    assert!(local_mp4.exists());
+    assert!(local_jsonl.exists());
 }

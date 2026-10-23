@@ -91,9 +91,24 @@ fn main() {
             }
             let src = positional[0];
             let dst = positional[1];
-            if src.contains("fail_copy_hang") || dst.contains("fail_copy_hang") {
+            let has_token = |t: &str, f: &str| {
+                (src.contains(t) || dst.contains(t)) && (src.contains(f) || dst.contains(f))
+            };
+            if has_token("fail_hang_vid", "stream.mp4")
+                || has_token("fail_hang_chat", "chat.jsonl")
+                || src.contains("fail_copy_hang")
+                || dst.contains("fail_copy_hang")
+            {
                 std::thread::sleep(std::time::Duration::from_secs(60));
                 std::process::exit(0);
+            }
+            if has_token("fail_err_vid", "stream.mp4") {
+                eprintln!("mock error: failed to copyto video {} to {}", src, dst);
+                std::process::exit(1);
+            }
+            if has_token("fail_err_chat", "chat.jsonl") {
+                eprintln!("mock error: failed to copyto chat {} to {}", src, dst);
+                std::process::exit(1);
             }
             if src.contains("fail_copy") || dst.contains("fail_copy") {
                 eprintln!("mock error: failed to copyto {} to {}", src, dst);
