@@ -7,7 +7,7 @@ pub mod video;
 
 pub use staging::{
     STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes, compute_target_hash,
-    resolve_staging_dir, staging_folder_name, verify_staging_capacity,
+    remove_dir_all_with_retry, resolve_staging_dir, staging_folder_name, verify_staging_capacity,
     verify_staging_capacity_with_space,
 };
 
@@ -22,9 +22,10 @@ pub use progress::{
 };
 
 pub use chat::{
-    ChatConsolidationStats, ChatDeduplicator, ChatMessageKey, DEFAULT_CHAT_DEDUP_WINDOW_MS,
-    cleanup_staged_chat, consolidate_chat, consolidate_chat_local, consolidate_chat_remote,
-    delete_remote_file, delete_remote_file_checked, finalize_staged_chat,
+    ChatConsolidationOptions, ChatConsolidationStats, ChatDeduplicator, ChatMessageKey,
+    DEFAULT_CHAT_DEDUP_WINDOW_MS, cleanup_staged_chat, consolidate_chat, consolidate_chat_local,
+    consolidate_chat_remote, consolidate_chat_with_options, delete_remote_file,
+    delete_remote_file_checked, finalize_staged_chat,
 };
 pub use manifest::{
     ChunkGap, ConsolidationChunk, ConsolidationManifest, RawManifestEntry, TargetLocation,
@@ -45,6 +46,7 @@ pub use video::{
 
 use crate::cli::ConsolidateArgs;
 use crate::uploader::unlink_local_file_with_retry;
+use anyhow::Context;
 
 /// Summary report returned upon consolidation completion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +251,38 @@ pub async fn delete_original_chunks_with_progress(
     Ok(())
 }
 
+/// Uploads a local file to a remote destination via `rclone copyto`.
+pub async fn upload_remote_staged_file(
+    bin: &str,
+    local_path: &std::path::Path,
+    remote_dest: &str,
+) -> anyhow::Result<()> {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.kill_on_drop(true);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.arg("copyto").arg(local_path).arg(remote_dest);
+
+    let output = cmd.output().await.with_context(|| {
+        format!(
+            "Failed to execute '{bin} copyto {} {remote_dest}'",
+            local_path.display()
+        )
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "rclone copyto for '{}' failed with status {}: {}",
+            local_path.display(),
+            output.status,
+            stderr.trim()
+        );
+    }
+    Ok(())
+}
+
 /// Runs the post-recording consolidation workflow with the default progress coordinator.
 pub async fn run_consolidation(args: ConsolidateArgs) -> anyhow::Result<ConsolidationSummary> {
     run_consolidation_with_coordinator(args, ConsolidationProgressCoordinator::default()).await
@@ -314,7 +348,14 @@ pub async fn run_consolidation_with_coordinator(
     if let Some(ref dir) = staging_dir {
         video_options = video_options.with_staging_dir(dir.clone());
     }
-    let chat_progress_sender = media_session.chat_sender();
+
+    let mut chat_options = ChatConsolidationOptions::default();
+    if let Some(c_tx) = media_session.chat_sender() {
+        chat_options = chat_options.with_progress_sender(c_tx);
+    }
+    if let Some(ref dir) = staging_dir {
+        chat_options = chat_options.with_staging_dir(dir.clone());
+    }
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
@@ -325,32 +366,18 @@ pub async fn run_consolidation_with_coordinator(
             &video_options,
             cancel_token.clone(),
         );
-        let chat_fut = chat::consolidate_chat_with_progress(
+        let chat_fut = chat::consolidate_chat_with_options(
             &manifest.target,
             &manifest.chat_chunks,
             args.strict,
-            None,
+            &chat_options,
             cancel_token.clone(),
-            chat_progress_sender,
         );
 
         let (video_res, chat_res) = tokio::join!(video_fut, chat_fut);
         match (video_res, chat_res) {
             (Ok(v_res), Ok(c_res)) => {
                 media_session.finish(true).await;
-                // Both pipelines completed with zero-exit: atomically finalize both .part files
-                let finalize_res = async {
-                    finalize_staged_video(&manifest.target, None).await?;
-                    finalize_staged_chat(&manifest.target, None).await?;
-                    Ok::<(), anyhow::Error>(())
-                }
-                .await;
-
-                if let Err(e) = finalize_res {
-                    let _ = cleanup_staged_video(&manifest.target, None).await;
-                    let _ = cleanup_staged_chat(&manifest.target, None).await;
-                    return Err(e);
-                }
                 (Some(v_res), Some(c_res))
             }
             (Err(v_err), Ok(_)) => {
@@ -398,10 +425,6 @@ pub async fn run_consolidation_with_coordinator(
         {
             Ok(res) => {
                 media_session.finish(true).await;
-                if let Err(e) = finalize_staged_video(&manifest.target, None).await {
-                    let _ = cleanup_staged_video(&manifest.target, None).await;
-                    return Err(e);
-                }
                 res
             }
             Err(err) => {
@@ -413,22 +436,17 @@ pub async fn run_consolidation_with_coordinator(
         };
         (Some(v_res), None)
     } else if has_chat {
-        let c_res = match chat::consolidate_chat_with_progress(
+        let c_res = match chat::consolidate_chat_with_options(
             &manifest.target,
             &manifest.chat_chunks,
             args.strict,
-            None,
+            &chat_options,
             cancel_token.clone(),
-            chat_progress_sender,
         )
         .await
         {
             Ok(res) => {
                 media_session.finish(true).await;
-                if let Err(e) = finalize_staged_chat(&manifest.target, None).await {
-                    let _ = cleanup_staged_chat(&manifest.target, None).await;
-                    return Err(e);
-                }
                 res
             }
             Err(err) => {
@@ -444,6 +462,83 @@ pub async fn run_consolidation_with_coordinator(
         (None, None)
     };
 
+    // Upload & Finalization Stage
+    if manifest.target.is_remote() {
+        let remote_base = manifest.target.raw();
+        let rclone_bin = resolve_rclone_bin(None);
+        let s_dir = staging_dir
+            .as_ref()
+            .expect("staging_dir must be resolved for remote consolidation");
+
+        // 1. Two-stage cloud upload: upload local files to remote .part destinations via rclone copyto
+        let upload_res = async {
+            if has_video {
+                let local_mp4 = s_dir.join("consolidated.mp4");
+                let remote_part = join_remote_path(remote_base, "consolidated.mp4.part");
+                upload_remote_staged_file(&rclone_bin, &local_mp4, &remote_part).await?;
+            }
+            if has_chat {
+                let local_jsonl = s_dir.join("consolidated.jsonl");
+                let remote_part = join_remote_path(remote_base, "consolidated.jsonl.part");
+                upload_remote_staged_file(&rclone_bin, &local_jsonl, &remote_part).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if let Err(upload_err) = upload_res {
+            let _ = cleanup_staged_video(&manifest.target, Some(&rclone_bin)).await;
+            let _ = cleanup_staged_chat(&manifest.target, Some(&rclone_bin)).await;
+            return Err(upload_err);
+        }
+
+        // 2. Atomically rename remote .part files via rclone moveto
+        let rename_res = async {
+            if has_video {
+                finalize_staged_video(&manifest.target, Some(&rclone_bin)).await?;
+            }
+            if has_chat {
+                finalize_staged_chat(&manifest.target, Some(&rclone_bin)).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if let Err(rename_err) = rename_res {
+            let _ = cleanup_staged_video(&manifest.target, Some(&rclone_bin)).await;
+            let _ = cleanup_staged_chat(&manifest.target, Some(&rclone_bin)).await;
+            delete_remote_file(
+                &rclone_bin,
+                &join_remote_path(remote_base, "consolidated.mp4"),
+            )
+            .await;
+            delete_remote_file(
+                &rclone_bin,
+                &join_remote_path(remote_base, "consolidated.jsonl"),
+            )
+            .await;
+            return Err(rename_err);
+        }
+    } else {
+        // Local mode: atomically finalize local .part files directly
+        let finalize_res = async {
+            if has_video {
+                finalize_staged_video(&manifest.target, None).await?;
+            }
+            if has_chat {
+                finalize_staged_chat(&manifest.target, None).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if let Err(e) = finalize_res {
+            let _ = cleanup_staged_video(&manifest.target, None).await;
+            let _ = cleanup_staged_chat(&manifest.target, None).await;
+            return Err(e);
+        }
+    }
+
     if let Some(ref v) = video_result {
         println!(
             "[INFO] Video consolidation completed: {} chunk(s) processed, {} bytes written",
@@ -457,7 +552,7 @@ pub async fn run_consolidation_with_coordinator(
         );
     }
 
-    if !args.keep_original {
+    let purge_res = if !args.keep_original {
         let eligible_chunks =
             collect_purgeable_chunks(&manifest.video_chunks, &manifest.chat_chunks);
         let total_purge = eligible_chunks.len();
@@ -465,7 +560,7 @@ pub async fn run_consolidation_with_coordinator(
         let mut purge_session = coordinator.start_purge(total_purge);
         let purge_sender = purge_session.purge_sender();
 
-        let purge_res = delete_original_chunks_with_progress(
+        let res = delete_original_chunks_with_progress(
             &manifest.target,
             &manifest.video_chunks,
             &manifest.chat_chunks,
@@ -475,17 +570,32 @@ pub async fn run_consolidation_with_coordinator(
         )
         .await;
 
-        match purge_res {
+        match res {
             Ok(()) => {
                 purge_session.finish(true).await;
                 println!("[INFO] Original chunks cleaned up successfully");
+                Ok(())
             }
             Err(err) => {
                 purge_session.finish(false).await;
-                return Err(err);
+                Err(err)
             }
         }
+    } else {
+        Ok(())
+    };
+
+    // Unlink local temporary staging directory upon verified completion with Windows retry resilience
+    if let Some(ref dir) = staging_dir {
+        if let Err(e) = remove_dir_all_with_retry(dir).await {
+            eprintln!(
+                "[WARN] Failed to unlink staging directory '{}': {e}",
+                dir.display()
+            );
+        }
     }
+
+    purge_res?;
 
     Ok(ConsolidationSummary {
         target,

@@ -90,3 +90,43 @@ pub fn verify_staging_capacity(staging_dir: &Path, total_video_bytes: u64) -> an
     })?;
     verify_staging_capacity_with_space(staging_dir, disk_space.available_bytes, total_video_bytes)
 }
+
+/// Recursively removes a directory with bounded exponential backoff retries handling
+/// transient Windows sharing violations (32), access denied (5), and pending unlink latency (145),
+/// treating `ErrorKind::NotFound` as success.
+pub async fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let mut remove_res = tokio::fs::remove_dir_all(path).await;
+    let mut attempts = 0;
+    while let Err(ref e) = remove_res {
+        if attempts >= 10 || e.kind() == std::io::ErrorKind::NotFound {
+            break;
+        }
+        let raw_os = e.raw_os_error();
+        let is_transient_lock = raw_os == Some(145) // ERROR_DIR_NOT_EMPTY
+            || raw_os == Some(32) // ERROR_SHARING_VIOLATION
+            || raw_os == Some(5)  // ERROR_ACCESS_DENIED
+            || e.kind() == std::io::ErrorKind::PermissionDenied;
+
+        if is_transient_lock {
+            attempts += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(std::cmp::min(
+                200,
+                20 * (1 << (attempts - 1)),
+            )))
+            .await;
+            remove_res = tokio::fs::remove_dir_all(path).await;
+        } else {
+            break;
+        }
+    }
+
+    match remove_res {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}

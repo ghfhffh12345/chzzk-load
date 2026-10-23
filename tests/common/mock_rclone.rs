@@ -13,9 +13,12 @@ static MOCK_BIN: OnceLock<PathBuf> = OnceLock::new();
 ///   If path contains "fail_cat", exits with code 1.
 /// - `rcat <remote_path>`: reads stdin and writes to local path after first `:`.
 ///   If path contains "fail_rcat", exits with code 1.
+/// - `copyto <src> <dst>`: copies local path src to dst.
+///   If path contains "fail_copy", exits with code 1.
 /// - `moveto <src> <dst>`: renames local path src to dst.
 ///   If path contains "fail_move", exits with code 1.
 /// - `deletefile <remote_path>`: removes local path.
+/// - `lsjson <remote_path>`: lists directory entries as JSON array.
 pub fn get_mock_rclone_bin() -> &'static Path {
     MOCK_BIN.get_or_init(|| {
         let temp_dir =
@@ -97,6 +100,26 @@ fn main() {
             }
             std::process::exit(0);
         }
+        "copyto" => {
+            let positional: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with('-')).collect();
+            if positional.len() < 2 {
+                eprintln!("mock error: copyto requires src and dst");
+                std::process::exit(1);
+            }
+            let src = positional[0];
+            let dst = positional[1];
+            if src.contains("fail_copy") || dst.contains("fail_copy") {
+                eprintln!("mock error: failed to copyto {} to {}", src, dst);
+                std::process::exit(1);
+            }
+            let local_src = resolve_path(src);
+            let local_dst = resolve_path(dst);
+            if let Err(err) = std::fs::copy(&local_src, &local_dst) {
+                eprintln!("mock error: copy {} to {} failed: {}", local_src, local_dst, err);
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         "moveto" => {
             let src = &args[2];
             let dst = &args[3];
@@ -106,6 +129,7 @@ fn main() {
             }
             let local_src = resolve_path(src);
             let local_dst = resolve_path(dst);
+            let _ = std::fs::remove_file(&local_dst);
             if let Err(err) = std::fs::rename(&local_src, &local_dst) {
                 eprintln!("mock error: rename {} to {} failed: {}", local_src, local_dst, err);
                 std::process::exit(1);
@@ -124,6 +148,32 @@ fn main() {
                 std::process::exit(4);
             }
             let _ = std::fs::remove_file(&local_path);
+            std::process::exit(0);
+        }
+        "lsjson" => {
+            let positional: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with('-')).collect();
+            if positional.is_empty() {
+                eprintln!("mock error: lsjson requires target");
+                std::process::exit(1);
+            }
+            let target = positional[0];
+            let local_path = resolve_path(target);
+            let p = std::path::Path::new(&local_path);
+            let mut entries = Vec::new();
+            if let Ok(dir) = std::fs::read_dir(p) {
+                for item in dir.flatten() {
+                    let file_name = item.file_name().to_string_lossy().to_string();
+                    let metadata = item.metadata().ok();
+                    let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                    let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+                    entries.push(format!(
+                        "{{\"Path\":\"{}\",\"Name\":\"{}\",\"Size\":{},\"IsDir\":{}}}",
+                        file_name, file_name, size, is_dir
+                    ));
+                }
+            }
+            let json = format!("[{}]", entries.join(","));
+            println!("{}", json);
             std::process::exit(0);
         }
         "serve" => {
@@ -212,6 +262,12 @@ fn main() {
             .status()
             .expect("Failed to compile mock_rclone");
         assert!(status.success(), "mock_rclone compilation failed");
+
+        // Automatically configure the environment variable so all test harnesses and
+        // orchestrator sessions default to this mock binary hermetically.
+        unsafe {
+            std::env::set_var("CHZZK_LOAD_RCLONE_BIN", &bin_path);
+        }
 
         bin_path
     })

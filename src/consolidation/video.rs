@@ -467,8 +467,10 @@ pub async fn cleanup_staged_video(
         }
         TargetLocation::Remote(remote_base) => {
             let staging_dir = super::staging::resolve_staging_dir(target, None::<&Path>);
-            let staged_local = staging_dir.join("consolidated.mp4.part");
-            let _ = unlink_local_file_with_retry(&staged_local).await;
+            let staged_local_part = staging_dir.join("consolidated.mp4.part");
+            let staged_local_final = staging_dir.join("consolidated.mp4");
+            let _ = unlink_local_file_with_retry(&staged_local_part).await;
+            let _ = unlink_local_file_with_retry(&staged_local_final).await;
 
             let staged = join_remote_path(remote_base, "consolidated.mp4.part");
             let bin = resolve_rclone_bin(rclone_bin);

@@ -6,8 +6,9 @@ use common::mock_rclone::get_mock_rclone_bin;
 
 use chzzk_load::chzzk::models_chat::RecordedChatMessage;
 use chzzk_load::consolidation::chat::{
-    ChatDeduplicator, DEFAULT_CHAT_DEDUP_WINDOW_MS, cleanup_staged_chat, consolidate_chat,
-    consolidate_chat_local_with_progress, finalize_staged_chat,
+    ChatConsolidationOptions, ChatDeduplicator, DEFAULT_CHAT_DEDUP_WINDOW_MS, cleanup_staged_chat,
+    consolidate_chat, consolidate_chat_local_with_progress, consolidate_chat_with_options,
+    finalize_staged_chat,
 };
 use chzzk_load::consolidation::manifest::{ConsolidationChunk, TargetLocation};
 use tokio_util::sync::CancellationToken;
@@ -321,50 +322,56 @@ async fn test_consolidate_chat_remote_pipeline_success() {
     let mock_bin = get_mock_rclone_bin().to_string_lossy().to_string();
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
     let remote_target = TargetLocation::Remote(format!("mock_remote:{remote_dir_str}"));
+    let staging_dir = temp_dir.join("staging");
+    let options = ChatConsolidationOptions::default()
+        .with_rclone_bin(&mock_bin)
+        .with_staging_dir(&staging_dir);
     let cancel_token = CancellationToken::new();
 
-    let stats = consolidate_chat(
-        &remote_target,
-        &chunks,
-        false,
-        Some(&mock_bin),
-        cancel_token,
-    )
-    .await
-    .expect("Remote consolidate_chat should succeed");
+    let stats =
+        consolidate_chat_with_options(&remote_target, &chunks, false, &options, cancel_token)
+            .await
+            .expect("Remote consolidate_chat should succeed");
 
     assert_eq!(stats.total_messages, 4);
     assert_eq!(stats.deduplicated_messages, 1);
     assert_eq!(stats.emitted_messages, 3);
 
-    // Verify .part was created and final file does not exist yet
-    let part_path = temp_dir.join("consolidated.jsonl.part");
-    let final_path = temp_dir.join("consolidated.jsonl");
+    // Verify .part was finalized into consolidated.jsonl in local staging directory
+    let local_part = staging_dir.join("consolidated.jsonl.part");
+    let local_final = staging_dir.join("consolidated.jsonl");
     assert!(
-        part_path.exists(),
-        "Remote .part file must exist before finalization"
+        !local_part.exists(),
+        "Local .part file must be finalized to final name"
     );
     assert!(
-        !final_path.exists(),
-        "Remote final file must not exist before finalization"
+        local_final.exists(),
+        "Local consolidated.jsonl must exist in staging directory"
     );
 
-    // Atomically finalize staged chat
-    finalize_staged_chat(&remote_target, Some(&mock_bin))
-        .await
-        .expect("Remote finalize_staged_chat should succeed");
-
-    // Verify consolidated.jsonl was created and finalized in the remote location
-    assert!(final_path.exists(), "Remote consolidated.jsonl must exist");
-    let final_content = fs::read_to_string(&final_path).unwrap();
+    let final_content = fs::read_to_string(&local_final).unwrap();
     let lines: Vec<&str> = final_content.lines().collect();
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], line1);
     assert_eq!(lines[1], line2);
     assert_eq!(lines[2], line3);
 
-    // Verify .part was cleaned up
-    assert!(!part_path.exists(), "Part file must be moved/removed");
+    // Test remote finalization via finalize_staged_chat using a staged remote file
+    let remote_part = temp_dir.join("consolidated.jsonl.part");
+    fs::write(&remote_part, &final_content).unwrap();
+    finalize_staged_chat(&remote_target, Some(&mock_bin))
+        .await
+        .expect("Remote finalize_staged_chat should succeed");
+
+    let remote_final = temp_dir.join("consolidated.jsonl");
+    assert!(
+        remote_final.exists(),
+        "Remote consolidated.jsonl must exist after finalize_staged_chat"
+    );
+    assert!(
+        !remote_part.exists(),
+        "Remote .part file must be renamed by finalize_staged_chat"
+    );
 
     // Verify original chunks are intact
     assert!(chunk0_path.exists());
@@ -396,22 +403,26 @@ async fn test_consolidate_chat_remote_pipeline_abort_cleanup_on_error() {
     let mock_bin = get_mock_rclone_bin().to_string_lossy().to_string();
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
     let remote_target = TargetLocation::Remote(format!("mock_remote:{remote_dir_str}"));
+    let staging_dir = temp_dir.join("staging");
+    let options = ChatConsolidationOptions::default()
+        .with_rclone_bin(&mock_bin)
+        .with_staging_dir(&staging_dir);
     let cancel_token = CancellationToken::new();
 
     // Strict mode = true causes error on malformed line
     let result =
-        consolidate_chat(&remote_target, &chunks, true, Some(&mock_bin), cancel_token).await;
+        consolidate_chat_with_options(&remote_target, &chunks, true, &options, cancel_token).await;
     assert!(result.is_err(), "Strict mode must fail on malformed JSON");
 
     // Verify .part file was deleted
-    let part_path = temp_dir.join("consolidated.jsonl.part");
+    let part_path = staging_dir.join("consolidated.jsonl.part");
     assert!(
         !part_path.exists(),
         "Part file must be deleted upon error abort"
     );
 
     // Verify final file was not created
-    let final_path = temp_dir.join("consolidated.jsonl");
+    let final_path = staging_dir.join("consolidated.jsonl");
     assert!(
         !final_path.exists(),
         "Final file must not be created upon error abort"
@@ -551,4 +562,179 @@ async fn test_consolidate_chat_progress_reports_deduplicated_messages() {
     assert_eq!(update.emitted_messages, 2);
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_consolidate_chat_remote_staging_deduplication_and_part_finalization() {
+    let mock_bin = get_mock_rclone_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_cons_chat_rem_stg_{}", rand::random::<u32>()));
+    let staging_dir = std::env::temp_dir().join(format!(
+        "test_cons_chat_rem_stg_local_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let chunk0_path = temp_dir.join("chat_0000.jsonl");
+    let chunk1_path = temp_dir.join("chat_0001.jsonl");
+
+    let line1 = make_json_line(10_000, Some("u1"), "first remote message");
+    let line2 = make_json_line(15_000, Some("u2"), "second remote message");
+    let chunk0_content = format!("{line1}\n{line2}\n");
+    fs::write(&chunk0_path, &chunk0_content).unwrap();
+
+    let line3 = make_json_line(20_000, Some("u3"), "third remote message");
+    let chunk1_content = format!("{line2}\n{line3}\n"); // line2 is duplicate
+    fs::write(&chunk1_path, &chunk1_content).unwrap();
+
+    let chunks = vec![
+        ConsolidationChunk {
+            index: 0,
+            name: "chat_0000.jsonl".to_string(),
+            size: chunk0_content.len() as u64,
+        },
+        ConsolidationChunk {
+            index: 1,
+            name: "chat_0001.jsonl".to_string(),
+            size: chunk1_content.len() as u64,
+        },
+    ];
+
+    let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
+    let remote_target = TargetLocation::Remote(format!("mock_remote:{remote_dir_str}"));
+    let options = ChatConsolidationOptions::default()
+        .with_rclone_bin(mock_bin.to_str().unwrap())
+        .with_staging_dir(&staging_dir);
+    let cancel_token = CancellationToken::new();
+
+    let stats =
+        consolidate_chat_with_options(&remote_target, &chunks, false, &options, cancel_token)
+            .await
+            .expect("Remote consolidate_chat_with_options should succeed");
+
+    assert_eq!(stats.total_messages, 4);
+    assert_eq!(stats.deduplicated_messages, 1);
+    assert_eq!(stats.emitted_messages, 3);
+
+    // Verify local staged .part is finalized to consolidated.jsonl in staging_dir
+    let local_part = staging_dir.join("consolidated.jsonl.part");
+    let local_final = staging_dir.join("consolidated.jsonl");
+    assert!(!local_part.exists(), "Local .part file must be finalized");
+    assert!(
+        local_final.exists(),
+        "Final consolidated.jsonl must exist in staging directory"
+    );
+
+    let content = fs::read_to_string(&local_final).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0], line1);
+    assert_eq!(lines[1], line2);
+    assert_eq!(lines[2], line3);
+
+    // Verify remote chunks remain intact
+    assert!(chunk0_path.exists());
+    assert!(chunk1_path.exists());
+
+    let _ = fs::remove_dir_all(&temp_dir);
+    let _ = fs::remove_dir_all(&staging_dir);
+}
+
+#[tokio::test]
+async fn test_consolidate_chat_remote_staging_cancellation_unlinks_part() {
+    let mock_bin = get_mock_rclone_bin();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_cons_chat_rem_cancel_{}",
+        rand::random::<u32>()
+    ));
+    let staging_dir = std::env::temp_dir().join(format!(
+        "test_cons_chat_rem_cancel_stg_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let chunk0_path = temp_dir.join("chat_0000.jsonl");
+    let line1 = make_json_line(1_000, Some("u1"), "cancellation test message");
+    fs::write(&chunk0_path, format!("{line1}\n")).unwrap();
+
+    let chunks = vec![ConsolidationChunk {
+        index: 0,
+        name: "chat_0000.jsonl".to_string(),
+        size: 50,
+    }];
+
+    let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
+    let remote_target = TargetLocation::Remote(format!("mock_remote:{remote_dir_str}"));
+    let options = ChatConsolidationOptions::default()
+        .with_rclone_bin(mock_bin.to_str().unwrap())
+        .with_staging_dir(&staging_dir);
+    let cancel_token = CancellationToken::new();
+    cancel_token.cancel(); // Pre-cancel
+
+    let result =
+        consolidate_chat_with_options(&remote_target, &chunks, false, &options, cancel_token).await;
+    assert!(result.is_err(), "Cancelled consolidation must return error");
+
+    let local_part = staging_dir.join("consolidated.jsonl.part");
+    let local_final = staging_dir.join("consolidated.jsonl");
+    assert!(
+        !local_part.exists(),
+        "Local .part file must be unlinked on cancellation"
+    );
+    assert!(
+        !local_final.exists(),
+        "Final file must not exist on cancellation"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+    let _ = fs::remove_dir_all(&staging_dir);
+}
+
+#[tokio::test]
+async fn test_consolidate_chat_remote_staging_error_unlinks_part() {
+    let mock_bin = get_mock_rclone_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_cons_chat_rem_err_{}", rand::random::<u32>()));
+    let staging_dir = std::env::temp_dir().join(format!(
+        "test_cons_chat_rem_err_stg_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let chunk0_path = temp_dir.join("chat_0000.jsonl");
+    let line1 = make_json_line(10_000, Some("u1"), "good message");
+    let malformed = "not valid json";
+    fs::write(&chunk0_path, format!("{line1}\n{malformed}\n")).unwrap();
+
+    let chunks = vec![ConsolidationChunk {
+        index: 0,
+        name: "chat_0000.jsonl".to_string(),
+        size: 50,
+    }];
+
+    let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
+    let remote_target = TargetLocation::Remote(format!("mock_remote:{remote_dir_str}"));
+    let options = ChatConsolidationOptions::default()
+        .with_rclone_bin(mock_bin.to_str().unwrap())
+        .with_staging_dir(&staging_dir);
+    let cancel_token = CancellationToken::new();
+
+    // strict = true causes error on malformed line
+    let result =
+        consolidate_chat_with_options(&remote_target, &chunks, true, &options, cancel_token).await;
+    assert!(result.is_err(), "Strict mode must fail on malformed JSON");
+
+    let local_part = staging_dir.join("consolidated.jsonl.part");
+    let local_final = staging_dir.join("consolidated.jsonl");
+    assert!(
+        !local_part.exists(),
+        "Local .part file must be unlinked on error"
+    );
+    assert!(!local_final.exists(), "Final file must not exist on error");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+    let _ = fs::remove_dir_all(&staging_dir);
 }
