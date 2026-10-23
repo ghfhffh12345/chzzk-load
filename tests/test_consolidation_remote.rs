@@ -659,29 +659,3 @@ async fn test_remote_consolidation_upload_cancellation_preserves_local_files() {
         "Local consolidated.jsonl must be preserved upon upload cancellation"
     );
 }
-
-#[tokio::test]
-async fn test_mock_rclone_rcat_is_strictly_deprecated_and_fails() {
-    let _lock = REMOTE_TEST_MUTEX.lock().await;
-    let mock_rclone = get_mock_rclone_bin();
-    let temp_dir = create_temp_test_dir("test_rcat_deprecated");
-    let target_file = temp_dir.join("test.txt");
-
-    let mut cmd = tokio::process::Command::new(mock_rclone);
-    cmd.arg("rcat")
-        .arg(format!("remote:{}", target_file.display()))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    let output = cmd.output().await.expect("execute mock rclone");
-    assert!(
-        !output.status.success(),
-        "rcat must be rejected by mock rclone"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("deprecated subcommand 'rcat' is no longer supported"),
-        "stderr should cite deprecation of rcat: {stderr}"
-    );
-}

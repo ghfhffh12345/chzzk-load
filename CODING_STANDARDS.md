@@ -6,7 +6,7 @@ This document is the authoritative standard for code review under the `/code-rev
 
 ## 1. Test Architecture & Seam Discipline
 
-- **Sub-Second Unit Test Seams**: Unit suites (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, `test_cli_smoke`) must complete execution in under 1 second.
+- **Sub-Second Unit Test Seams**: Unit suites (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, `test_cli_smoke`, `test_consolidation_staging`, `test_consolidation_concat`, `test_consolidation_progress`) must complete execution in under 1 second.
   - *Hard Violation*: Adding blocking sleep ticks, network roundtrips, or heavy multi-step loops to unit test files.
   - *Resolution*: Heavy multi-step integration scenarios belong strictly in `tests/test_engine_events.rs` (20–25s budget).
 - **Virtual Time Testing**: Test async timeouts, grace periods, and debounces using Tokio's virtual time (`tokio::time::pause()`) rather than wall-clock thread sleeps (`std::thread::sleep` or unpaused `tokio::time::sleep`).
@@ -15,6 +15,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Shared Subprocess Mocking**: Never invoke `rustc` or recompile dummy executables inline inside individual test bodies.
   - *Hard Violation*: Inline dummy process compilation or duplicate C-ABI `atexit` temporary directory handlers.
   - *Resolution*: Import and reuse shared mock fixtures via `mod common; use common::mock_ffmpeg::get_mock_ffmpeg_bin;` or `use common::mock_rclone::get_mock_rclone_bin;`, registering mock paths via `common::register_mock_temp_dir`.
+- **Subprocess Mock Test Co-location & Domain API Assertions**: Integration test suites (`tests/test_*.rs`) must assert domain behaviors exclusively through public APIs (`run_consolidation`, `upload_file`, `FfmpegSession`). Never assert raw subprocess mock CLI exit codes or deprecation text directly in domain integration files.
+  - *Hard Violation*: Probing subprocess mock CLI syntax, raw exit codes, or deprecation text directly in domain integration suites.
+  - *Resolution*: Integration suites must test domain behavior through real public APIs. Subprocess mock CLI syntax or deprecation tests belong in dedicated test harness suites under `tests/common/` if needed, not in domain integration files.
 - **Shared Asynchronous Test Listeners**: Encapsulate recurring background notification loops (such as `drain_notify` driving `SessionCustodian::try_purge_drained`) into reusable test helper functions rather than duplicating ad-hoc spawned loops across individual test cases.
   - *Code Smell (Duplicated Code)*: Re-implementing identical background signal listeners (`tokio::spawn(async move { loop { notify.notified().await; ... } })`) across multiple integration tests.
   - *Resolution*: Factor background signal listeners into a shared test helper (such as `spawn_drain_purge_listener(custodian, drain_notify)`) within the test file or `tests/common/`.
