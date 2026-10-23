@@ -6,8 +6,8 @@ This document is the authoritative standard for code review under the `/code-rev
 
 ## 1. Test Architecture & Seam Discipline
 
-- **Sub-Second Unit Test Seams**: Unit suites (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, `test_cli_smoke`, `test_consolidation_staging`, `test_consolidation_concat`, `test_consolidation_progress`) must complete execution in under 1 second.
-  - *Hard Violation*: Adding blocking sleep ticks, network roundtrips, or heavy multi-step loops to unit test files.
+- **Sub-Second Unit Test Seams**: Unit suites (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, `test_cli_smoke`, `test_consolidation_staging`, `test_consolidation_concat`, `test_consolidation_progress`, `test_consolidation_remote`) and internal module tests run via `cargo test --lib <filter>` must complete execution in under 1 second.
+  - *Hard Violation*: Adding blocking sleep ticks, network roundtrips, or heavy multi-step loops to unit test files or internal library tests.
   - *Resolution*: Heavy multi-step integration scenarios belong strictly in `tests/test_engine_events.rs` (20–25s budget).
 - **Virtual Time Testing**: Test async timeouts, grace periods, and debounces using Tokio's virtual time (`tokio::time::pause()`) rather than wall-clock thread sleeps (`std::thread::sleep` or unpaused `tokio::time::sleep`).
   - *Hard Violation*: Adding wall-clock sleeps to simulate timeout expiration or debounce delays in unit tests.
@@ -45,6 +45,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Two-Stage Atomic Staging Pattern**: Concurrently joined worker pipelines (such as video and chat consolidation) must exclusively stream to temporary `.part` staging files. Destination file finalization must occur at the outer orchestrator seam only after zero-exit status of all active futures (e.g. via `tokio::try_join!`), preserving clean abort invariants if any concurrent task fails.
   - *Hard Violation*: Individual worker tasks or futures self-finalizing (`rename`, `moveto`) `.part` files into final destination paths prior to orchestrator join synchronization.
   - *Resolution*: Confine worker futures to reading sources and generating `.part` files. Perform destination renaming and finalization at the caller orchestrator seam after all worker tasks succeed, and purge `.part` files upon abort or failure.
+- **Multi-Track Process Helper Parameter Bundling**: Functions coordinating concurrent video, chat, and upload pipelines must bundle communication channels, cancel tokens, and flags into cohesive option or context structs (e.g., session options or progress sender bundles) to keep parameter counts within Clippy limits ($\le 7$).
+  - *Code Smell (Too Many Arguments)*: Accumulating individual per-track sender channels (`video_tx`, `chat_tx`), tokens, and configuration flags as loose function parameters, requiring `#[allow(clippy::too_many_arguments)]`.
+  - *Resolution*: Group multi-track communication handles and cancellation controls into dedicated data structures (such as `UploadProgressSenders` or execution options) passed by value or reference.
 
 ---
 
@@ -56,6 +59,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Line Budget Containment for Interactive ANSI Terminal Emitters**: Renderers using cursor-up (`\x1b[1A`) repositioning must ensure visible character width is strictly bounded ($\le \text{cols} - 1$) by computing dynamic suffix budgets and clamping progress bars to prevent line wrapping and cursor desynchronization.
   - *Hard Violation*: Emitting unconstrained or dynamically sized progress lines without column clamping in multi-line ANSI terminal loops, risking terminal line wrapping and cursor vertical desynchronization.
   - *Resolution*: Compute dynamic prefix and suffix display budgets, allocate remaining column width ($\text{cols} - \text{prefix} - \text{suffix} - 1$) to progress bars with safe clamping (`available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)`), and clamp or omit bar elements when available width is exhausted.
+- **Synchronized Column Width Budgeting for Dual-Track ANSI Renderers**: When rendering concurrent progress tracks (e.g. video remux/upload and chat deduplication/upload), compute synchronized column width allocation (`resolve_dual_track_bar_width`) across all active tracks based on the maximum suffix length among active tracks (`video_suffix_len.max(chat_suffix_len)`).
+  - *Hard Violation*: Sizing dual-track progress bars independently based on disparate per-track suffix lengths, causing jagged, misaligned bars and potential line-overflow in interactive ANSI rendering.
+  - *Resolution*: Calculate column width using the maximum metric suffix length across all active tracks so bar columns align uniformly, clamping total width to available terminal bounds.
 
 ---
 
