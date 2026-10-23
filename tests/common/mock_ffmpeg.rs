@@ -12,6 +12,7 @@ static MOCK_BIN: OnceLock<PathBuf> = OnceLock::new();
 /// - `hang`: sleeps for 60 seconds (useful for timeout / kill testing)
 /// - `key_error`: writes AES 403 key forbidden error lines to stderr, then sleeps
 /// - `logs_and_exit`: writes a standard FFmpeg progress line to stderr and exits with 0
+/// - `mock_fail` / `video_error` or corrupted chunk bytes: writes invalid data error to stderr and exits with 1
 /// - default: reads lines from stdin until receiving "q\n", then exits with 0
 pub fn get_mock_ffmpeg_bin() -> &'static Path {
     MOCK_BIN.get_or_init(|| {
@@ -38,6 +39,39 @@ fn main() {
     let is_hang = args.iter().any(|a| a.contains("hang"));
     let is_key_error = args.iter().any(|a| a.contains("key_error"));
     let is_logs_and_exit = args.iter().any(|a| a.contains("logs_and_exit"));
+    let is_mock_fail = args.iter().any(|a| a.contains("mock_fail") || a.contains("video_error"));
+    let mut has_corrupt_input = false;
+    if let Some(i_pos) = args.iter().position(|a| a == "-i") {
+        if let Some(input_arg) = args.get(i_pos + 1) {
+            let is_concat = args.iter().any(|a| a == "concat");
+            if is_concat {
+                if let Ok(content) = std::fs::read_to_string(input_arg) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if let Some(entry) = trimmed.strip_prefix("file ") {
+                            let unquoted = entry.trim_matches('\'').trim_matches('"');
+                            if let Ok(bytes) = std::fs::read(unquoted) {
+                                if bytes.starts_with(b"not valid")
+                                    || bytes.starts_with(b"corrupt")
+                                    || bytes.starts_with(b"invalid")
+                                {
+                                    has_corrupt_input = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if let Ok(bytes) = std::fs::read(input_arg) {
+                if bytes.starts_with(b"not valid")
+                    || bytes.starts_with(b"corrupt")
+                    || bytes.starts_with(b"invalid")
+                {
+                    has_corrupt_input = true;
+                }
+            }
+        }
+    }
     if is_hang {
         std::thread::sleep(std::time::Duration::from_secs(60));
     } else if is_key_error {
@@ -53,6 +87,12 @@ fn main() {
         let _ = writeln!(handle, "frame=  100 fps=30 q=-1.0 size=    1024kB");
         let _ = handle.flush();
         std::process::exit(0);
+    } else if is_mock_fail || has_corrupt_input {
+        let stderr = std::io::stderr();
+        let mut handle = stderr.lock();
+        let _ = writeln!(handle, "[h264 @ 0xmock] Invalid data found when processing input");
+        let _ = handle.flush();
+        std::process::exit(1);
     } else {
         let mock_mp4: &[u8] = &[
             0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p',

@@ -737,6 +737,11 @@ fn test_canonical_join_remote_path() {
 
 #[tokio::test]
 async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_preserves_chunks() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    unsafe {
+        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", mock_bin);
+    }
+
     let temp_dir =
         std::env::temp_dir().join(format!("test_run_cons_fail_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
@@ -794,6 +799,11 @@ async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_prese
 
 #[tokio::test]
 async fn test_run_consolidation_video_failure_surfaces_video_error_not_chat_cancellation() {
+    let mock_bin = get_mock_ffmpeg_bin();
+    unsafe {
+        std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", mock_bin);
+    }
+
     let temp_dir =
         std::env::temp_dir().join(format!("test_run_cons_vid_fail_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
