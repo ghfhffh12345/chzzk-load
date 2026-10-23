@@ -11,8 +11,6 @@ static MOCK_BIN: OnceLock<PathBuf> = OnceLock::new();
 /// Supported subcommands:
 /// - `cat <remote_path>`: extracts local path after first `:` and streams to stdout.
 ///   If path contains "fail_cat", exits with code 1.
-/// - `rcat <remote_path>`: reads stdin and writes to local path after first `:`.
-///   If path contains "fail_rcat", exits with code 1.
 /// - `copyto <src> <dst>`: copies local path src to dst.
 ///   If path contains "fail_copy", exits with code 1.
 /// - `moveto <src> <dst>`: renames local path src to dst.
@@ -82,23 +80,8 @@ fn main() {
             }
         }
         "rcat" => {
-            let target = &args[2];
-            if target.contains("fail_rcat") {
-                eprintln!("mock error: failed to rcat {}", target);
-                std::process::exit(1);
-            }
-            let local_path = resolve_path(target);
-            let mut stdin = std::io::stdin().lock();
-            let mut buffer = Vec::new();
-            if let Err(err) = stdin.read_to_end(&mut buffer) {
-                eprintln!("mock error: stdin read failed: {}", err);
-                std::process::exit(1);
-            }
-            if let Err(err) = std::fs::write(&local_path, &buffer) {
-                eprintln!("mock error: cannot write {}: {}", local_path, err);
-                std::process::exit(1);
-            }
-            std::process::exit(0);
+            eprintln!("mock error: deprecated subcommand 'rcat' is no longer supported (ADR 0011)");
+            std::process::exit(1);
         }
         "copyto" => {
             let positional: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with('-')).collect();

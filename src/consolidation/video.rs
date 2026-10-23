@@ -670,7 +670,7 @@ pub fn spawn_stderr_telemetry_monitor(
 /// In local mode: uses FFmpeg's native container-aware Concat Demuxer with `-movflags +faststart`
 /// and `-avoid_negative_ts make_zero` directly targeting `consolidated.mp4.part`.
 /// In remote mode: uses FFmpeg's native container-aware Concat Demuxer with Ephemeral Loopback Server
-/// streaming fragmented MP4 to rclone rcat.
+/// writing directly to a seekable local staged file with faststart seek table (`+faststart`).
 pub async fn consolidate_video(
     target: &TargetLocation,
     chunks: &[ConsolidationChunk],

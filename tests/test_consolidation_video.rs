@@ -285,17 +285,27 @@ fn test_build_local_concat_ffmpeg_args_contains_required_flags() {
     assert!(args.contains(&"make_zero".to_string()));
     assert!(args.contains(&"-movflags".to_string()));
     assert!(args.contains(&"+faststart".to_string()));
+    assert!(
+        !args.contains(
+            &"frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets".to_string()
+        ),
+        "Must NOT contain legacy fragmented MP4 movflags"
+    );
 
     // Verify progress telemetry
     assert!(args.contains(&"-progress".to_string()));
     assert!(args.contains(&"pipe:2".to_string()));
 
-    // Verify output destination is staged file directly with mp4 container format
+    // Verify output destination is staged file directly with mp4 container format (not pipe:1)
     assert!(args.contains(&"-f".to_string()));
     assert!(args.contains(&"mp4".to_string()));
     assert_eq!(
         args.last().unwrap(),
         &output_path.to_string_lossy().to_string()
+    );
+    assert!(
+        !args.contains(&"pipe:1".to_string()),
+        "Must NOT output to stdout pipe:1"
     );
 
     // Verify command builder produces configured command with null stdin
