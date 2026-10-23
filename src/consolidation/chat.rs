@@ -267,9 +267,19 @@ pub async fn finalize_staged_chat(
 /// Deletes the temporary staged `consolidated.jsonl.part` if present upon error or abort.
 ///
 /// In local mode: unlinks `consolidated.jsonl.part` with retry (treating NotFound as success).
-/// In remote mode: unlinks local staged `consolidated.jsonl.part` and executes `rclone deletefile <staged>`.
+/// In remote mode: unlinks local staged `consolidated.jsonl.part` and executes `rclone deletefile <staged>` on remote.
+/// Finalized `consolidated.jsonl` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
 pub async fn cleanup_staged_chat(
     target: &TargetLocation,
+    rclone_bin: Option<&str>,
+) -> anyhow::Result<()> {
+    cleanup_staged_chat_in(target, None::<&Path>, rclone_bin).await
+}
+
+/// Deletes temporary staged chat part files with an optional custom staging directory path.
+pub async fn cleanup_staged_chat_in<P: AsRef<Path>>(
+    target: &TargetLocation,
+    custom_temp_dir: Option<P>,
     rclone_bin: Option<&str>,
 ) -> anyhow::Result<()> {
     match target {
@@ -279,11 +289,9 @@ pub async fn cleanup_staged_chat(
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
-            let staging_dir = super::staging::resolve_staging_dir(target, None::<&Path>);
+            let staging_dir = super::staging::resolve_staging_dir(target, custom_temp_dir);
             let staged_local_part = staging_dir.join("consolidated.jsonl.part");
-            let staged_local_final = staging_dir.join("consolidated.jsonl");
             let _ = unlink_local_file_with_retry(&staged_local_part).await;
-            let _ = unlink_local_file_with_retry(&staged_local_final).await;
 
             let bin = resolve_rclone_bin(rclone_bin);
             let remote_part_path = join_remote_path(remote_base, "consolidated.jsonl.part");

@@ -130,3 +130,124 @@ pub async fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
         Err(e) => Err(e),
     }
 }
+
+/// Inspects an MP4 file on disk for container sanity by scanning top-level boxes for a valid `moov` atom header.
+///
+/// Uses bounded seek operations without buffering media payloads into RAM, running in O(1) time
+/// regardless of video container size. Returns `true` if a non-zero-sized file contains a valid `moov` box header.
+pub fn probe_moov_atom(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let file_len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return false,
+    };
+
+    if file_len < 8 {
+        return false;
+    }
+
+    let mut offset: u64 = 0;
+    let mut header = [0u8; 8];
+
+    while offset.saturating_add(8) <= file_len {
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return false;
+        }
+        if file.read_exact(&mut header).is_err() {
+            return false;
+        }
+
+        let size_u32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let box_type = &header[4..8];
+
+        let box_size: u64 = if size_u32 == 1 {
+            let mut ext_buf = [0u8; 8];
+            if file.read_exact(&mut ext_buf).is_err() {
+                return false;
+            }
+            let ext_size = u64::from_be_bytes(ext_buf);
+            if ext_size < 16 {
+                return false;
+            }
+            ext_size
+        } else if size_u32 == 0 {
+            file_len.saturating_sub(offset)
+        } else if size_u32 < 8 {
+            return false;
+        } else {
+            size_u32 as u64
+        };
+
+        if box_type == b"moov" {
+            // A valid moov atom must have payload child boxes (at least 16 bytes total)
+            return box_size >= 16 && offset.saturating_add(box_size) <= file_len;
+        }
+
+        match offset.checked_add(box_size) {
+            Some(next_offset) => {
+                if next_offset <= offset || next_offset > file_len {
+                    return false;
+                }
+                offset = next_offset;
+            }
+            None => return false,
+        }
+    }
+
+    false
+}
+
+/// Checks whether existing staging files in `staging_dir` satisfy all integrity criteria
+/// to resume cloud upload directly without re-executing FFmpeg or chat deduplication.
+///
+/// If `has_video` is true, `consolidated.mp4` must exist with non-zero size and a valid `moov` atom header.
+/// If `has_chat` is true, `consolidated.jsonl` must exist with non-zero size.
+pub fn check_staging_resume_readiness(staging_dir: &Path, has_video: bool, has_chat: bool) -> bool {
+    if !has_video && !has_chat {
+        return false;
+    }
+
+    if has_video {
+        let mp4_path = staging_dir.join("consolidated.mp4");
+        if !probe_moov_atom(&mp4_path) {
+            return false;
+        }
+    }
+
+    if has_chat {
+        let jsonl_path = staging_dir.join("consolidated.jsonl");
+        match std::fs::metadata(&jsonl_path) {
+            Ok(m) if m.len() > 0 => {}
+            _ => return false,
+        }
+    }
+
+    true
+}
+
+/// Invalidates and removes any existing consolidation staging files in `staging_dir`
+/// (`consolidated.mp4`, `consolidated.jsonl`, `consolidated.mp4.part`, `consolidated.jsonl.part`)
+/// using retry-backed unlink operations to absorb Windows file locking latencies.
+pub async fn invalidate_staging_files(staging_dir: &Path) -> std::io::Result<()> {
+    let files = [
+        "consolidated.mp4",
+        "consolidated.jsonl",
+        "consolidated.mp4.part",
+        "consolidated.jsonl.part",
+    ];
+    for file in files {
+        let p = staging_dir.join(file);
+        if let Err(e) = crate::uploader::unlink_local_file_with_retry(&p).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}

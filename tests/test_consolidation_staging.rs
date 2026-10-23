@@ -1,11 +1,20 @@
 use std::path::{Path, PathBuf};
 
+mod common;
+
 use chzzk_load::consolidation::manifest::TargetLocation;
 use chzzk_load::consolidation::staging::{
-    STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes, compute_target_hash,
-    resolve_staging_dir, staging_folder_name, verify_staging_capacity,
-    verify_staging_capacity_with_space,
+    STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes, check_staging_resume_readiness,
+    compute_target_hash, invalidate_staging_files, probe_moov_atom, resolve_staging_dir,
+    staging_folder_name, verify_staging_capacity, verify_staging_capacity_with_space,
 };
+
+fn create_temp_test_dir(prefix: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("{prefix}_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    common::register_mock_temp_dir(dir.clone());
+    dir
+}
 
 #[test]
 fn test_resolve_staging_dir_with_custom_temp_dir() {
@@ -151,4 +160,178 @@ fn test_verify_staging_capacity_real_filesystem_insufficient_space() {
         err_msg.contains("--temp-dir"),
         "error must recommend '--temp-dir': {err_msg}"
     );
+}
+
+#[test]
+fn test_probe_moov_atom_nonexistent_and_empty_file() {
+    let temp_dir = create_temp_test_dir("test_probe_empty");
+    let nonexistent = temp_dir.join("nonexistent.mp4");
+    assert!(!probe_moov_atom(&nonexistent));
+
+    let empty = temp_dir.join("empty.mp4");
+    std::fs::write(&empty, b"").unwrap();
+    assert!(!probe_moov_atom(&empty));
+
+    let too_short = temp_dir.join("short.mp4");
+    std::fs::write(&too_short, b"1234567").unwrap();
+    assert!(!probe_moov_atom(&too_short));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_probe_moov_atom_corrupted_and_missing_moov() {
+    let temp_dir = create_temp_test_dir("test_probe_corrupt");
+
+    // Random garbage
+    let garbage = temp_dir.join("garbage.mp4");
+    std::fs::write(&garbage, b"random garbage payload that is not mp4").unwrap();
+    assert!(!probe_moov_atom(&garbage));
+
+    // Valid ftyp box only, no moov
+    let ftyp_only = temp_dir.join("ftyp_only.mp4");
+    let mut ftyp_bytes = vec![0x00, 0x00, 0x00, 0x18];
+    ftyp_bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    std::fs::write(&ftyp_only, &ftyp_bytes).unwrap();
+    assert!(!probe_moov_atom(&ftyp_only));
+
+    // Empty 8-byte moov box without payload must be rejected
+    let empty_moov = temp_dir.join("empty_moov.mp4");
+    let mut em_zero = ftyp_bytes.clone();
+    em_zero.extend_from_slice(&[0x00, 0x00, 0x00, 0x08]);
+    em_zero.extend_from_slice(b"moov");
+    std::fs::write(&empty_moov, &em_zero).unwrap();
+    assert!(
+        !probe_moov_atom(&empty_moov),
+        "Empty 8-byte moov box without metadata payload must be rejected"
+    );
+
+    // ftyp + mdat only, no moov
+    let ftyp_mdat = temp_dir.join("ftyp_mdat.mp4");
+    let mut data = ftyp_bytes.clone();
+    data.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    data.extend_from_slice(b"mdat12345678");
+    std::fs::write(&ftyp_mdat, &data).unwrap();
+    assert!(!probe_moov_atom(&ftyp_mdat));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_probe_moov_atom_valid_faststart_and_end_moov() {
+    let temp_dir = create_temp_test_dir("test_probe_valid");
+
+    // Faststart MP4: ftyp (24 bytes) + moov (16 bytes) + mdat (16 bytes)
+    let faststart = temp_dir.join("faststart.mp4");
+    let mut fs_bytes = vec![0x00, 0x00, 0x00, 0x18];
+    fs_bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    fs_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    fs_bytes.extend_from_slice(b"moovmvhd1234");
+    fs_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    fs_bytes.extend_from_slice(b"mdat12345678");
+    std::fs::write(&faststart, &fs_bytes).unwrap();
+    assert!(probe_moov_atom(&faststart));
+
+    // moov at end: ftyp (24 bytes) + mdat (16 bytes) + moov (16 bytes)
+    let end_moov = temp_dir.join("end_moov.mp4");
+    let mut em_bytes = vec![0x00, 0x00, 0x00, 0x18];
+    em_bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    em_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    em_bytes.extend_from_slice(b"mdat12345678");
+    em_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    em_bytes.extend_from_slice(b"moovmvhd1234");
+    std::fs::write(&end_moov, &em_bytes).unwrap();
+    assert!(probe_moov_atom(&end_moov));
+
+    // 64-bit largesize mdat followed by moov
+    let large_box = temp_dir.join("large_box.mp4");
+    let mut lb_bytes = vec![0x00, 0x00, 0x00, 0x18];
+    lb_bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    // size=1 (indicates 64-bit largesize), type="mdat", largesize=24 (16 header + 8 data)
+    lb_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    lb_bytes.extend_from_slice(b"mdat");
+    lb_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18]);
+    lb_bytes.extend_from_slice(b"12345678"); // 8 bytes data
+    lb_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    lb_bytes.extend_from_slice(b"moovmvhd1234");
+    std::fs::write(&large_box, &lb_bytes).unwrap();
+    assert!(probe_moov_atom(&large_box));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_check_staging_resume_readiness() {
+    let temp_dir = create_temp_test_dir("test_staging_resume");
+
+    let mp4_path = temp_dir.join("consolidated.mp4");
+    let jsonl_path = temp_dir.join("consolidated.jsonl");
+
+    // Case 1: Empty staging dir
+    assert!(!check_staging_resume_readiness(&temp_dir, true, true));
+    assert!(!check_staging_resume_readiness(&temp_dir, true, false));
+    assert!(!check_staging_resume_readiness(&temp_dir, false, true));
+
+    // Create valid mp4
+    let mut fs_bytes = vec![0x00, 0x00, 0x00, 0x18];
+    fs_bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    fs_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    fs_bytes.extend_from_slice(b"moovmvhd1234");
+    std::fs::write(&mp4_path, &fs_bytes).unwrap();
+
+    // Valid video only: has_video=true, has_chat=false -> true
+    assert!(check_staging_resume_readiness(&temp_dir, true, false));
+    // But has_chat=true expects chat too -> false
+    assert!(!check_staging_resume_readiness(&temp_dir, true, true));
+
+    // Create 0-byte chat
+    std::fs::write(&jsonl_path, b"").unwrap();
+    assert!(!check_staging_resume_readiness(&temp_dir, true, true));
+
+    // Create valid non-empty chat
+    std::fs::write(&jsonl_path, b"{\"content\":\"hello\"}\n").unwrap();
+    // Now both valid -> true
+    assert!(check_staging_resume_readiness(&temp_dir, true, true));
+    // Chat only -> true
+    assert!(check_staging_resume_readiness(&temp_dir, false, true));
+
+    // Corrupt mp4
+    std::fs::write(&mp4_path, b"corrupted bytes").unwrap();
+    assert!(!check_staging_resume_readiness(&temp_dir, true, true));
+    assert!(!check_staging_resume_readiness(&temp_dir, true, false));
+    // Chat only still valid
+    assert!(check_staging_resume_readiness(&temp_dir, false, true));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_invalidate_staging_files() {
+    let temp_dir = create_temp_test_dir("test_invalidate");
+
+    let mp4 = temp_dir.join("consolidated.mp4");
+    let jsonl = temp_dir.join("consolidated.jsonl");
+    let mp4_part = temp_dir.join("consolidated.mp4.part");
+    let jsonl_part = temp_dir.join("consolidated.jsonl.part");
+    let other_file = temp_dir.join("keep_this.txt");
+
+    std::fs::write(&mp4, b"mp4").unwrap();
+    std::fs::write(&jsonl, b"jsonl").unwrap();
+    std::fs::write(&mp4_part, b"part1").unwrap();
+    std::fs::write(&jsonl_part, b"part2").unwrap();
+    std::fs::write(&other_file, b"keep").unwrap();
+
+    let res = invalidate_staging_files(&temp_dir).await;
+    assert!(res.is_ok());
+
+    assert!(!mp4.exists(), "consolidated.mp4 must be removed");
+    assert!(!jsonl.exists(), "consolidated.jsonl must be removed");
+    assert!(!mp4_part.exists(), "consolidated.mp4.part must be removed");
+    assert!(
+        !jsonl_part.exists(),
+        "consolidated.jsonl.part must be removed"
+    );
+    assert!(other_file.exists(), "other files must remain untouched");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

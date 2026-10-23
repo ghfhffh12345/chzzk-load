@@ -54,6 +54,15 @@ fn main() {
         let _ = handle.flush();
         std::process::exit(0);
     } else {
+        let mock_mp4: &[u8] = &[
+            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p',
+            b'i', b's', b'o', b'm', 0x00, 0x00, 0x02, 0x00,
+            b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+            0x00, 0x00, 0x00, 0x10, b'm', b'o', b'o', b'v',
+            b'm', b'v', b'h', b'd', 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10, b'm', b'd', b'a', b't',
+            b'm', b'o', b'c', b'k', b'd', b'a', b't', b'a',
+        ];
         if let Some(last_arg) = args.last() {
             if !last_arg.starts_with('-')
                 && !last_arg.starts_with("pipe:")
@@ -61,7 +70,7 @@ fn main() {
                 && !last_arg.ends_with("mock_ffmpeg")
                 && !last_arg.ends_with("mock_ffmpeg.exe")
             {
-                let _ = std::fs::write(last_arg, b"mock_mp4_bytes");
+                let _ = std::fs::write(last_arg, mock_mp4);
             }
         }
         let stdin = std::io::stdin();
@@ -74,7 +83,7 @@ fn main() {
         }
         if args.iter().any(|a| a == "pipe:1") {
             let mut stdout = std::io::stdout().lock();
-            let _ = stdout.write_all(b"mock_mp4_bytes");
+            let _ = stdout.write_all(mock_mp4);
             let _ = stdout.flush();
         }
         std::process::exit(0);

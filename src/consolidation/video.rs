@@ -454,9 +454,19 @@ pub async fn finalize_staged_video(
 /// Deletes the temporary staged `consolidated.mp4.part` if present upon error or abort.
 ///
 /// In local mode: unlinks `consolidated.mp4.part` (treating NotFound as success).
-/// In remote mode: executes `rclone deletefile <staged>`.
+/// In remote mode: unlinks local `consolidated.mp4.part` and executes `rclone deletefile <staged>` on remote.
+/// Finalized `consolidated.mp4` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
 pub async fn cleanup_staged_video(
     target: &TargetLocation,
+    rclone_bin: Option<&str>,
+) -> anyhow::Result<()> {
+    cleanup_staged_video_in(target, None::<&Path>, rclone_bin).await
+}
+
+/// Deletes temporary staged video part files with an optional custom staging directory path.
+pub async fn cleanup_staged_video_in<P: AsRef<Path>>(
+    target: &TargetLocation,
+    custom_temp_dir: Option<P>,
     rclone_bin: Option<&str>,
 ) -> anyhow::Result<()> {
     match target {
@@ -466,11 +476,9 @@ pub async fn cleanup_staged_video(
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
-            let staging_dir = super::staging::resolve_staging_dir(target, None::<&Path>);
+            let staging_dir = super::staging::resolve_staging_dir(target, custom_temp_dir);
             let staged_local_part = staging_dir.join("consolidated.mp4.part");
-            let staged_local_final = staging_dir.join("consolidated.mp4");
             let _ = unlink_local_file_with_retry(&staged_local_part).await;
-            let _ = unlink_local_file_with_retry(&staged_local_final).await;
 
             let staged = join_remote_path(remote_base, "consolidated.mp4.part");
             let bin = resolve_rclone_bin(rclone_bin);

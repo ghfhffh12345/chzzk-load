@@ -6,8 +6,9 @@ pub mod staging;
 pub mod video;
 
 pub use staging::{
-    STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes, compute_target_hash,
-    remove_dir_all_with_retry, resolve_staging_dir, staging_folder_name, verify_staging_capacity,
+    STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes, check_staging_resume_readiness,
+    compute_target_hash, invalidate_staging_files, probe_moov_atom, remove_dir_all_with_retry,
+    resolve_staging_dir, staging_folder_name, verify_staging_capacity,
     verify_staging_capacity_with_space,
 };
 
@@ -23,9 +24,9 @@ pub use progress::{
 
 pub use chat::{
     ChatConsolidationOptions, ChatConsolidationStats, ChatDeduplicator, ChatMessageKey,
-    DEFAULT_CHAT_DEDUP_WINDOW_MS, cleanup_staged_chat, consolidate_chat, consolidate_chat_local,
-    consolidate_chat_remote, consolidate_chat_with_options, delete_remote_file,
-    delete_remote_file_checked, finalize_staged_chat,
+    DEFAULT_CHAT_DEDUP_WINDOW_MS, cleanup_staged_chat, cleanup_staged_chat_in, consolidate_chat,
+    consolidate_chat_local, consolidate_chat_remote, consolidate_chat_with_options,
+    delete_remote_file, delete_remote_file_checked, finalize_staged_chat,
 };
 pub use manifest::{
     ChunkGap, ConsolidationChunk, ConsolidationManifest, RawManifestEntry, TargetLocation,
@@ -37,7 +38,7 @@ pub use video::{
     ConcatScriptGuard, VideoConsolidationOptions, VideoConsolidationResult, VideoProgressTelemetry,
     build_local_concat_ffmpeg_args, build_local_concat_ffmpeg_command,
     build_remote_concat_ffmpeg_args, build_remote_concat_ffmpeg_command, cleanup_staged_video,
-    consolidate_video, consolidate_video_local, consolidate_video_remote,
+    cleanup_staged_video_in, consolidate_video, consolidate_video_local, consolidate_video_remote,
     create_temp_concat_script, create_temp_concat_script_in, create_temp_concat_script_in_sync,
     create_temp_concat_script_sync, escape_concat_path, finalize_staged_video,
     generate_concat_script, rename_local_file_with_retry, resolve_ffmpeg_bin,
@@ -327,13 +328,28 @@ pub async fn run_consolidation_with_coordinator(
 
     let total_video_bytes: u64 = manifest.video_chunks.iter().map(|c| c.size).sum();
 
-    // Pre-flight disk capacity verification for remote recordings
-    let staging_dir = if manifest.target.is_remote() {
+    // Pre-flight disk capacity verification and resume sanity check for remote recordings
+    let (staging_dir, can_resume) = if manifest.target.is_remote() {
         let dir = resolve_staging_dir(&manifest.target, args.temp_dir.as_deref());
-        verify_staging_capacity(&dir, total_video_bytes)?;
-        Some(dir)
+        if args.overwrite {
+            // Passing --overwrite invalidates existing local staging files and forces a full clean remux
+            let _ = invalidate_staging_files(&dir).await;
+            verify_staging_capacity(&dir, total_video_bytes)?;
+            (Some(dir), false)
+        } else if check_staging_resume_readiness(&dir, has_video, has_chat) {
+            println!(
+                "[INFO] Detected valid existing consolidated media in staging directory '{}' (moov atom verified). Resuming cloud upload directly.",
+                dir.display()
+            );
+            (Some(dir), true)
+        } else {
+            // Existing staging files are missing or incomplete; invalidate any stale fragments and verify capacity
+            let _ = invalidate_staging_files(&dir).await;
+            verify_staging_capacity(&dir, total_video_bytes)?;
+            (Some(dir), false)
+        }
     } else {
-        None
+        (None, false)
     };
 
     let mut media_session = coordinator.start_media_with_bytes(
@@ -359,7 +375,50 @@ pub async fn run_consolidation_with_coordinator(
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
-    let (video_result, chat_stats) = if has_video && has_chat {
+    let (video_result, chat_stats) = if can_resume {
+        let staging_dir = staging_dir
+            .as_ref()
+            .expect("staging_dir must be resolved for remote resume");
+
+        let resumed_video_result = if has_video {
+            let mp4_path = staging_dir.join("consolidated.mp4");
+            let bytes_written = std::fs::metadata(&mp4_path).map(|m| m.len()).unwrap_or(0);
+            if let Some(v_tx) = media_session.video_sender() {
+                let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
+                    chunks_fed: manifest.video_chunks.len(),
+                    bytes_fed: bytes_written,
+                });
+            }
+            Some(VideoConsolidationResult {
+                chunks_processed: manifest.video_chunks.len(),
+                bytes_written,
+            })
+        } else {
+            None
+        };
+
+        let resumed_chat_stats = if has_chat {
+            if let Some(c_tx) = media_session.chat_sender() {
+                let _ = c_tx.send(ChatProgressUpdate {
+                    chunks_read: manifest.chat_chunks.len(),
+                    total_messages: 0,
+                    deduplicated_messages: 0,
+                    emitted_messages: 0,
+                });
+            }
+            Some(ChatConsolidationStats {
+                total_messages: 0,
+                deduplicated_messages: 0,
+                malformed_messages: 0,
+                emitted_messages: 0,
+            })
+        } else {
+            None
+        };
+
+        media_session.finish(true).await;
+        (resumed_video_result, resumed_chat_stats)
+    } else if has_video && has_chat {
         let video_fut = consolidate_video(
             &manifest.target,
             &manifest.video_chunks,
@@ -383,22 +442,37 @@ pub async fn run_consolidation_with_coordinator(
             (Err(v_err), Ok(_)) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ = cleanup_staged_video(&manifest.target, None).await;
-                let _ = cleanup_staged_chat(&manifest.target, None).await;
+                let _ =
+                    cleanup_staged_video_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                let _ =
+                    cleanup_staged_chat_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                if let Some(ref dir) = staging_dir {
+                    let _ = invalidate_staging_files(dir).await;
+                }
                 return Err(v_err);
             }
             (Ok(_), Err(c_err)) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ = cleanup_staged_video(&manifest.target, None).await;
-                let _ = cleanup_staged_chat(&manifest.target, None).await;
+                let _ =
+                    cleanup_staged_video_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                let _ =
+                    cleanup_staged_chat_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                if let Some(ref dir) = staging_dir {
+                    let _ = invalidate_staging_files(dir).await;
+                }
                 return Err(c_err);
             }
             (Err(v_err), Err(c_err)) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ = cleanup_staged_video(&manifest.target, None).await;
-                let _ = cleanup_staged_chat(&manifest.target, None).await;
+                let _ =
+                    cleanup_staged_video_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                let _ =
+                    cleanup_staged_chat_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                if let Some(ref dir) = staging_dir {
+                    let _ = invalidate_staging_files(dir).await;
+                }
 
                 let v_is_cancel = is_cancellation_error(&v_err);
                 let c_is_cancel = is_cancellation_error(&c_err);
@@ -430,7 +504,11 @@ pub async fn run_consolidation_with_coordinator(
             Err(err) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ = cleanup_staged_video(&manifest.target, None).await;
+                let _ =
+                    cleanup_staged_video_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                if let Some(ref dir) = staging_dir {
+                    let _ = invalidate_staging_files(dir).await;
+                }
                 return Err(err);
             }
         };
@@ -452,7 +530,11 @@ pub async fn run_consolidation_with_coordinator(
             Err(err) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ = cleanup_staged_chat(&manifest.target, None).await;
+                let _ =
+                    cleanup_staged_chat_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                if let Some(ref dir) = staging_dir {
+                    let _ = invalidate_staging_files(dir).await;
+                }
                 return Err(err);
             }
         };
@@ -466,29 +548,49 @@ pub async fn run_consolidation_with_coordinator(
     if manifest.target.is_remote() {
         let remote_base = manifest.target.raw();
         let rclone_bin = resolve_rclone_bin(None);
-        let s_dir = staging_dir
+        let staging_dir = staging_dir
             .as_ref()
             .expect("staging_dir must be resolved for remote consolidation");
 
         // 1. Two-stage cloud upload: upload local files to remote .part destinations via rclone copyto
-        let upload_res = async {
+        let upload_fut = async {
             if has_video {
-                let local_mp4 = s_dir.join("consolidated.mp4");
+                let local_mp4 = staging_dir.join("consolidated.mp4");
                 let remote_part = join_remote_path(remote_base, "consolidated.mp4.part");
                 upload_remote_staged_file(&rclone_bin, &local_mp4, &remote_part).await?;
             }
             if has_chat {
-                let local_jsonl = s_dir.join("consolidated.jsonl");
+                let local_jsonl = staging_dir.join("consolidated.jsonl");
                 let remote_part = join_remote_path(remote_base, "consolidated.jsonl.part");
                 upload_remote_staged_file(&rclone_bin, &local_jsonl, &remote_part).await?;
             }
             Ok::<(), anyhow::Error>(())
-        }
-        .await;
+        };
+
+        let upload_res = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                Err(anyhow::anyhow!("Cloud upload cancelled by cooperative cancellation token"))
+            }
+            res = upload_fut => res,
+        };
 
         if let Err(upload_err) = upload_res {
-            let _ = cleanup_staged_video(&manifest.target, Some(&rclone_bin)).await;
-            let _ = cleanup_staged_chat(&manifest.target, Some(&rclone_bin)).await;
+            let _ = cleanup_staged_video_in(
+                &manifest.target,
+                args.temp_dir.as_deref(),
+                Some(&rclone_bin),
+            )
+            .await;
+            let _ = cleanup_staged_chat_in(
+                &manifest.target,
+                args.temp_dir.as_deref(),
+                Some(&rclone_bin),
+            )
+            .await;
+            eprintln!(
+                "[INFO] Cloud upload failed or was interrupted, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload without re-running FFmpeg.",
+                staging_dir.display()
+            );
             return Err(upload_err);
         }
 
@@ -505,8 +607,18 @@ pub async fn run_consolidation_with_coordinator(
         .await;
 
         if let Err(rename_err) = rename_res {
-            let _ = cleanup_staged_video(&manifest.target, Some(&rclone_bin)).await;
-            let _ = cleanup_staged_chat(&manifest.target, Some(&rclone_bin)).await;
+            let _ = cleanup_staged_video_in(
+                &manifest.target,
+                args.temp_dir.as_deref(),
+                Some(&rclone_bin),
+            )
+            .await;
+            let _ = cleanup_staged_chat_in(
+                &manifest.target,
+                args.temp_dir.as_deref(),
+                Some(&rclone_bin),
+            )
+            .await;
             delete_remote_file(
                 &rclone_bin,
                 &join_remote_path(remote_base, "consolidated.mp4"),
@@ -517,6 +629,10 @@ pub async fn run_consolidation_with_coordinator(
                 &join_remote_path(remote_base, "consolidated.jsonl"),
             )
             .await;
+            eprintln!(
+                "[INFO] Cloud finalization failed, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload.",
+                staging_dir.display()
+            );
             return Err(rename_err);
         }
     } else {
