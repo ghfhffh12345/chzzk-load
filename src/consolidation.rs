@@ -17,8 +17,9 @@ pub use loopback::{
 };
 
 pub use progress::{
-    ChatProgressSnapshot, ChatProgressUpdate, ConsolidationProgressCoordinator,
+    ChatProgressSnapshot, ChatProgressUpdate, ConsolidationProgressCoordinator, CoordinatorOutput,
     MediaProgressSession, PurgeProgressSession, PurgeProgressSnapshot, PurgeProgressUpdate,
+    UploadProgressSession, UploadProgressSnapshot, UploadProgressUpdate, UploadTrack,
     VideoProgressSnapshot, VideoProgressUpdate,
 };
 
@@ -46,8 +47,10 @@ pub use video::{
 };
 
 use crate::cli::ConsolidateArgs;
-use crate::uploader::unlink_local_file_with_retry;
+use crate::uploader::{parse_rclone_log_line, unlink_local_file_with_retry};
 use anyhow::Context;
+use tokio::io::AsyncBufReadExt;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Summary report returned upon consolidation completion.
@@ -294,11 +297,105 @@ pub fn build_remote_staged_upload_command(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::piped());
-    cmd.arg("copyto").arg(local_path).arg(remote_dest);
+    cmd.arg("copyto")
+        .arg(local_path)
+        .arg(remote_dest)
+        .arg("--use-json-log")
+        .arg("--stats")
+        .arg("250ms")
+        .arg("--stats-log-level")
+        .arg("NOTICE");
     for arg in build_consolidate_upload_args(extra_args) {
         cmd.arg(arg);
     }
     cmd
+}
+
+/// Uploads a local file to a remote destination via `rclone copyto` using default
+/// high-throughput transfer options and optional user-specified extra arguments,
+/// dispatching live progress updates through `progress_tx`.
+pub async fn upload_remote_staged_file_with_progress(
+    bin: &str,
+    local_path: &std::path::Path,
+    remote_dest: &str,
+    extra_args: &[String],
+    progress_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
+) -> anyhow::Result<()> {
+    let file_size = tokio::fs::metadata(local_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let mut cmd = build_remote_staged_upload_command(bin, local_path, remote_dest, extra_args);
+    let mut child = cmd.spawn().with_context(|| {
+        format!(
+            "Failed to execute '{bin} copyto {} {remote_dest}'",
+            local_path.display()
+        )
+    })?;
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture stderr from rclone process"))?;
+
+    let mut reader = tokio::io::BufReader::new(stderr).lines();
+    let mut stderr_logs = Vec::new();
+    let mut last_speed = 0.0;
+
+    while let Ok(Some(line)) = reader.next_line().await {
+        if let Some(stats) = parse_rclone_log_line(&line) {
+            let total = if stats.total_bytes > 0 {
+                stats.total_bytes
+            } else {
+                file_size
+            };
+            let speed_mb_s = stats.speed / 1_048_576.0;
+            last_speed = speed_mb_s;
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.send(UploadProgressUpdate {
+                    bytes_uploaded: stats.bytes,
+                    total_bytes: total,
+                    speed_mb_s,
+                });
+            }
+        } else {
+            if stderr_logs.len() >= 30 {
+                stderr_logs.remove(0);
+            }
+            stderr_logs.push(line);
+        }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .with_context(|| "failed to wait for rclone copyto process")?;
+
+    if status.success() {
+        if let Some(ref tx) = progress_tx {
+            let _ = tx.send(UploadProgressUpdate {
+                bytes_uploaded: file_size,
+                total_bytes: file_size,
+                speed_mb_s: last_speed,
+            });
+        }
+        Ok(())
+    } else {
+        let err_msg = stderr_logs.join("\n");
+        let trimmed = err_msg.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!(
+                "rclone copyto for '{}' failed with status {status}",
+                local_path.display()
+            );
+        } else {
+            anyhow::bail!(
+                "rclone copyto for '{}' failed with status {status}: {trimmed}",
+                local_path.display()
+            );
+        }
+    }
 }
 
 /// Uploads a local file to a remote destination via `rclone copyto` using default
@@ -309,25 +406,7 @@ pub async fn upload_remote_staged_file_with_args(
     remote_dest: &str,
     extra_args: &[String],
 ) -> anyhow::Result<()> {
-    let mut cmd = build_remote_staged_upload_command(bin, local_path, remote_dest, extra_args);
-
-    let output = cmd.output().await.with_context(|| {
-        format!(
-            "Failed to execute '{bin} copyto {} {remote_dest}'",
-            local_path.display()
-        )
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "rclone copyto for '{}' failed with status {}: {}",
-            local_path.display(),
-            output.status,
-            stderr.trim()
-        );
-    }
-    Ok(())
+    upload_remote_staged_file_with_progress(bin, local_path, remote_dest, extra_args, None).await
 }
 
 /// Uploads a local file to a remote destination via `rclone copyto` using default
@@ -341,7 +420,8 @@ pub async fn upload_remote_staged_file(
 }
 
 /// Concurrently uploads staged media files (`stream.mp4` and `chat.jsonl`) to remote destinations
-/// (`remote_base/stream.mp4.part` and `remote_base/chat.jsonl.part`) via `rclone copyto`.
+/// (`remote_base/stream.mp4.part` and `remote_base/chat.jsonl.part`) via `rclone copyto`,
+/// dispatching live progress telemetry to optional senders.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
 /// is promptly aborted and killed (`kill_on_drop`).
@@ -351,7 +431,8 @@ pub async fn upload_remote_staged_file(
 ///
 /// On upload failure or cancellation, remote `.part` files are deleted via `rclone deletefile`
 /// while finalized local staging files are strictly preserved.
-pub async fn upload_remote_staged_media(
+#[allow(clippy::too_many_arguments)]
+pub async fn upload_remote_staged_media_with_progress(
     bin: &str,
     remote_base: &str,
     staging_dir: &std::path::Path,
@@ -359,6 +440,8 @@ pub async fn upload_remote_staged_media(
     has_chat: bool,
     extra_args: &[String],
     cancel_token: CancellationToken,
+    video_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
+    chat_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
 ) -> anyhow::Result<()> {
     if !has_video && !has_chat {
         return Ok(());
@@ -370,8 +453,14 @@ pub async fn upload_remote_staged_media(
     let video_upload_fut = async {
         if has_video {
             let local_mp4 = staging_dir.join("stream.mp4");
-            upload_remote_staged_file_with_args(bin, &local_mp4, &remote_video_part, extra_args)
-                .await
+            upload_remote_staged_file_with_progress(
+                bin,
+                &local_mp4,
+                &remote_video_part,
+                extra_args,
+                video_tx,
+            )
+            .await
         } else {
             Ok(())
         }
@@ -380,8 +469,14 @@ pub async fn upload_remote_staged_media(
     let chat_upload_fut = async {
         if has_chat {
             let local_jsonl = staging_dir.join("chat.jsonl");
-            upload_remote_staged_file_with_args(bin, &local_jsonl, &remote_chat_part, extra_args)
-                .await
+            upload_remote_staged_file_with_progress(
+                bin,
+                &local_jsonl,
+                &remote_chat_part,
+                extra_args,
+                chat_tx,
+            )
+            .await
         } else {
             Ok(())
         }
@@ -410,6 +505,40 @@ pub async fn upload_remote_staged_media(
     }
 
     Ok(())
+}
+
+/// Concurrently uploads staged media files (`stream.mp4` and `chat.jsonl`) to remote destinations
+/// (`remote_base/stream.mp4.part` and `remote_base/chat.jsonl.part`) via `rclone copyto`.
+///
+/// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
+/// is promptly aborted and killed (`kill_on_drop`).
+///
+/// Listens to cooperative cancellation via `cancel_token`: if cancelled, active upload
+/// processes are immediately terminated.
+///
+/// On upload failure or cancellation, remote `.part` files are deleted via `rclone deletefile`
+/// while finalized local staging files are strictly preserved.
+pub async fn upload_remote_staged_media(
+    bin: &str,
+    remote_base: &str,
+    staging_dir: &std::path::Path,
+    has_video: bool,
+    has_chat: bool,
+    extra_args: &[String],
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
+    upload_remote_staged_media_with_progress(
+        bin,
+        remote_base,
+        staging_dir,
+        has_video,
+        has_chat,
+        extra_args,
+        cancel_token,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Resolves configuration for consolidation.
@@ -728,7 +857,29 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             .expect("staging_dir must be resolved for remote consolidation");
 
         // 1. Two-stage cloud upload: upload local files to remote .part destinations concurrently via rclone copyto
-        let upload_res = upload_remote_staged_media(
+        let video_bytes = if has_video {
+            tokio::fs::metadata(staging_dir.join("stream.mp4"))
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let chat_bytes = if has_chat {
+            tokio::fs::metadata(staging_dir.join("chat.jsonl"))
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mut upload_session = coordinator.start_upload_tracks(
+            has_video.then_some(video_bytes),
+            has_chat.then_some(chat_bytes),
+        );
+
+        let upload_res = upload_remote_staged_media_with_progress(
             &rclone_bin,
             remote_base,
             staging_dir,
@@ -736,8 +887,12 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             has_chat,
             &settings.rclone.consolidate_extra_args,
             cancel_token.clone(),
+            upload_session.video_sender(),
+            upload_session.chat_sender(),
         )
         .await;
+
+        upload_session.finish(upload_res.is_ok()).await;
 
         if let Err(upload_err) = upload_res {
             eprintln!(
@@ -1007,20 +1162,25 @@ mod tests {
         assert_eq!(args[0], "copyto");
         assert_eq!(args[1], local_path.to_string_lossy().to_string());
         assert_eq!(args[2], remote_dest);
-        assert_eq!(args[3], "--drive-chunk-size");
-        assert_eq!(args[4], "128M");
-        assert_eq!(args[5], "--s3-chunk-size");
-        assert_eq!(args[6], "64M");
-        assert_eq!(args[7], "--s3-upload-concurrency");
-        assert_eq!(args[8], "4");
-        assert_eq!(args[9], "--buffer-size");
-        assert_eq!(args[10], "64M");
-        assert_eq!(args[11], "--multi-thread-streams");
-        assert_eq!(args[12], "4");
-        assert_eq!(args[13], "--multi-thread-cutoff");
-        assert_eq!(args[14], "250M");
-        assert_eq!(args[15], "--checkers");
-        assert_eq!(args[16], "8");
+        assert_eq!(args[3], "--use-json-log");
+        assert_eq!(args[4], "--stats");
+        assert_eq!(args[5], "250ms");
+        assert_eq!(args[6], "--stats-log-level");
+        assert_eq!(args[7], "NOTICE");
+        assert_eq!(args[8], "--drive-chunk-size");
+        assert_eq!(args[9], "128M");
+        assert_eq!(args[10], "--s3-chunk-size");
+        assert_eq!(args[11], "64M");
+        assert_eq!(args[12], "--s3-upload-concurrency");
+        assert_eq!(args[13], "4");
+        assert_eq!(args[14], "--buffer-size");
+        assert_eq!(args[15], "64M");
+        assert_eq!(args[16], "--multi-thread-streams");
+        assert_eq!(args[17], "4");
+        assert_eq!(args[18], "--multi-thread-cutoff");
+        assert_eq!(args[19], "250M");
+        assert_eq!(args[20], "--checkers");
+        assert_eq!(args[21], "8");
     }
 
     #[test]

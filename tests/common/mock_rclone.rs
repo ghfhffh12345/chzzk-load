@@ -116,6 +116,19 @@ fn main() {
             }
             let local_src = resolve_path(src);
             let local_dst = resolve_path(dst);
+            let has_json_log = args.iter().any(|a| a == "--use-json-log");
+            if has_json_log {
+                let file_size = std::fs::metadata(&local_src).map(|m| m.len()).unwrap_or(1024);
+                let half = file_size / 2;
+                eprintln!(
+                    "{{\"level\":\"info\",\"msg\":\"Transferred\",\"stats\":{{\"bytes\":{},\"totalBytes\":{},\"speed\":10485760.0}}}}",
+                    half, file_size
+                );
+                eprintln!(
+                    "{{\"level\":\"info\",\"msg\":\"Transferred\",\"stats\":{{\"bytes\":{},\"totalBytes\":{},\"speed\":10485760.0}}}}",
+                    file_size, file_size
+                );
+            }
             if let Err(err) = std::fs::copy(&local_src, &local_dst) {
                 eprintln!("mock error: copy {} to {} failed: {}", local_src, local_dst, err);
                 std::process::exit(1);

@@ -7,8 +7,9 @@ use chzzk_load::consolidation::progress::{
     ChatProgressUpdate, ConsolidationProgressCoordinator, CoordinatorOutput,
     DEFAULT_FALLBACK_BAR_WIDTH, MAX_BAR_WIDTH, MIN_BAR_WIDTH, MilestoneTracker,
     ProgressBarWidthMode, PurgeProgressSnapshot, PurgeProgressUpdate, SAFETY_MARGIN, STYLE_DIM,
-    STYLE_RESET, VideoProgressSnapshot, VideoProgressUpdate, format_bytes, format_interactive_bar,
-    format_number_with_commas, format_progress_bar,
+    STYLE_RESET, UploadProgressSnapshot, UploadProgressUpdate, UploadTrack, VideoProgressSnapshot,
+    VideoProgressUpdate, format_bytes, format_interactive_bar, format_number_with_commas,
+    format_progress_bar,
 };
 use chzzk_load::consolidation::{VideoProgressTelemetry, run_consolidation_with_coordinator};
 
@@ -202,6 +203,89 @@ fn test_purge_progress_snapshot_formatting() {
         partial.format_non_interactive(),
         "[INFO] [DEL] Purge progress: 20% (4/20 chunks deleted)"
     );
+}
+
+#[test]
+fn test_upload_progress_snapshot_formatting() {
+    let snapshot = UploadProgressSnapshot {
+        bytes_uploaded: 5_242_880,
+        total_bytes: 10_485_760,
+        speed_mb_s: 2.5,
+    };
+    assert_eq!(snapshot.pct(), 50);
+    assert_eq!(snapshot.metric_suffix(), " 50% (5.0 MB/10.0 MB) 2.5 MB/s");
+    assert_eq!(snapshot.metric_suffix_len(), 30);
+
+    // Interactive video upload line: UP V with COLOR_GREEN
+    assert_eq!(
+        snapshot.format_interactive(UploadTrack::Video, 20),
+        format!(
+            "{COLOR_GREEN} UP V {STYLE_RESET}{}{STYLE_DIM} 50% (5.0 MB/10.0 MB) 2.5 MB/s{STYLE_RESET}",
+            format_interactive_bar(20, 50)
+        )
+    );
+
+    // Interactive chat upload line: UP C with COLOR_BLUE
+    assert_eq!(
+        snapshot.format_interactive(UploadTrack::Chat, 20),
+        format!(
+            "{COLOR_BLUE} UP C {STYLE_RESET}{}{STYLE_DIM} 50% (5.0 MB/10.0 MB) 2.5 MB/s{STYLE_RESET}",
+            format_interactive_bar(20, 50)
+        )
+    );
+
+    // Non-interactive formats without ANSI escapes
+    assert_eq!(
+        snapshot.format_non_interactive(UploadTrack::Video),
+        "[INFO] [UP V] Upload progress: 50% (5.0 MB/10.0 MB) speed: 2.5 MB/s"
+    );
+    assert_eq!(
+        snapshot.format_non_interactive(UploadTrack::Chat),
+        "[INFO] [UP C] Upload progress: 50% (5.0 MB/10.0 MB) speed: 2.5 MB/s"
+    );
+
+    // 0 total bytes edge case
+    let empty_snap = UploadProgressSnapshot::default();
+    assert_eq!(empty_snap.pct(), 100);
+    assert_eq!(empty_snap.metric_suffix(), " 100% (0 B/0 B) 0.0 MB/s");
+}
+
+#[test]
+fn test_resolve_upload_bar_width() {
+    let coordinator = ConsolidationProgressCoordinator::new(true).with_terminal_width(80);
+    let video = UploadProgressSnapshot {
+        bytes_uploaded: 5_242_880,
+        total_bytes: 10_485_760,
+        speed_mb_s: 2.5,
+    };
+    let chat = UploadProgressSnapshot {
+        bytes_uploaded: 1_000,
+        total_bytes: 2_000,
+        speed_mb_s: 0.1,
+    };
+
+    // When both video and chat are active
+    let both_width = coordinator.resolve_upload_bar_width(&video, &chat, true, true);
+    let max_len = video.metric_suffix_len().max(chat.metric_suffix_len());
+    assert_eq!(both_width, coordinator.resolve_bar_width(max_len));
+
+    // When only video is active
+    let video_only_width = coordinator.resolve_upload_bar_width(&video, &chat, true, false);
+    assert_eq!(
+        video_only_width,
+        coordinator.resolve_bar_width(video.metric_suffix_len())
+    );
+
+    // When only chat is active
+    let chat_only_width = coordinator.resolve_upload_bar_width(&video, &chat, false, true);
+    assert_eq!(
+        chat_only_width,
+        coordinator.resolve_bar_width(chat.metric_suffix_len())
+    );
+
+    // When neither is active
+    let neither_width = coordinator.resolve_upload_bar_width(&video, &chat, false, false);
+    assert_eq!(neither_width, coordinator.resolve_bar_width(0));
 }
 
 #[test]
@@ -999,11 +1083,23 @@ fn test_ansi_suppression_non_interactive() {
         chunks_deleted: 20,
         total_chunks: 20,
     };
+    let up_v = UploadProgressSnapshot {
+        bytes_uploaded: 50_000_000,
+        total_bytes: 100_000_000,
+        speed_mb_s: 15.2,
+    };
+    let up_c = UploadProgressSnapshot {
+        bytes_uploaded: 2_500_000,
+        total_bytes: 5_000_000,
+        speed_mb_s: 1.1,
+    };
 
     for text in [
         vid.format_non_interactive(),
         chat.format_non_interactive(),
         del.format_non_interactive(),
+        up_v.format_non_interactive(UploadTrack::Video),
+        up_c.format_non_interactive(UploadTrack::Chat),
     ] {
         assert!(!text.contains('\x1b'), "must not contain ANSI escape");
         assert!(!text.contains('\r'), "must not contain carriage return");
@@ -1096,6 +1192,204 @@ async fn test_coordinator_interactive_single_media_chat_only() {
     assert!(
         !text.contains("\x1b[1A"),
         "single-media must not use dual-line cursor up \\x1b[1A"
+    );
+}
+
+#[tokio::test]
+async fn test_coordinator_interactive_dual_upload() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, true);
+
+    let mut session = coordinator.start_upload(100_000_000, 5_000_000);
+    assert!(session.video_sender().is_some());
+    assert!(session.chat_sender().is_some());
+
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    let _ = v_tx.send(UploadProgressUpdate {
+        bytes_uploaded: 50_000_000,
+        total_bytes: 100_000_000,
+        speed_mb_s: 15.0,
+    });
+    let _ = c_tx.send(UploadProgressUpdate {
+        bytes_uploaded: 2_500_000,
+        total_bytes: 5_000_000,
+        speed_mb_s: 1.2,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("UP V"), "must render UP V in output");
+    assert!(text.contains("UP C"), "must render UP C in output");
+    assert!(text.contains("100%"), "final render must show 100%");
+    assert!(text.contains("━"), "must contain filled bar character ━");
+    assert!(
+        text.contains('\x1b'),
+        "must contain ANSI escapes for TTY mode"
+    );
+    assert!(text.ends_with('\n'), "must terminate with newline");
+}
+
+#[tokio::test]
+async fn test_coordinator_interactive_single_upload_video_only() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, true);
+
+    let mut session = coordinator.start_upload(100_000_000, 0);
+    assert!(session.video_sender().is_some());
+    assert!(session.chat_sender().is_none());
+
+    let v_tx = session.video_sender().unwrap();
+    let _ = v_tx.send(UploadProgressUpdate {
+        bytes_uploaded: 50_000_000,
+        total_bytes: 100_000_000,
+        speed_mb_s: 15.0,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("UP V"), "must render UP V");
+    assert!(!text.contains("UP C"), "video-only must NOT render UP C");
+    assert!(
+        !text.contains("\x1b[1A"),
+        "single-track upload must not use dual-line cursor up \\x1b[1A"
+    );
+}
+
+#[tokio::test]
+async fn test_coordinator_interactive_single_upload_chat_only() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, true);
+
+    let mut session = coordinator.start_upload(0, 5_000_000);
+    assert!(session.video_sender().is_none());
+    assert!(session.chat_sender().is_some());
+
+    let c_tx = session.chat_sender().unwrap();
+    let _ = c_tx.send(UploadProgressUpdate {
+        bytes_uploaded: 2_500_000,
+        total_bytes: 5_000_000,
+        speed_mb_s: 1.2,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("UP C"), "must render UP C");
+    assert!(!text.contains("UP V"), "chat-only must NOT render UP V");
+    assert!(
+        !text.contains("\x1b[1A"),
+        "single-track upload must not use dual-line cursor up \\x1b[1A"
+    );
+}
+
+#[tokio::test]
+async fn test_coordinator_non_interactive_upload_milestones() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let mut session = coordinator.start_upload(10_000_000, 10_000_000);
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    for i in 1..=5 {
+        let _ = v_tx.send(UploadProgressUpdate {
+            bytes_uploaded: i * 2_000_000,
+            total_bytes: 10_000_000,
+            speed_mb_s: 10.0,
+        });
+        let _ = c_tx.send(UploadProgressUpdate {
+            bytes_uploaded: i * 2_000_000,
+            total_bytes: 10_000_000,
+            speed_mb_s: 1.0,
+        });
+    }
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        !text.contains('\x1b'),
+        "non-interactive upload output must NOT contain ANSI escapes"
+    );
+    assert!(
+        !text.contains('\r'),
+        "non-interactive upload output must NOT contain carriage return"
+    );
+    assert!(text.contains("[INFO] [UP V] Upload progress: 0%"));
+    assert!(text.contains("[INFO] [UP C] Upload progress: 0%"));
+    assert!(text.contains("[INFO] [UP V] Upload progress: 20%"));
+    assert!(text.contains("[INFO] [UP C] Upload progress: 20%"));
+    assert!(text.contains("[INFO] [UP V] Upload progress: 100%"));
+    assert!(text.contains("[INFO] [UP C] Upload progress: 100%"));
+}
+
+#[tokio::test]
+async fn test_synchronized_dual_upload_track_alignment() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(80);
+
+    let mut session = coordinator.start_upload(100_000_000, 10_000_000);
+    let v_tx = session.video_sender().unwrap();
+    let c_tx = session.chat_sender().unwrap();
+
+    let _ = v_tx.send(UploadProgressUpdate {
+        bytes_uploaded: 60_000_000,
+        total_bytes: 100_000_000,
+        speed_mb_s: 25.4,
+    });
+    let _ = c_tx.send(UploadProgressUpdate {
+        bytes_uploaded: 6_000_000,
+        total_bytes: 10_000_000,
+        speed_mb_s: 2.1,
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+    let vid_lines: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|l| l.contains("UP V"))
+        .collect();
+    let chat_lines: Vec<&str> = rows
+        .iter()
+        .copied()
+        .filter(|l| l.contains("UP C"))
+        .collect();
+
+    assert!(!vid_lines.is_empty(), "must render UP V line");
+    assert!(!chat_lines.is_empty(), "must render UP C line");
+
+    let last_vid = vid_lines.last().unwrap();
+    let last_chat = chat_lines.last().unwrap();
+
+    let vid_vis_len = visible_width(last_vid);
+    let chat_vis_len = visible_width(last_chat);
+    assert!(
+        vid_vis_len <= 79,
+        "UP V line visible length ({vid_vis_len}) must never exceed 79 columns on 80-col terminal"
+    );
+    assert!(
+        chat_vis_len <= 79,
+        "UP C line visible length ({chat_vis_len}) must never exceed 79 columns on 80-col terminal"
+    );
+
+    let vid_track_len = track_width(last_vid);
+    let chat_track_len = track_width(last_chat);
+
+    assert_eq!(
+        vid_track_len, chat_track_len,
+        "UP V and UP C tracks must have identical synchronized width"
+    );
+    assert!(
+        (15..=40).contains(&vid_track_len),
+        "Track width ({vid_track_len}) must be clamped within [15, 40]"
     );
 }
 

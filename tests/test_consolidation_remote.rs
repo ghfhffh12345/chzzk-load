@@ -7,8 +7,11 @@ use common::mock_rclone::get_mock_rclone_bin;
 
 use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::{
+    ConsolidationProgressCoordinator, CoordinatorOutput, UploadProgressUpdate,
     build_remote_staged_upload_command, run_consolidation, run_consolidation_with_cancel,
-    upload_remote_staged_file, upload_remote_staged_file_with_args, upload_remote_staged_media,
+    run_consolidation_with_coordinator_and_cancel, upload_remote_staged_file,
+    upload_remote_staged_file_with_args, upload_remote_staged_file_with_progress,
+    upload_remote_staged_media, upload_remote_staged_media_with_progress,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -728,6 +731,11 @@ async fn test_remote_staged_upload_high_throughput_args_and_custom_extra_args() 
     assert_eq!(args[0], "copyto");
     assert_eq!(args[1], local_file.to_string_lossy().to_string());
     assert_eq!(args[2], remote_dest);
+    assert!(args.contains(&"--use-json-log".to_string()));
+    assert!(args.contains(&"--stats".to_string()));
+    assert!(args.contains(&"250ms".to_string()));
+    assert!(args.contains(&"--stats-log-level".to_string()));
+    assert!(args.contains(&"NOTICE".to_string()));
     assert!(args.contains(&"--drive-chunk-size".to_string()));
     assert!(args.contains(&"128M".to_string()));
     assert!(args.contains(&"--s3-chunk-size".to_string()));
@@ -1252,4 +1260,219 @@ async fn test_upload_remote_staged_media_seam_cancellation_and_remote_cleanup() 
     // Verify local staging files remain intact
     assert!(local_mp4.exists());
     assert!(local_jsonl.exists());
+}
+
+#[tokio::test]
+async fn test_upload_remote_staged_file_with_progress_telemetry() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let mock_rclone = get_mock_rclone_bin();
+    let temp_dir = create_temp_test_dir("test_upload_staged_progress");
+    let local_file = temp_dir.join("sample.mp4");
+    let remote_dest_file = temp_dir.join("remote.mp4");
+
+    fs::write(&local_file, vec![0u8; 10_000]).unwrap();
+    let remote_dest = format!(
+        "mock_remote:{}",
+        remote_dest_file.to_string_lossy().replace('\\', "/")
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UploadProgressUpdate>();
+    let res = upload_remote_staged_file_with_progress(
+        mock_rclone.to_str().unwrap(),
+        &local_file,
+        &remote_dest,
+        &[],
+        Some(tx),
+    )
+    .await;
+
+    assert!(res.is_ok(), "Upload should succeed: {:?}", res.err());
+    assert_eq!(fs::metadata(&remote_dest_file).unwrap().len(), 10_000);
+
+    let mut updates = Vec::new();
+    while let Ok(upd) = rx.try_recv() {
+        updates.push(upd);
+    }
+
+    assert!(
+        !updates.is_empty(),
+        "Must receive progress updates from mock rclone"
+    );
+    let final_upd = updates.last().unwrap();
+    assert_eq!(final_upd.bytes_uploaded, 10_000);
+    assert_eq!(final_upd.total_bytes, 10_000);
+}
+
+#[tokio::test]
+async fn test_upload_remote_staged_media_with_progress_telemetry() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let mock_rclone = get_mock_rclone_bin();
+    let temp_dir = create_temp_test_dir("test_upload_media_progress");
+    let staging_dir = temp_dir.join("staging");
+    let remote_dest_dir = temp_dir.join("remote");
+
+    fs::create_dir_all(&staging_dir).unwrap();
+    fs::create_dir_all(&remote_dest_dir).unwrap();
+
+    let local_mp4 = staging_dir.join("stream.mp4");
+    let local_jsonl = staging_dir.join("chat.jsonl");
+    fs::write(&local_mp4, vec![0u8; 20_000]).unwrap();
+    fs::write(&local_jsonl, b"chat lines\n").unwrap();
+
+    let remote_base = format!(
+        "mock_remote:{}",
+        remote_dest_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let (v_tx, mut v_rx) = tokio::sync::mpsc::unbounded_channel::<UploadProgressUpdate>();
+    let (c_tx, mut c_rx) = tokio::sync::mpsc::unbounded_channel::<UploadProgressUpdate>();
+
+    let res = upload_remote_staged_media_with_progress(
+        mock_rclone.to_str().unwrap(),
+        &remote_base,
+        &staging_dir,
+        true,
+        true,
+        &[],
+        CancellationToken::new(),
+        Some(v_tx),
+        Some(c_tx),
+    )
+    .await;
+
+    assert!(res.is_ok(), "Upload should succeed: {:?}", res.err());
+
+    let mut v_updates = Vec::new();
+    while let Ok(upd) = v_rx.try_recv() {
+        v_updates.push(upd);
+    }
+    let mut c_updates = Vec::new();
+    while let Ok(upd) = c_rx.try_recv() {
+        c_updates.push(upd);
+    }
+
+    assert!(!v_updates.is_empty(), "Must receive video progress updates");
+    assert!(!c_updates.is_empty(), "Must receive chat progress updates");
+
+    assert_eq!(v_updates.last().unwrap().bytes_uploaded, 20_000);
+    assert_eq!(
+        c_updates.last().unwrap().bytes_uploaded,
+        b"chat lines\n".len() as u64
+    );
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_interactive_upload_telemetry() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_interactive_upload");
+    let staging_parent = create_temp_test_dir("test_remote_interactive_staging");
+
+    let chunk0 = remote_dir.join("chunk_0000.ts");
+    let chat0 = remote_dir.join("chat_0000.jsonl");
+    let meta = remote_dir.join("metadata.jsonl");
+    fs::write(&chunk0, b"mock_video_payload").unwrap();
+    let line1 = make_chat_line(10_000, "user1", "msg1");
+    fs::write(&chat0, format!("{line1}\n")).unwrap();
+    fs::write(&meta, r#"{"type":"SESSION_START","stream_offset_ms":0}"#).unwrap();
+
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator =
+        ConsolidationProgressCoordinator::with_output(output, true).with_terminal_width(80);
+
+    let remote_target = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+    let args = ConsolidateArgs {
+        path: remote_target,
+        temp_dir: Some(staging_parent),
+        config: None,
+        overwrite: false,
+        strict: false,
+        keep_original: false,
+        delete_concurrency: 4,
+    };
+
+    let summary =
+        run_consolidation_with_coordinator_and_cancel(args, coordinator, CancellationToken::new())
+            .await
+            .expect("Consolidation with interactive upload telemetry should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        text.contains("UP V"),
+        "Must render UP V progress bar: {text}"
+    );
+    assert!(
+        text.contains("UP C"),
+        "Must render UP C progress bar: {text}"
+    );
+    assert!(text.contains("100%"), "Must show 100% completion: {text}");
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_non_interactive_upload_telemetry() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_non_interactive_upload");
+    let staging_parent = create_temp_test_dir("test_remote_non_interactive_staging");
+
+    let chunk0 = remote_dir.join("chunk_0000.ts");
+    let chat0 = remote_dir.join("chat_0000.jsonl");
+    let meta = remote_dir.join("metadata.jsonl");
+    fs::write(&chunk0, b"mock_video_payload").unwrap();
+    let line1 = make_chat_line(10_000, "user1", "msg1");
+    fs::write(&chat0, format!("{line1}\n")).unwrap();
+    fs::write(&meta, r#"{"type":"SESSION_START","stream_offset_ms":0}"#).unwrap();
+
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let remote_target = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+    let args = ConsolidateArgs {
+        path: remote_target,
+        temp_dir: Some(staging_parent),
+        config: None,
+        overwrite: false,
+        strict: false,
+        keep_original: false,
+        delete_concurrency: 4,
+    };
+
+    let summary =
+        run_consolidation_with_coordinator_and_cancel(args, coordinator, CancellationToken::new())
+            .await
+            .expect("Consolidation with non-interactive upload telemetry should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        !text.contains('\x1b'),
+        "Non-interactive output must NOT contain ANSI escapes: {text}"
+    );
+    assert!(
+        !text.contains('\r'),
+        "Non-interactive output must NOT contain carriage returns: {text}"
+    );
+    assert!(
+        text.contains("[INFO] [UP V] Upload progress:"),
+        "Must contain non-interactive UP V milestone: {text}"
+    );
+    assert!(
+        text.contains("[INFO] [UP C] Upload progress:"),
+        "Must contain non-interactive UP C milestone: {text}"
+    );
 }

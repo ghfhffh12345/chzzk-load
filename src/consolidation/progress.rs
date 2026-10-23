@@ -256,6 +256,72 @@ impl PurgeProgressSnapshot {
     }
 }
 
+/// Media stream upload track for cloud consolidation telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadTrack {
+    Video,
+    Chat,
+}
+
+/// Progress metrics for media upload consolidation.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UploadProgressSnapshot {
+    pub bytes_uploaded: u64,
+    pub total_bytes: u64,
+    pub speed_mb_s: f64,
+}
+
+impl UploadProgressSnapshot {
+    pub fn pct(&self) -> u16 {
+        if self.total_bytes == 0 {
+            100
+        } else {
+            ((self.bytes_uploaded as f64 / self.total_bytes as f64) * 100.0)
+                .round()
+                .min(100.0) as u16
+        }
+    }
+
+    pub fn metric_suffix(&self) -> String {
+        let pct = self.pct();
+        let uploaded_str = format_bytes(self.bytes_uploaded);
+        let total_str = format_bytes(self.total_bytes);
+        format!(
+            " {pct}% ({uploaded_str}/{total_str}) {:.1} MB/s",
+            self.speed_mb_s
+        )
+    }
+
+    pub fn metric_suffix_len(&self) -> usize {
+        self.metric_suffix().chars().count()
+    }
+
+    pub fn format_interactive(&self, track: UploadTrack, bar_width: usize) -> String {
+        let pct = self.pct();
+        let bar = format_interactive_bar(bar_width, pct);
+        let suffix = self.metric_suffix();
+        let (color, badge) = match track {
+            UploadTrack::Video => (COLOR_GREEN, " UP V "),
+            UploadTrack::Chat => (COLOR_BLUE, " UP C "),
+        };
+        format!("{color}{badge}{STYLE_RESET}{bar}{STYLE_DIM}{suffix}{STYLE_RESET}")
+    }
+
+    pub fn format_non_interactive(&self, track: UploadTrack) -> String {
+        let pct = self.pct();
+        let uploaded_str = format_bytes(self.bytes_uploaded);
+        let total_str = format_bytes(self.total_bytes);
+        let tag = match track {
+            UploadTrack::Video => "UP V",
+            UploadTrack::Chat => "UP C",
+        };
+        format!(
+            "[INFO] [{tag}] Upload progress: {pct}% ({uploaded_str}/{total_str}) speed: {:.1} MB/s",
+            self.speed_mb_s
+        )
+    }
+}
+
 /// Tracks milestone triggers for non-interactive mode.
 ///
 /// Triggers on:
@@ -334,6 +400,14 @@ pub struct ChatProgressUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PurgeProgressUpdate {
     pub chunks_deleted: usize,
+}
+
+/// Upload pipeline progress event sent to the telemetry coordinator.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UploadProgressUpdate {
+    pub bytes_uploaded: u64,
+    pub total_bytes: u64,
+    pub speed_mb_s: f64,
 }
 
 /// Thread-safe output sink wrapper for telemetry rendering.
@@ -425,6 +499,28 @@ pub struct PurgeProgressSession {
 impl PurgeProgressSession {
     pub fn purge_sender(&self) -> Option<mpsc::UnboundedSender<PurgeProgressUpdate>> {
         self.purge_tx.clone()
+    }
+
+    pub async fn finish(&mut self, success: bool) {
+        teardown_session(&mut self.finish_tx, &mut self.handle, success).await;
+    }
+}
+
+/// Live progress session for concurrent video and chat cloud uploads.
+pub struct UploadProgressSession {
+    video_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
+    chat_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
+    finish_tx: Option<oneshot::Sender<bool>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl UploadProgressSession {
+    pub fn video_sender(&self) -> Option<mpsc::UnboundedSender<UploadProgressUpdate>> {
+        self.video_tx.clone()
+    }
+
+    pub fn chat_sender(&self) -> Option<mpsc::UnboundedSender<UploadProgressUpdate>> {
+        self.chat_tx.clone()
     }
 
     pub async fn finish(&mut self, success: bool) {
@@ -526,21 +622,52 @@ impl ConsolidationProgressCoordinator {
         }
     }
 
+    fn resolve_dual_track_bar_width(
+        &self,
+        video_suffix_len: usize,
+        chat_suffix_len: usize,
+        has_video: bool,
+        has_chat: bool,
+    ) -> usize {
+        let max_suffix_len = match (has_video, has_chat) {
+            (true, true) => video_suffix_len.max(chat_suffix_len),
+            (true, false) => video_suffix_len,
+            (false, true) => chat_suffix_len,
+            (false, false) => 0,
+        };
+        self.resolve_bar_width(max_suffix_len)
+    }
+
     /// Resolves synchronized progress bar width for concurrent video and chat tracks.
-    pub(crate) fn resolve_media_bar_width(
+    pub fn resolve_media_bar_width(
         &self,
         video: &VideoProgressSnapshot,
         chat: &ChatProgressSnapshot,
         has_video: bool,
         has_chat: bool,
     ) -> usize {
-        let max_suffix_len = match (has_video, has_chat) {
-            (true, true) => video.metric_suffix_len().max(chat.metric_suffix_len()),
-            (true, false) => video.metric_suffix_len(),
-            (false, true) => chat.metric_suffix_len(),
-            (false, false) => 0,
-        };
-        self.resolve_bar_width(max_suffix_len)
+        self.resolve_dual_track_bar_width(
+            video.metric_suffix_len(),
+            chat.metric_suffix_len(),
+            has_video,
+            has_chat,
+        )
+    }
+
+    /// Resolves synchronized progress bar width for concurrent video and chat upload tracks.
+    pub fn resolve_upload_bar_width(
+        &self,
+        video: &UploadProgressSnapshot,
+        chat: &UploadProgressSnapshot,
+        has_video: bool,
+        has_chat: bool,
+    ) -> usize {
+        self.resolve_dual_track_bar_width(
+            video.metric_suffix_len(),
+            chat.metric_suffix_len(),
+            has_video,
+            has_chat,
+        )
     }
 
     pub fn start_media(&self, total_video: usize, total_chat: usize) -> MediaProgressSession {
@@ -864,6 +991,257 @@ impl ConsolidationProgressCoordinator {
             handle: Some(handle),
         }
     }
+
+    /// Starts a live progress telemetry session for concurrent cloud uploads (`UP V` and `UP C`).
+    pub fn start_upload(
+        &self,
+        total_video_bytes: u64,
+        total_chat_bytes: u64,
+    ) -> UploadProgressSession {
+        self.start_upload_tracks(
+            (total_video_bytes > 0).then_some(total_video_bytes),
+            (total_chat_bytes > 0).then_some(total_chat_bytes),
+        )
+    }
+
+    /// Starts a live progress telemetry session for explicitly specified upload tracks.
+    pub fn start_upload_tracks(
+        &self,
+        video_bytes: Option<u64>,
+        chat_bytes: Option<u64>,
+    ) -> UploadProgressSession {
+        let has_video = video_bytes.is_some();
+        let has_chat = chat_bytes.is_some();
+
+        if !has_video && !has_chat {
+            return UploadProgressSession {
+                video_tx: None,
+                chat_tx: None,
+                finish_tx: None,
+                handle: None,
+            };
+        }
+
+        let (v_tx, mut v_rx) = mpsc::unbounded_channel::<UploadProgressUpdate>();
+        let (c_tx, mut c_rx) = mpsc::unbounded_channel::<UploadProgressUpdate>();
+        let (finish_tx, mut finish_rx) = oneshot::channel::<bool>();
+
+        let is_tty = self.is_tty;
+        let coordinator = self.clone();
+        let output = self.output.clone();
+        let total_video_bytes = video_bytes.unwrap_or(0);
+        let total_chat_bytes = chat_bytes.unwrap_or(0);
+
+        let handle = tokio::spawn(async move {
+            let mut video_snapshot = UploadProgressSnapshot {
+                bytes_uploaded: 0,
+                total_bytes: total_video_bytes,
+                speed_mb_s: 0.0,
+            };
+            let mut chat_snapshot = UploadProgressSnapshot {
+                bytes_uploaded: 0,
+                total_bytes: total_chat_bytes,
+                speed_mb_s: 0.0,
+            };
+            let start_time = Instant::now();
+            let mut video_milestones = MilestoneTracker::new(start_time);
+            let mut chat_milestones = MilestoneTracker::new(start_time);
+
+            let mut first_render = true;
+            let mut dirty = true;
+            let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
+            tick_interval.tick().await;
+
+            if !is_tty {
+                if has_video && video_milestones.should_log(0, 0) {
+                    output.write_str(&format!(
+                        "{}\n",
+                        video_snapshot.format_non_interactive(UploadTrack::Video)
+                    ));
+                }
+                if has_chat && chat_milestones.should_log(0, 0) {
+                    output.write_str(&format!(
+                        "{}\n",
+                        chat_snapshot.format_non_interactive(UploadTrack::Chat)
+                    ));
+                }
+            } else {
+                let bar_width = coordinator.resolve_upload_bar_width(
+                    &video_snapshot,
+                    &chat_snapshot,
+                    has_video,
+                    has_chat,
+                );
+                render_interactive_upload(
+                    &output,
+                    &video_snapshot,
+                    &chat_snapshot,
+                    has_video,
+                    has_chat,
+                    bar_width,
+                    &mut first_render,
+                );
+                dirty = false;
+            }
+
+            let finished_success = loop {
+                tokio::select! {
+                    res = &mut finish_rx => {
+                        break res.unwrap_or(false);
+                    }
+                    Some(v_upd) = v_rx.recv() => {
+                        video_snapshot.bytes_uploaded = v_upd.bytes_uploaded;
+                        if v_upd.total_bytes > 0 {
+                            video_snapshot.total_bytes = v_upd.total_bytes;
+                        }
+                        video_snapshot.speed_mb_s = v_upd.speed_mb_s;
+
+                        if !is_tty {
+                            if video_milestones.should_log(video_snapshot.pct(), video_snapshot.bytes_uploaded) {
+                                output.write_str(&format!(
+                                    "{}\n",
+                                    video_snapshot.format_non_interactive(UploadTrack::Video)
+                                ));
+                            }
+                        } else {
+                            dirty = true;
+                        }
+                    }
+                    Some(c_upd) = c_rx.recv() => {
+                        chat_snapshot.bytes_uploaded = c_upd.bytes_uploaded;
+                        if c_upd.total_bytes > 0 {
+                            chat_snapshot.total_bytes = c_upd.total_bytes;
+                        }
+                        chat_snapshot.speed_mb_s = c_upd.speed_mb_s;
+
+                        if !is_tty {
+                            if chat_milestones.should_log(chat_snapshot.pct(), chat_snapshot.bytes_uploaded) {
+                                output.write_str(&format!(
+                                    "{}\n",
+                                    chat_snapshot.format_non_interactive(UploadTrack::Chat)
+                                ));
+                            }
+                        } else {
+                            dirty = true;
+                        }
+                    }
+                    _ = tick_interval.tick() => {
+                        if is_tty && dirty {
+                            let bar_width = coordinator.resolve_upload_bar_width(
+                                &video_snapshot,
+                                &chat_snapshot,
+                                has_video,
+                                has_chat,
+                            );
+                            render_interactive_upload(
+                                &output,
+                                &video_snapshot,
+                                &chat_snapshot,
+                                has_video,
+                                has_chat,
+                                bar_width,
+                                &mut first_render,
+                            );
+                            dirty = false;
+                        } else if !is_tty {
+                            if has_video && video_milestones.should_log(video_snapshot.pct(), video_snapshot.bytes_uploaded) {
+                                output.write_str(&format!(
+                                    "{}\n",
+                                    video_snapshot.format_non_interactive(UploadTrack::Video)
+                                ));
+                            }
+                            if has_chat && chat_milestones.should_log(chat_snapshot.pct(), chat_snapshot.bytes_uploaded) {
+                                output.write_str(&format!(
+                                    "{}\n",
+                                    chat_snapshot.format_non_interactive(UploadTrack::Chat)
+                                ));
+                            }
+                        }
+                    }
+                }
+            };
+
+            while let Ok(v_upd) = v_rx.try_recv() {
+                video_snapshot.bytes_uploaded = v_upd.bytes_uploaded;
+                if v_upd.total_bytes > 0 {
+                    video_snapshot.total_bytes = v_upd.total_bytes;
+                }
+                video_snapshot.speed_mb_s = v_upd.speed_mb_s;
+                if !is_tty
+                    && video_milestones
+                        .should_log(video_snapshot.pct(), video_snapshot.bytes_uploaded)
+                {
+                    output.write_str(&format!(
+                        "{}\n",
+                        video_snapshot.format_non_interactive(UploadTrack::Video)
+                    ));
+                }
+            }
+            while let Ok(c_upd) = c_rx.try_recv() {
+                chat_snapshot.bytes_uploaded = c_upd.bytes_uploaded;
+                if c_upd.total_bytes > 0 {
+                    chat_snapshot.total_bytes = c_upd.total_bytes;
+                }
+                chat_snapshot.speed_mb_s = c_upd.speed_mb_s;
+                if !is_tty
+                    && chat_milestones.should_log(chat_snapshot.pct(), chat_snapshot.bytes_uploaded)
+                {
+                    output.write_str(&format!(
+                        "{}\n",
+                        chat_snapshot.format_non_interactive(UploadTrack::Chat)
+                    ));
+                }
+            }
+
+            if finished_success {
+                if has_video {
+                    video_snapshot.bytes_uploaded = video_snapshot.total_bytes;
+                }
+                if has_chat {
+                    chat_snapshot.bytes_uploaded = chat_snapshot.total_bytes;
+                }
+            }
+
+            if is_tty {
+                let bar_width = coordinator.resolve_upload_bar_width(
+                    &video_snapshot,
+                    &chat_snapshot,
+                    has_video,
+                    has_chat,
+                );
+                render_interactive_upload(
+                    &output,
+                    &video_snapshot,
+                    &chat_snapshot,
+                    has_video,
+                    has_chat,
+                    bar_width,
+                    &mut first_render,
+                );
+                output.write_str("\n");
+            } else if finished_success {
+                if has_video && video_milestones.should_log(100, video_snapshot.total_bytes) {
+                    output.write_str(&format!(
+                        "{}\n",
+                        video_snapshot.format_non_interactive(UploadTrack::Video)
+                    ));
+                }
+                if has_chat && chat_milestones.should_log(100, chat_snapshot.total_bytes) {
+                    output.write_str(&format!(
+                        "{}\n",
+                        chat_snapshot.format_non_interactive(UploadTrack::Chat)
+                    ));
+                }
+            }
+        });
+
+        UploadProgressSession {
+            video_tx: if has_video { Some(v_tx) } else { None },
+            chat_tx: if has_chat { Some(c_tx) } else { None },
+            finish_tx: Some(finish_tx),
+            handle: Some(handle),
+        }
+    }
 }
 
 fn render_interactive_media(
@@ -890,6 +1268,35 @@ fn render_interactive_media(
         *first_render = false;
     } else if has_chat {
         let c_line = c_snap.format_interactive(bar_width);
+        output.write_str(&format!("\r\x1b[2K{c_line}"));
+        *first_render = false;
+    }
+}
+
+fn render_interactive_upload(
+    output: &CoordinatorOutput,
+    v_snap: &UploadProgressSnapshot,
+    c_snap: &UploadProgressSnapshot,
+    has_video: bool,
+    has_chat: bool,
+    bar_width: usize,
+    first_render: &mut bool,
+) {
+    if has_video && has_chat {
+        let v_line = v_snap.format_interactive(UploadTrack::Video, bar_width);
+        let c_line = c_snap.format_interactive(UploadTrack::Chat, bar_width);
+        if *first_render {
+            output.write_str(&format!("{v_line}\n{c_line}"));
+            *first_render = false;
+        } else {
+            output.write_str(&format!("\x1b[1A\r\x1b[2K{v_line}\n\r\x1b[2K{c_line}"));
+        }
+    } else if has_video {
+        let v_line = v_snap.format_interactive(UploadTrack::Video, bar_width);
+        output.write_str(&format!("\r\x1b[2K{v_line}"));
+        *first_render = false;
+    } else if has_chat {
+        let c_line = c_snap.format_interactive(UploadTrack::Chat, bar_width);
         output.write_str(&format!("\r\x1b[2K{c_line}"));
         *first_render = false;
     }
