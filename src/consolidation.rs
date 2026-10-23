@@ -294,10 +294,13 @@ pub async fn run_consolidation_with_coordinator(
     let total_video_bytes: u64 = manifest.video_chunks.iter().map(|c| c.size).sum();
 
     // Pre-flight disk capacity verification for remote recordings
-    if manifest.target.is_remote() {
-        let staging_dir = resolve_staging_dir(&manifest.target, args.temp_dir.as_deref());
-        verify_staging_capacity(&staging_dir, total_video_bytes)?;
-    }
+    let staging_dir = if manifest.target.is_remote() {
+        let dir = resolve_staging_dir(&manifest.target, args.temp_dir.as_deref());
+        verify_staging_capacity(&dir, total_video_bytes)?;
+        Some(dir)
+    } else {
+        None
+    };
 
     let mut media_session = coordinator.start_media_with_bytes(
         manifest.video_chunks.len(),
@@ -307,6 +310,9 @@ pub async fn run_consolidation_with_coordinator(
     let mut video_options = VideoConsolidationOptions::default();
     if let Some(v_tx) = media_session.video_sender() {
         video_options = video_options.with_progress_sender(v_tx);
+    }
+    if let Some(ref dir) = staging_dir {
+        video_options = video_options.with_staging_dir(dir.clone());
     }
     let chat_progress_sender = media_session.chat_sender();
 
