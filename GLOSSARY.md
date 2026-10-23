@@ -61,7 +61,7 @@ The batch post-processing task that losslessly merges and remuxes fragmented vid
 _Avoid_: Cloud merge, remote stitch, post-processing script, legacy streaming pipeline
 
 **Staged Local Consolidation Target**:
-The temporary local files (`consolidated.mp4.part`, `consolidated.jsonl.part`) where normalized seekable media is assembled with a bounded 1× disk footprint prior to cloud upload.
+The temporary local files (`stream.mp4.part`, `chat.jsonl.part`) where normalized seekable media is assembled with a bounded 1× disk footprint prior to cloud upload.
 _Avoid_: Temp file, intermediate cache, scratch chunk
 
 **Timestamp Normalization**:
@@ -69,7 +69,7 @@ The batch timeline reconciliation process in Post-Recording Consolidation that r
 _Avoid_: Timestamp reset, clock sync, re-mux timing, timeline patch
 
 **Staged Remote Part**:
-Temporary upload targets (`consolidated.mp4.part`, `consolidated.jsonl.part`) holding in-flight network consolidation streams until full process exit verification, preventing corrupt partial files upon unexpected failure.
+Temporary upload targets (`stream.mp4.part`, `chat.jsonl.part`) holding in-flight network consolidation streams until full process exit verification, preventing corrupt partial files upon unexpected failure.
 _Avoid_: Temp file, incomplete download, partial upload
 
 **Sliding-Window Chat Deduplication**:
