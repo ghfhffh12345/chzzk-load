@@ -200,9 +200,9 @@ pub fn build_manifest_from_entries(
         }
 
         let name_lower = entry.name.to_ascii_lowercase();
-        if name_lower == "consolidated.mp4" {
+        if name_lower == "stream.mp4" {
             pre_existing_video = true;
-        } else if name_lower == "consolidated.jsonl" {
+        } else if name_lower == "chat.jsonl" {
             pre_existing_chat = true;
         } else if name_lower == "metadata.jsonl" {
             has_metadata = true;
@@ -238,10 +238,10 @@ pub fn build_manifest_from_entries(
     // If present and !overwrite, returns an error.
     let mut conflicting_files = Vec::new();
     if !video_chunks.is_empty() && pre_existing_video {
-        conflicting_files.push("consolidated.mp4");
+        conflicting_files.push("stream.mp4");
     }
     if !chat_chunks.is_empty() && pre_existing_chat {
-        conflicting_files.push("consolidated.jsonl");
+        conflicting_files.push("chat.jsonl");
     }
     if !conflicting_files.is_empty() && !overwrite {
         return Err(anyhow::anyhow!(

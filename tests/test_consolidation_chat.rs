@@ -197,15 +197,15 @@ async fn test_consolidate_chat_local_pipeline_success() {
     assert_eq!(stats.malformed_messages, 0);
 
     // Verify .part exists and final does NOT exist prior to finalization
-    let part_path = temp_dir.join("consolidated.jsonl.part");
-    let final_path = temp_dir.join("consolidated.jsonl");
+    let part_path = temp_dir.join("chat.jsonl.part");
+    let final_path = temp_dir.join("chat.jsonl");
     assert!(
         part_path.exists(),
-        "consolidated.jsonl.part must exist before finalize_staged_chat"
+        "chat.jsonl.part must exist before finalize_staged_chat"
     );
     assert!(
         !final_path.exists(),
-        "consolidated.jsonl must not exist before finalize_staged_chat"
+        "chat.jsonl must not exist before finalize_staged_chat"
     );
 
     // Atomically finalize staged chat
@@ -213,8 +213,8 @@ async fn test_consolidate_chat_local_pipeline_success() {
         .await
         .expect("finalize_staged_chat should succeed");
 
-    // Verify consolidated.jsonl exists and has 4 lines
-    assert!(final_path.exists(), "consolidated.jsonl must exist");
+    // Verify chat.jsonl exists and has 4 lines
+    assert!(final_path.exists(), "chat.jsonl must exist");
     let final_content = fs::read_to_string(&final_path).unwrap();
     let lines: Vec<&str> = final_content.lines().collect();
     assert_eq!(
@@ -228,10 +228,7 @@ async fn test_consolidate_chat_local_pipeline_success() {
     assert_eq!(lines[3], line4);
 
     // Verify .part file does NOT remain
-    assert!(
-        !part_path.exists(),
-        "consolidated.jsonl.part must not remain"
-    );
+    assert!(!part_path.exists(), "chat.jsonl.part must not remain");
 
     // Verify original chunks are completely untouched
     assert!(chunk0_path.exists(), "Original chunk_0000 must remain");
@@ -270,11 +267,11 @@ async fn test_consolidate_chat_local_pipeline_abort_cleanup_on_error() {
     );
 
     // Verify .part was deleted
-    let part_path = temp_dir.join("consolidated.jsonl.part");
+    let part_path = temp_dir.join("chat.jsonl.part");
     assert!(!part_path.exists(), "Part file must be removed upon abort");
 
     // Verify final file was NOT created
-    let final_path = temp_dir.join("consolidated.jsonl");
+    let final_path = temp_dir.join("chat.jsonl");
     assert!(
         !final_path.exists(),
         "Final file must not be created upon abort"
@@ -337,16 +334,16 @@ async fn test_consolidate_chat_remote_pipeline_success() {
     assert_eq!(stats.deduplicated_messages, 1);
     assert_eq!(stats.emitted_messages, 3);
 
-    // Verify .part was finalized into consolidated.jsonl in local staging directory
-    let local_part = staging_dir.join("consolidated.jsonl.part");
-    let local_final = staging_dir.join("consolidated.jsonl");
+    // Verify .part was finalized into chat.jsonl in local staging directory
+    let local_part = staging_dir.join("chat.jsonl.part");
+    let local_final = staging_dir.join("chat.jsonl");
     assert!(
         !local_part.exists(),
         "Local .part file must be finalized to final name"
     );
     assert!(
         local_final.exists(),
-        "Local consolidated.jsonl must exist in staging directory"
+        "Local chat.jsonl must exist in staging directory"
     );
 
     let final_content = fs::read_to_string(&local_final).unwrap();
@@ -357,16 +354,16 @@ async fn test_consolidate_chat_remote_pipeline_success() {
     assert_eq!(lines[2], line3);
 
     // Test remote finalization via finalize_staged_chat using a staged remote file
-    let remote_part = temp_dir.join("consolidated.jsonl.part");
+    let remote_part = temp_dir.join("chat.jsonl.part");
     fs::write(&remote_part, &final_content).unwrap();
     finalize_staged_chat(&remote_target, Some(&mock_bin))
         .await
         .expect("Remote finalize_staged_chat should succeed");
 
-    let remote_final = temp_dir.join("consolidated.jsonl");
+    let remote_final = temp_dir.join("chat.jsonl");
     assert!(
         remote_final.exists(),
-        "Remote consolidated.jsonl must exist after finalize_staged_chat"
+        "Remote chat.jsonl must exist after finalize_staged_chat"
     );
     assert!(
         !remote_part.exists(),
@@ -415,14 +412,14 @@ async fn test_consolidate_chat_remote_pipeline_abort_cleanup_on_error() {
     assert!(result.is_err(), "Strict mode must fail on malformed JSON");
 
     // Verify .part file was deleted
-    let part_path = staging_dir.join("consolidated.jsonl.part");
+    let part_path = staging_dir.join("chat.jsonl.part");
     assert!(
         !part_path.exists(),
         "Part file must be deleted upon error abort"
     );
 
     // Verify final file was not created
-    let final_path = staging_dir.join("consolidated.jsonl");
+    let final_path = staging_dir.join("chat.jsonl");
     assert!(
         !final_path.exists(),
         "Final file must not be created upon error abort"
@@ -462,13 +459,13 @@ async fn test_consolidate_chat_cooperative_cancellation() {
         "Cancelled chat consolidation must fail with error"
     );
 
-    let part_path = temp_dir.join("consolidated.jsonl.part");
+    let part_path = temp_dir.join("chat.jsonl.part");
     assert!(
         !part_path.exists(),
         "Part file must be deleted upon cancellation"
     );
 
-    let final_path = temp_dir.join("consolidated.jsonl");
+    let final_path = temp_dir.join("chat.jsonl");
     assert!(
         !final_path.exists(),
         "Final file must not be created upon cancellation"
@@ -485,7 +482,7 @@ async fn test_staged_chat_cleanup_local() {
         std::env::temp_dir().join(format!("test_cons_chat_cleanup_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let staged_file = temp_dir.join("consolidated.jsonl.part");
+    let staged_file = temp_dir.join("chat.jsonl.part");
     let chunk0 = temp_dir.join("chat_0000.jsonl");
 
     tokio::fs::write(&staged_file, b"partial-chat-content")
@@ -617,13 +614,13 @@ async fn test_consolidate_chat_remote_staging_deduplication_and_part_finalizatio
     assert_eq!(stats.deduplicated_messages, 1);
     assert_eq!(stats.emitted_messages, 3);
 
-    // Verify local staged .part is finalized to consolidated.jsonl in staging_dir
-    let local_part = staging_dir.join("consolidated.jsonl.part");
-    let local_final = staging_dir.join("consolidated.jsonl");
+    // Verify local staged .part is finalized to chat.jsonl in staging_dir
+    let local_part = staging_dir.join("chat.jsonl.part");
+    let local_final = staging_dir.join("chat.jsonl");
     assert!(!local_part.exists(), "Local .part file must be finalized");
     assert!(
         local_final.exists(),
-        "Final consolidated.jsonl must exist in staging directory"
+        "Final chat.jsonl must exist in staging directory"
     );
 
     let content = fs::read_to_string(&local_final).unwrap();
@@ -677,8 +674,8 @@ async fn test_consolidate_chat_remote_staging_cancellation_unlinks_part() {
         consolidate_chat_with_options(&remote_target, &chunks, false, &options, cancel_token).await;
     assert!(result.is_err(), "Cancelled consolidation must return error");
 
-    let local_part = staging_dir.join("consolidated.jsonl.part");
-    let local_final = staging_dir.join("consolidated.jsonl");
+    let local_part = staging_dir.join("chat.jsonl.part");
+    let local_final = staging_dir.join("chat.jsonl");
     assert!(
         !local_part.exists(),
         "Local .part file must be unlinked on cancellation"
@@ -727,8 +724,8 @@ async fn test_consolidate_chat_remote_staging_error_unlinks_part() {
         consolidate_chat_with_options(&remote_target, &chunks, true, &options, cancel_token).await;
     assert!(result.is_err(), "Strict mode must fail on malformed JSON");
 
-    let local_part = staging_dir.join("consolidated.jsonl.part");
-    let local_final = staging_dir.join("consolidated.jsonl");
+    let local_part = staging_dir.join("chat.jsonl.part");
+    let local_final = staging_dir.join("chat.jsonl");
     assert!(
         !local_part.exists(),
         "Local .part file must be unlinked on error"

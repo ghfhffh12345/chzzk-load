@@ -264,8 +264,8 @@ fn test_probe_moov_atom_valid_faststart_and_end_moov() {
 fn test_check_staging_resume_readiness() {
     let temp_dir = create_temp_test_dir("test_staging_resume");
 
-    let mp4_path = temp_dir.join("consolidated.mp4");
-    let jsonl_path = temp_dir.join("consolidated.jsonl");
+    let mp4_path = temp_dir.join("stream.mp4");
+    let jsonl_path = temp_dir.join("chat.jsonl");
 
     // Case 1: Empty staging dir
     assert!(!check_staging_resume_readiness(&temp_dir, true, true));
@@ -309,10 +309,10 @@ fn test_check_staging_resume_readiness() {
 async fn test_invalidate_staging_files() {
     let temp_dir = create_temp_test_dir("test_invalidate");
 
-    let mp4 = temp_dir.join("consolidated.mp4");
-    let jsonl = temp_dir.join("consolidated.jsonl");
-    let mp4_part = temp_dir.join("consolidated.mp4.part");
-    let jsonl_part = temp_dir.join("consolidated.jsonl.part");
+    let mp4 = temp_dir.join("stream.mp4");
+    let jsonl = temp_dir.join("chat.jsonl");
+    let mp4_part = temp_dir.join("stream.mp4.part");
+    let jsonl_part = temp_dir.join("chat.jsonl.part");
     let other_file = temp_dir.join("keep_this.txt");
 
     std::fs::write(&mp4, b"mp4").unwrap();
@@ -324,13 +324,10 @@ async fn test_invalidate_staging_files() {
     let res = invalidate_staging_files(&temp_dir).await;
     assert!(res.is_ok());
 
-    assert!(!mp4.exists(), "consolidated.mp4 must be removed");
-    assert!(!jsonl.exists(), "consolidated.jsonl must be removed");
-    assert!(!mp4_part.exists(), "consolidated.mp4.part must be removed");
-    assert!(
-        !jsonl_part.exists(),
-        "consolidated.jsonl.part must be removed"
-    );
+    assert!(!mp4.exists(), "stream.mp4 must be removed");
+    assert!(!jsonl.exists(), "chat.jsonl must be removed");
+    assert!(!mp4_part.exists(), "stream.mp4.part must be removed");
+    assert!(!jsonl_part.exists(), "chat.jsonl.part must be removed");
     assert!(other_file.exists(), "other files must remain untouched");
 
     let _ = std::fs::remove_dir_all(&temp_dir);

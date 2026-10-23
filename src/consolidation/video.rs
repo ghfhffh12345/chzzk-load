@@ -284,7 +284,7 @@ fn append_concat_stream_and_bsf_args(args: &mut Vec<String>) {
 /// - `-avoid_negative_ts make_zero`: Resets container timeline start to 0.0s, eliminating initial playback freezing
 /// - `-movflags +faststart`: Relocates `moov` atom seek table to beginning of MP4 for instant desktop seeking
 /// - `-progress pipe:2`: Emits progress telemetry key-value pairs to stderr
-/// - `<output_path>`: Direct staged file destination (`consolidated.mp4.part`) enabling seekable writes
+/// - `<output_path>`: Direct staged file destination (`stream.mp4.part`) enabling seekable writes
 pub fn build_local_concat_ffmpeg_args(manifest_path: &Path, output_path: &Path) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".to_string(),
@@ -347,7 +347,7 @@ pub fn build_local_concat_ffmpeg_command(
 /// - `-avoid_negative_ts make_zero`: Resets container timeline start to 0.0s, eliminating initial playback freezing
 /// - `-movflags +faststart`: Relocates `moov` atom seek table to beginning of MP4 for instant desktop seeking (Ticket #70, ADR 0011)
 /// - `-progress pipe:2`: Emits progress telemetry key-value pairs to stderr
-/// - `<output_path>`: Direct local staged file destination (`consolidated.mp4.part`) enabling seekable writes
+/// - `<output_path>`: Direct local staged file destination (`stream.mp4.part`) enabling seekable writes
 pub fn build_remote_concat_ffmpeg_args(manifest_path: &Path, output_path: &Path) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".to_string(),
@@ -398,7 +398,7 @@ pub fn build_remote_concat_ffmpeg_command(
     cmd
 }
 
-/// Atomically finalizes the staged `consolidated.mp4.part` into `consolidated.mp4`.
+/// Atomically finalizes the staged `stream.mp4.part` into `stream.mp4`.
 ///
 /// In local mode: uses `tokio::fs::rename` with Windows file lock retries.
 /// In remote mode: executes `rclone moveto <staged> <final>`.
@@ -408,8 +408,8 @@ pub async fn finalize_staged_video(
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
-            let staged = dir.join("consolidated.mp4.part");
-            let finalized = dir.join("consolidated.mp4");
+            let staged = dir.join("stream.mp4.part");
+            let finalized = dir.join("stream.mp4");
             let _ = unlink_local_file_with_retry(&finalized).await;
             rename_local_file_with_retry(&staged, &finalized)
                 .await
@@ -423,8 +423,8 @@ pub async fn finalize_staged_video(
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
-            let staged = join_remote_path(remote_base, "consolidated.mp4.part");
-            let finalized = join_remote_path(remote_base, "consolidated.mp4");
+            let staged = join_remote_path(remote_base, "stream.mp4.part");
+            let finalized = join_remote_path(remote_base, "stream.mp4");
             let bin = resolve_rclone_bin(rclone_bin);
 
             let mut cmd = Command::new(&bin);
@@ -451,11 +451,11 @@ pub async fn finalize_staged_video(
     }
 }
 
-/// Deletes the temporary staged `consolidated.mp4.part` if present upon error or abort.
+/// Deletes the temporary staged `stream.mp4.part` if present upon error or abort.
 ///
-/// In local mode: unlinks `consolidated.mp4.part` (treating NotFound as success).
-/// In remote mode: unlinks local `consolidated.mp4.part` and executes `rclone deletefile <staged>` on remote.
-/// Finalized `consolidated.mp4` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
+/// In local mode: unlinks `stream.mp4.part` (treating NotFound as success).
+/// In remote mode: unlinks local `stream.mp4.part` and executes `rclone deletefile <staged>` on remote.
+/// Finalized `stream.mp4` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
 pub async fn cleanup_staged_video(
     target: &TargetLocation,
     rclone_bin: Option<&str>,
@@ -471,16 +471,16 @@ pub async fn cleanup_staged_video_in<P: AsRef<Path>>(
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
-            let staged = dir.join("consolidated.mp4.part");
+            let staged = dir.join("stream.mp4.part");
             let _ = unlink_local_file_with_retry(&staged).await;
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
             let staging_dir = super::staging::resolve_staging_dir(target, custom_temp_dir);
-            let staged_local_part = staging_dir.join("consolidated.mp4.part");
+            let staged_local_part = staging_dir.join("stream.mp4.part");
             let _ = unlink_local_file_with_retry(&staged_local_part).await;
 
-            let staged = join_remote_path(remote_base, "consolidated.mp4.part");
+            let staged = join_remote_path(remote_base, "stream.mp4.part");
             let bin = resolve_rclone_bin(rclone_bin);
             super::chat::delete_remote_file(&bin, &staged).await;
             Ok(())
@@ -665,10 +665,10 @@ pub fn spawn_stderr_telemetry_monitor(
     })
 }
 
-/// Executes the resilient video consolidation pipeline into staged `consolidated.mp4.part`.
+/// Executes the resilient video consolidation pipeline into staged `stream.mp4.part`.
 ///
 /// In local mode: uses FFmpeg's native container-aware Concat Demuxer with `-movflags +faststart`
-/// and `-avoid_negative_ts make_zero` directly targeting `consolidated.mp4.part`.
+/// and `-avoid_negative_ts make_zero` directly targeting `stream.mp4.part`.
 /// In remote mode: uses FFmpeg's native container-aware Concat Demuxer with Ephemeral Loopback Server
 /// writing directly to a seekable local staged file with faststart seek table (`+faststart`).
 pub async fn consolidate_video(
@@ -703,7 +703,7 @@ pub async fn consolidate_video_local(
 ) -> anyhow::Result<VideoConsolidationResult> {
     let total_chunks = chunks.len();
     let total_manifest_bytes: u64 = chunks.iter().map(|c| c.size).sum();
-    let staged_path = dir.join("consolidated.mp4.part");
+    let staged_path = dir.join("stream.mp4.part");
     let target = TargetLocation::Local(dir.to_path_buf());
 
     // Clean up any lingering .part file from prior aborted run
@@ -847,8 +847,8 @@ pub async fn consolidate_video_remote(
             )
         })?;
 
-    let staged_path = staging_dir.join("consolidated.mp4.part");
-    let final_path = staging_dir.join("consolidated.mp4");
+    let staged_path = staging_dir.join("stream.mp4.part");
+    let final_path = staging_dir.join("stream.mp4");
     let ffmpeg_bin = resolve_ffmpeg_bin(options.ffmpeg_bin.as_deref());
     let rclone_bin = options.rclone_bin.clone();
 

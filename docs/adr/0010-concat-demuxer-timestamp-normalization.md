@@ -28,7 +28,7 @@ We establish container-aware **Concat Demuxer Timestamp Normalization** across b
    - Resets container Presentation Timestamps (PTS) and Decoding Timestamps (DTS) so playback starts strictly at 0.0s, eliminating initial playback freezes and audio/video desync without video transcoding.
 
 4. **Local Mode: Direct Seekable Remuxing with Faststart Seek Table**:
-   - In local mode (`TargetLocation::Local`), output directly to `consolidated.mp4.part` on the local filesystem rather than piping through stdout.
+   - In local mode (`TargetLocation::Local`), output directly to `stream.mp4.part` on the local filesystem rather than piping through stdout.
    - Configure `-movflags +faststart` to relocate the `moov` atom header to the beginning of the MP4 file upon completion.
    - Enables instant seek table indexing, precise duration reporting, and smooth scrubbing in desktop players.
 

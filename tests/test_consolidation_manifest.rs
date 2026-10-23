@@ -125,6 +125,7 @@ fn test_chunk_index_parsing() {
     assert_eq!(parse_video_chunk_index("chunk_abc.ts"), None);
     assert_eq!(parse_video_chunk_index("other_0001.ts"), None);
     assert_eq!(parse_video_chunk_index("chunk_0001.mp4"), None);
+    assert_eq!(parse_video_chunk_index("stream.mp4"), None);
     assert_eq!(parse_video_chunk_index("consolidated.mp4"), None);
 
     // Chat chunk index parsing
@@ -137,6 +138,7 @@ fn test_chunk_index_parsing() {
     assert_eq!(parse_chat_chunk_index("chat_.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("chat_xyz.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("metadata.jsonl"), None);
+    assert_eq!(parse_chat_chunk_index("chat.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("consolidated.jsonl"), None);
 }
 
@@ -277,23 +279,47 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
             is_dir: false,
         },
         RawManifestEntry {
-            name: "consolidated.mp4".to_string(),
+            name: "stream.mp4".to_string(),
             size: 5000,
             is_dir: false,
         },
     ];
 
-    // 1. Without overwrite -> error
+    // 1. Without overwrite -> error mentioning stream.mp4
     let err = build_manifest_from_entries(target.clone(), entries.clone(), false, false)
-        .expect_err("Should error when pre-existing consolidated.mp4 exists without overwrite");
-    assert!(err.to_string().contains("consolidated.mp4"));
+        .expect_err("Should error when pre-existing stream.mp4 exists without overwrite");
+    assert!(err.to_string().contains("stream.mp4"));
     assert!(err.to_string().contains("--overwrite"));
 
     // 2. With overwrite -> succeeds
-    let manifest = build_manifest_from_entries(target, entries, false, true)
+    let manifest = build_manifest_from_entries(target.clone(), entries, false, true)
         .expect("Should succeed when overwrite is true");
     assert!(manifest.pre_existing_video);
     assert_eq!(manifest.video_chunks.len(), 1);
+
+    // 3. Pre-existing chat.jsonl without overwrite -> error mentioning chat.jsonl
+    let chat_entries = vec![
+        RawManifestEntry {
+            name: "chat_0000.jsonl".to_string(),
+            size: 1000,
+            is_dir: false,
+        },
+        RawManifestEntry {
+            name: "chat.jsonl".to_string(),
+            size: 5000,
+            is_dir: false,
+        },
+    ];
+    let err = build_manifest_from_entries(target.clone(), chat_entries.clone(), false, false)
+        .expect_err("Should error when pre-existing chat.jsonl exists without overwrite");
+    assert!(err.to_string().contains("chat.jsonl"));
+    assert!(err.to_string().contains("--overwrite"));
+
+    // 4. Chat overwrite -> succeeds
+    let chat_manifest = build_manifest_from_entries(target, chat_entries, false, true)
+        .expect("Should succeed when overwrite is true");
+    assert!(chat_manifest.pre_existing_chat);
+    assert_eq!(chat_manifest.chat_chunks.len(), 1);
 }
 
 #[test]
@@ -484,12 +510,12 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
 
     // Output files exist
     assert!(
-        temp_dir.join("consolidated.mp4").exists(),
-        "consolidated.mp4 must exist"
+        temp_dir.join("stream.mp4").exists(),
+        "stream.mp4 must exist"
     );
     assert!(
-        temp_dir.join("consolidated.jsonl").exists(),
-        "consolidated.jsonl must exist"
+        temp_dir.join("chat.jsonl").exists(),
+        "chat.jsonl must exist"
     );
 
     // Original chunks deleted when keep_original is false
@@ -580,8 +606,8 @@ async fn test_run_consolidation_single_media_video_only() {
     assert_eq!(summary.chat_chunks_count, 0);
     assert!(summary.video_result.is_some());
     assert!(summary.chat_stats.is_none());
-    assert!(temp_dir.join("consolidated.mp4").exists());
-    assert!(!temp_dir.join("consolidated.jsonl").exists());
+    assert!(temp_dir.join("stream.mp4").exists());
+    assert!(!temp_dir.join("chat.jsonl").exists());
     assert!(!chunk0.exists());
     assert!(meta.exists());
 
@@ -619,8 +645,8 @@ async fn test_run_consolidation_single_media_chat_only() {
     assert_eq!(summary.chat_chunks_count, 1);
     assert!(summary.video_result.is_none());
     assert!(summary.chat_stats.is_some());
-    assert!(!temp_dir.join("consolidated.mp4").exists());
-    assert!(temp_dir.join("consolidated.jsonl").exists());
+    assert!(!temp_dir.join("stream.mp4").exists());
+    assert!(temp_dir.join("chat.jsonl").exists());
     assert!(!chat0.exists());
     assert!(meta.exists());
 
@@ -730,8 +756,8 @@ fn test_canonical_join_remote_path() {
         "remote:bucket/chunk_0000.ts"
     );
     assert_eq!(
-        join_remote_path("remote:bucket/sub", "consolidated.mp4"),
-        "remote:bucket/sub/consolidated.mp4"
+        join_remote_path("remote:bucket/sub", "stream.mp4"),
+        "remote:bucket/sub/stream.mp4"
     );
 }
 
@@ -771,17 +797,17 @@ async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_prese
 
     // Verify .part files are cleaned up
     assert!(
-        !temp_dir.join("consolidated.mp4.part").exists(),
+        !temp_dir.join("stream.mp4.part").exists(),
         "Video part file must be cleaned up on failure"
     );
     assert!(
-        !temp_dir.join("consolidated.jsonl.part").exists(),
+        !temp_dir.join("chat.jsonl.part").exists(),
         "Chat part file must be cleaned up on failure"
     );
 
     // Verify final targets are NOT created
-    assert!(!temp_dir.join("consolidated.mp4").exists());
-    assert!(!temp_dir.join("consolidated.jsonl").exists());
+    assert!(!temp_dir.join("stream.mp4").exists());
+    assert!(!temp_dir.join("chat.jsonl").exists());
 
     // Verify original chunks are completely preserved
     assert!(

@@ -91,6 +91,10 @@ fn main() {
             }
             let src = positional[0];
             let dst = positional[1];
+            if src.contains("fail_copy_hang") || dst.contains("fail_copy_hang") {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+                std::process::exit(0);
+            }
             if src.contains("fail_copy") || dst.contains("fail_copy") {
                 eprintln!("mock error: failed to copyto {} to {}", src, dst);
                 std::process::exit(1);

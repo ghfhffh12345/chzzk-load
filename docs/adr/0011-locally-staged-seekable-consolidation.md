@@ -11,14 +11,14 @@ We deprecate the legacy pure-streaming pipeline in favor of **Locally-Staged See
 1. **Strictly Bounded 1× Local Disk Staging**:
    - Decouple input and output storage mechanisms.
    - Remote `.ts` chunks stream on demand from cloud storage via `EphemeralLoopbackServer` (`rclone serve http`) without saving chunk files to local disk (0× chunk storage).
-   - FFmpeg writes directly to a seekable local staging file (`temp_dir/consolidated.mp4.part`), bounding local disk consumption strictly to 1× the stream size.
+   - FFmpeg writes directly to a seekable local staging file (`temp_dir/stream.mp4.part`), bounding local disk consumption strictly to 1× the stream size.
 
 2. **Container Normalization with Faststart Seek Table**:
    - Remux video using FFmpeg's Concat Demuxer with `-avoid_negative_ts make_zero` and monotonic bitstream filters (`VIDEO_MONOTONIC_DTS_BSF`, `AUDIO_MONOTONIC_DTS_BSF`).
    - Configure `-movflags +faststart` to relocate the `moov` atom header to the beginning of the file, providing instant seek table indexing and smooth scrubbing in desktop players.
 
 3. **Symmetric Local Chat Staging**:
-   - Deduplicate live chat concurrently with video remuxing into `temp_dir/consolidated.jsonl.part`.
+   - Deduplicate live chat concurrently with video remuxing into `temp_dir/chat.jsonl.part`.
    - Verify zero-exit completion of both video and chat locally before initiating any cloud uploads.
 
 4. **Pre-flight Capacity Verification & Staging Workspace**:
@@ -27,7 +27,7 @@ We deprecate the legacy pure-streaming pipeline in favor of **Locally-Staged See
    - If capacity is insufficient, fail fast with an error detailing required vs. available space and suggest `--temp-dir <path>` to specify a drive with adequate storage.
 
 5. **Two-Stage Atomic Upload & Verified Purge**:
-   - Upload local files to `remote:path/consolidated.mp4.part` and `remote:path/consolidated.jsonl.part` via `rclone copyto`.
+   - Upload local files to `remote:path/stream.mp4.part` and `remote:path/chat.jsonl.part` via `rclone copyto`.
    - Atomically rename remote `.part` files via `rclone moveto`.
    - Upon confirmed success, execute `Concurrent Chunk Purge` on remote `.ts` and `.jsonl` files (unless `--keep-original` is set) and unlink the local temporary staging directory.
 

@@ -206,22 +206,22 @@ pub fn probe_moov_atom(path: &Path) -> bool {
 /// Checks whether existing staging files in `staging_dir` satisfy all integrity criteria
 /// to resume cloud upload directly without re-executing FFmpeg or chat deduplication.
 ///
-/// If `has_video` is true, `consolidated.mp4` must exist with non-zero size and a valid `moov` atom header.
-/// If `has_chat` is true, `consolidated.jsonl` must exist with non-zero size.
+/// If `has_video` is true, `stream.mp4` must exist with non-zero size and a valid `moov` atom header.
+/// If `has_chat` is true, `chat.jsonl` must exist with non-zero size.
 pub fn check_staging_resume_readiness(staging_dir: &Path, has_video: bool, has_chat: bool) -> bool {
     if !has_video && !has_chat {
         return false;
     }
 
     if has_video {
-        let mp4_path = staging_dir.join("consolidated.mp4");
+        let mp4_path = staging_dir.join("stream.mp4");
         if !probe_moov_atom(&mp4_path) {
             return false;
         }
     }
 
     if has_chat {
-        let jsonl_path = staging_dir.join("consolidated.jsonl");
+        let jsonl_path = staging_dir.join("chat.jsonl");
         match std::fs::metadata(&jsonl_path) {
             Ok(m) if m.len() > 0 => {}
             _ => return false,
@@ -232,14 +232,14 @@ pub fn check_staging_resume_readiness(staging_dir: &Path, has_video: bool, has_c
 }
 
 /// Invalidates and removes any existing consolidation staging files in `staging_dir`
-/// (`consolidated.mp4`, `consolidated.jsonl`, `consolidated.mp4.part`, `consolidated.jsonl.part`)
+/// (`stream.mp4`, `chat.jsonl`, `stream.mp4.part`, `chat.jsonl.part`)
 /// using retry-backed unlink operations to absorb Windows file locking latencies.
 pub async fn invalidate_staging_files(staging_dir: &Path) -> std::io::Result<()> {
     let files = [
-        "consolidated.mp4",
-        "consolidated.jsonl",
-        "consolidated.mp4.part",
-        "consolidated.jsonl.part",
+        "stream.mp4",
+        "chat.jsonl",
+        "stream.mp4.part",
+        "chat.jsonl.part",
     ];
     for file in files {
         let p = staging_dir.join(file);

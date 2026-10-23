@@ -381,7 +381,7 @@ pub async fn run_consolidation_with_coordinator(
             .expect("staging_dir must be resolved for remote resume");
 
         let resumed_video_result = if has_video {
-            let mp4_path = staging_dir.join("consolidated.mp4");
+            let mp4_path = staging_dir.join("stream.mp4");
             let bytes_written = std::fs::metadata(&mp4_path).map(|m| m.len()).unwrap_or(0);
             if let Some(v_tx) = media_session.video_sender() {
                 let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
@@ -555,13 +555,13 @@ pub async fn run_consolidation_with_coordinator(
         // 1. Two-stage cloud upload: upload local files to remote .part destinations via rclone copyto
         let upload_fut = async {
             if has_video {
-                let local_mp4 = staging_dir.join("consolidated.mp4");
-                let remote_part = join_remote_path(remote_base, "consolidated.mp4.part");
+                let local_mp4 = staging_dir.join("stream.mp4");
+                let remote_part = join_remote_path(remote_base, "stream.mp4.part");
                 upload_remote_staged_file(&rclone_bin, &local_mp4, &remote_part).await?;
             }
             if has_chat {
-                let local_jsonl = staging_dir.join("consolidated.jsonl");
-                let remote_part = join_remote_path(remote_base, "consolidated.jsonl.part");
+                let local_jsonl = staging_dir.join("chat.jsonl");
+                let remote_part = join_remote_path(remote_base, "chat.jsonl.part");
                 upload_remote_staged_file(&rclone_bin, &local_jsonl, &remote_part).await?;
             }
             Ok::<(), anyhow::Error>(())
@@ -619,16 +619,8 @@ pub async fn run_consolidation_with_coordinator(
                 Some(&rclone_bin),
             )
             .await;
-            delete_remote_file(
-                &rclone_bin,
-                &join_remote_path(remote_base, "consolidated.mp4"),
-            )
-            .await;
-            delete_remote_file(
-                &rclone_bin,
-                &join_remote_path(remote_base, "consolidated.jsonl"),
-            )
-            .await;
+            delete_remote_file(&rclone_bin, &join_remote_path(remote_base, "stream.mp4")).await;
+            delete_remote_file(&rclone_bin, &join_remote_path(remote_base, "chat.jsonl")).await;
             eprintln!(
                 "[INFO] Cloud finalization failed, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload.",
                 staging_dir.display()

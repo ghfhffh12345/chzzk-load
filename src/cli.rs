@@ -42,10 +42,7 @@ pub struct ConsolidateArgs {
     )]
     pub keep_original: bool,
 
-    #[arg(
-        long,
-        help = "Overwrite existing consolidated.mp4 or consolidated.jsonl files"
-    )]
+    #[arg(long, help = "Overwrite existing stream.mp4 or chat.jsonl files")]
     pub overwrite: bool,
 
     #[arg(
