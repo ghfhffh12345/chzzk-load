@@ -786,6 +786,14 @@ pub async fn consolidate_video_local(
                     })?;
                 let bytes_written = metadata.len();
 
+                // Validate MP4 container integrity before reporting success
+                super::staging::validate_mp4_container_integrity(&staged_path).with_context(|| {
+                    format!(
+                        "FFmpeg remuxing completed with exit status 0 but produced an invalid MP4 container at '{}'",
+                        staged_path.display()
+                    )
+                })?;
+
                 if let Some(ref tx) = options.progress_sender {
                     let _ = tx.send(VideoProgressUpdate::ChunkFed {
                         chunks_fed: total_chunks,
@@ -936,6 +944,14 @@ pub async fn consolidate_video_remote(
                         )
                     })?;
                 let bytes_written = metadata.len();
+
+                // Validate MP4 container integrity before promoting staged .part to final .mp4
+                super::staging::validate_mp4_container_integrity(&staged_path).with_context(|| {
+                    format!(
+                        "FFmpeg remuxing completed with exit status 0 but produced an invalid MP4 container at '{}'",
+                        staged_path.display()
+                    )
+                })?;
 
                 // Atomically finalize local staged .part to final .mp4 upon zero-exit FFmpeg completion
                 let _ = unlink_local_file_with_retry(&final_path).await;

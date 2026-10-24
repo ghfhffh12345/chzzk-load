@@ -4,9 +4,10 @@ mod common;
 
 use chzzk_load::consolidation::manifest::TargetLocation;
 use chzzk_load::consolidation::staging::{
-    STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes, check_staging_resume_readiness,
-    compute_target_hash, invalidate_staging_files, probe_moov_atom, resolve_staging_dir,
-    staging_folder_name, verify_staging_capacity, verify_staging_capacity_with_space,
+    Mp4ContainerInfo, STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes,
+    check_staging_resume_readiness, compute_target_hash, invalidate_staging_files, probe_moov_atom,
+    resolve_staging_dir, staging_folder_name, validate_mp4_container_integrity,
+    verify_staging_capacity, verify_staging_capacity_with_space,
 };
 
 fn create_temp_test_dir(prefix: &str) -> PathBuf {
@@ -272,11 +273,13 @@ fn test_check_staging_resume_readiness() {
     assert!(!check_staging_resume_readiness(&temp_dir, true, false));
     assert!(!check_staging_resume_readiness(&temp_dir, false, true));
 
-    // Create valid mp4
+    // Create valid mp4: ftyp (24 bytes) + moov (16 bytes) + mdat (16 bytes)
     let mut fs_bytes = vec![0x00, 0x00, 0x00, 0x18];
     fs_bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
     fs_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
     fs_bytes.extend_from_slice(b"moovmvhd1234");
+    fs_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    fs_bytes.extend_from_slice(b"mdat12345678");
     std::fs::write(&mp4_path, &fs_bytes).unwrap();
 
     // Valid video only: has_video=true, has_chat=false -> true
@@ -329,6 +332,190 @@ async fn test_invalidate_staging_files() {
     assert!(!mp4_part.exists(), "stream.mp4.part must be removed");
     assert!(!jsonl_part.exists(), "chat.jsonl.part must be removed");
     assert!(other_file.exists(), "other files must remain untouched");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_probe_moov_atom_rejects_duplicate_moov_and_trailing_garbage() {
+    let temp_dir = create_temp_test_dir("test_probe_corrupted_layout");
+
+    // Replicate Rakoko corrupted MP4 layout:
+    // ftyp (24 bytes) + moov (16 bytes) + mdat (16 bytes) + duplicate moov (16 bytes) + trailing garbage (16 bytes)
+    let corrupt_mp4 = temp_dir.join("stream.mp4");
+    let mut bytes = vec![0x00, 0x00, 0x00, 0x18];
+    bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    bytes.extend_from_slice(b"moovmvhd1234");
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    bytes.extend_from_slice(b"mdat12345678");
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    bytes.extend_from_slice(b"moovmvhd1234"); // Duplicate moov!
+    bytes.extend_from_slice(b"UNINDEXED_GARBAGE!"); // Trailing garbage!
+    std::fs::write(&corrupt_mp4, &bytes).unwrap();
+
+    // MUST be rejected because of duplicate moov and trailing unindexed garbage!
+    assert!(
+        !probe_moov_atom(&corrupt_mp4),
+        "MP4 container with duplicate moov atom and trailing garbage must be rejected"
+    );
+    assert!(
+        !check_staging_resume_readiness(&temp_dir, true, false),
+        "check_staging_resume_readiness must reject corrupt staging video"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+fn build_mp4_with_co64(target_chunk_offset: u64) -> Vec<u8> {
+    // Structure:
+    // ftyp: 24 bytes (0..24)
+    // moov: 64 bytes (24..88)
+    //   trak: 56 bytes (32..88)
+    //     mdia: 48 bytes (40..88)
+    //       minf: 40 bytes (48..88)
+    //         stbl: 32 bytes (56..88)
+    //           co64: 24 bytes (64..88)
+    // mdat: 24 bytes (88..112)
+    //   header: 8 bytes (88..96)
+    //   payload: 16 bytes (96..112)
+    let mut bytes = Vec::new();
+
+    // ftyp
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x18]);
+    bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+
+    // moov (size 64)
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x40]);
+    bytes.extend_from_slice(b"moov");
+
+    // trak (size 56)
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x38]);
+    bytes.extend_from_slice(b"trak");
+
+    // mdia (size 48)
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x30]);
+    bytes.extend_from_slice(b"mdia");
+
+    // minf (size 40)
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x28]);
+    bytes.extend_from_slice(b"minf");
+
+    // stbl (size 32)
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x20]);
+    bytes.extend_from_slice(b"stbl");
+
+    // co64 (size 24): version/flags (4), entry_count=1 (4), chunk_offset (8)
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x18]);
+    bytes.extend_from_slice(b"co64");
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    bytes.extend_from_slice(&target_chunk_offset.to_be_bytes());
+
+    // mdat (size 24): header 8, payload 16
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x18]);
+    bytes.extend_from_slice(b"mdat");
+    bytes.extend_from_slice(b"1234567812345678");
+
+    bytes
+}
+
+#[test]
+fn test_validate_mp4_container_integrity_valid_faststart_co64() {
+    let temp_dir = create_temp_test_dir("test_validate_valid_faststart");
+    let mp4_path = temp_dir.join("stream.mp4");
+
+    // Valid offset: 96 is inside mdat payload [96, 112)
+    let bytes = build_mp4_with_co64(96);
+    std::fs::write(&mp4_path, &bytes).unwrap();
+
+    let info: Mp4ContainerInfo =
+        validate_mp4_container_integrity(&mp4_path).expect("valid container must pass");
+    assert_eq!(info.file_size, 112);
+    assert_eq!(info.moov_offset, 24);
+    assert_eq!(info.moov_size, 64);
+    assert_eq!(info.mdat_offset, 88);
+    assert_eq!(info.mdat_size, 24);
+    assert!(info.is_faststart);
+    assert_eq!(info.track_chunk_offsets, vec![96]);
+
+    assert!(probe_moov_atom(&mp4_path));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_validate_mp4_container_integrity_rejects_offset_pointing_to_moov() {
+    let temp_dir = create_temp_test_dir("test_validate_desync_offset");
+    let mp4_path = temp_dir.join("stream.mp4");
+
+    // Desync offset: 40 points inside moov (not mdat)
+    let bytes = build_mp4_with_co64(40);
+    std::fs::write(&mp4_path, &bytes).unwrap();
+
+    let err = validate_mp4_container_integrity(&mp4_path).expect_err("desync offset must fail");
+    assert!(
+        err.to_string()
+            .contains("sample chunk offset 40 does not fall within any 'mdat' media payload range"),
+        "error message must detail offset desync: {err}"
+    );
+
+    assert!(!probe_moov_atom(&mp4_path));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_validate_mp4_container_integrity_rejects_missing_mdat() {
+    let temp_dir = create_temp_test_dir("test_validate_missing_mdat");
+    let mp4_path = temp_dir.join("stream.mp4");
+
+    // ftyp (24 bytes) + moov (16 bytes) only, no mdat
+    let mut bytes = vec![0x00, 0x00, 0x00, 0x18];
+    bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    bytes.extend_from_slice(b"moovmvhd1234");
+    std::fs::write(&mp4_path, &bytes).unwrap();
+
+    let err = validate_mp4_container_integrity(&mp4_path).expect_err("missing mdat must fail");
+    assert!(
+        err.to_string().contains("missing required 'mdat' atom"),
+        "error message must indicate missing mdat: {err}"
+    );
+
+    assert!(!probe_moov_atom(&mp4_path));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_validate_mp4_container_integrity_rejects_trailing_garbage() {
+    let temp_dir = create_temp_test_dir("test_validate_trailing_garbage");
+    let mp4_path = temp_dir.join("stream.mp4");
+
+    // Case 1: unindexed trailing bytes less than atom header size (5 bytes)
+    let mut bytes_sub = build_mp4_with_co64(96);
+    bytes_sub.extend_from_slice(b"12345");
+    std::fs::write(&mp4_path, &bytes_sub).unwrap();
+
+    let err = validate_mp4_container_integrity(&mp4_path)
+        .expect_err("trailing sub-header garbage must fail");
+    assert!(
+        err.to_string().contains("trailing unindexed data"),
+        "error message must indicate trailing unindexed data: {err}"
+    );
+    assert!(!probe_moov_atom(&mp4_path));
+
+    // Case 2: corrupted trailing atom payload exceeding file length
+    let mut bytes_corrupt_atom = build_mp4_with_co64(96);
+    bytes_corrupt_atom.extend_from_slice(b"UNINDEXED_GARBAGE_PAYLOAD");
+    std::fs::write(&mp4_path, &bytes_corrupt_atom).unwrap();
+
+    let err_atom =
+        validate_mp4_container_integrity(&mp4_path).expect_err("corrupted trailing atom must fail");
+    assert!(
+        err_atom.to_string().contains("exceeds file length")
+            || err_atom.to_string().contains("trailing unindexed data"),
+        "error message must detail corruption: {err_atom}"
+    );
+    assert!(!probe_moov_atom(&mp4_path));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

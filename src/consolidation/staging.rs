@@ -131,76 +131,284 @@ pub async fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Inspects an MP4 file on disk for container sanity by scanning top-level boxes for a valid `moov` atom header.
-///
-/// Uses bounded seek operations without buffering media payloads into RAM, running in O(1) time
-/// regardless of video container size. Returns `true` if a non-zero-sized file contains a valid `moov` box header.
-pub fn probe_moov_atom(path: &Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
+/// Structural metadata extracted during MP4 container integrity verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mp4ContainerInfo {
+    pub file_size: u64,
+    pub moov_offset: u64,
+    pub moov_size: u64,
+    pub mdat_offset: u64,
+    pub mdat_size: u64,
+    pub is_faststart: bool,
+    pub track_chunk_offsets: Vec<u64>,
+}
 
-    let mut file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
+fn parse_chunk_offsets<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    payload_start: u64,
+    payload_end: u64,
+    is_64bit: bool,
+    chunk_offsets: &mut Vec<u64>,
+) {
+    use std::io::SeekFrom;
 
-    let file_len = match file.metadata() {
-        Ok(m) => m.len(),
-        Err(_) => return false,
-    };
-
-    if file_len < 8 {
-        return false;
+    if payload_end.saturating_sub(payload_start) < 8 {
+        return;
+    }
+    if reader.seek(SeekFrom::Start(payload_start)).is_err() {
+        return;
+    }
+    let mut header = [0u8; 8];
+    if reader.read_exact(&mut header).is_err() {
+        return;
+    }
+    let entry_count = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    if entry_count == 0 {
+        return;
     }
 
-    let mut offset: u64 = 0;
+    if is_64bit {
+        if payload_end.saturating_sub(payload_start) >= 16 {
+            let mut offset_buf = [0u8; 8];
+            if reader.read_exact(&mut offset_buf).is_ok() {
+                chunk_offsets.push(u64::from_be_bytes(offset_buf));
+            }
+        }
+    } else if payload_end.saturating_sub(payload_start) >= 12 {
+        let mut offset_buf = [0u8; 4];
+        if reader.read_exact(&mut offset_buf).is_ok() {
+            chunk_offsets.push(u32::from_be_bytes(offset_buf) as u64);
+        }
+    }
+}
+
+/// Recursively scans container boxes within `moov` (`trak`, `mdia`, `minf`, `stbl`)
+/// extracting sample chunk offsets from `stco` (32-bit) or `co64` (64-bit) boxes.
+fn scan_moov_chunk_offsets<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    start: u64,
+    end: u64,
+    chunk_offsets: &mut Vec<u64>,
+) {
+    use std::io::SeekFrom;
+
+    let mut offset = start;
     let mut header = [0u8; 8];
 
-    while offset.saturating_add(8) <= file_len {
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            return false;
+    while offset.saturating_add(8) <= end {
+        if reader.seek(SeekFrom::Start(offset)).is_err() {
+            break;
         }
-        if file.read_exact(&mut header).is_err() {
-            return false;
+        if reader.read_exact(&mut header).is_err() {
+            break;
         }
 
         let size_u32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         let box_type = &header[4..8];
 
-        let box_size: u64 = if size_u32 == 1 {
-            let mut ext_buf = [0u8; 8];
-            if file.read_exact(&mut ext_buf).is_err() {
-                return false;
+        let (header_size, box_size) = if size_u32 == 1 {
+            let mut ext = [0u8; 8];
+            if reader.read_exact(&mut ext).is_err() {
+                break;
             }
-            let ext_size = u64::from_be_bytes(ext_buf);
+            let ext_size = u64::from_be_bytes(ext);
             if ext_size < 16 {
-                return false;
+                break;
             }
-            ext_size
+            (16u64, ext_size)
         } else if size_u32 == 0 {
-            file_len.saturating_sub(offset)
+            (8u64, end.saturating_sub(offset))
         } else if size_u32 < 8 {
-            return false;
+            break;
         } else {
-            size_u32 as u64
+            (8u64, size_u32 as u64)
+        };
+
+        let next_offset = match offset.checked_add(box_size) {
+            Some(n) if n <= end => n,
+            _ => break,
+        };
+
+        let payload_start = offset + header_size;
+        let payload_end = next_offset;
+
+        match box_type {
+            b"trak" | b"mdia" | b"minf" | b"stbl" => {
+                scan_moov_chunk_offsets(reader, payload_start, payload_end, chunk_offsets);
+            }
+            b"stco" => {
+                parse_chunk_offsets(reader, payload_start, payload_end, false, chunk_offsets);
+            }
+            b"co64" => {
+                parse_chunk_offsets(reader, payload_start, payload_end, true, chunk_offsets);
+            }
+            _ => {}
+        }
+
+        offset = next_offset;
+    }
+}
+
+/// Validates the structural integrity of an MP4 container file:
+/// 1. Verifies that top-level boxes cleanly tile the entire file with zero trailing unindexed bytes.
+/// 2. Ensures exactly one `moov` atom header is present (rejects files with duplicate `moov` boxes).
+/// 3. Ensures at least one `mdat` atom is present with valid payload boundaries.
+/// 4. Inspects sample chunk offsets (`stco`/`co64`) inside `moov`, ensuring they point directly
+///    within the `mdat` media payload range rather than header metadata or unaligned offsets.
+pub fn validate_mp4_container_integrity(path: &Path) -> anyhow::Result<Mp4ContainerInfo> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("Failed to open MP4 file '{}': {e}", path.display()))?;
+
+    let file_len = file
+        .metadata()
+        .map_err(|e| anyhow::anyhow!("Failed to read metadata for '{}': {e}", path.display()))?
+        .len();
+
+    if file_len < 16 {
+        anyhow::bail!(
+            "File '{}' is too small to be a valid MP4 container ({} bytes)",
+            path.display(),
+            file_len
+        );
+    }
+
+    let mut offset: u64 = 0;
+    let mut header = [0u8; 8];
+
+    let mut moov_info: Option<(u64, u64, u64)> = None; // (offset, header_size, size)
+    let mut moov_count: usize = 0;
+    let mut mdat_ranges: Vec<(u64, u64)> = Vec::new(); // [(payload_start, payload_end)]
+    let mut first_mdat_info: Option<(u64, u64)> = None; // (offset, size)
+
+    while offset.saturating_add(8) <= file_len {
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut header)?;
+
+        let size_u32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let box_type = &header[4..8];
+
+        let (header_size, box_size) = if size_u32 == 1 {
+            let mut ext = [0u8; 8];
+            file.read_exact(&mut ext)?;
+            let ext_size = u64::from_be_bytes(ext);
+            if ext_size < 16 {
+                anyhow::bail!(
+                    "Invalid 64-bit box size {ext_size} for atom '{:?}' at offset {offset}",
+                    String::from_utf8_lossy(box_type)
+                );
+            }
+            (16u64, ext_size)
+        } else if size_u32 == 0 {
+            // Box extends to end of file
+            (8u64, file_len.saturating_sub(offset))
+        } else if size_u32 < 8 {
+            anyhow::bail!(
+                "Invalid 32-bit box size {size_u32} for atom '{:?}' at offset {offset}",
+                String::from_utf8_lossy(box_type)
+            );
+        } else {
+            (8u64, size_u32 as u64)
+        };
+
+        let next_offset = match offset.checked_add(box_size) {
+            Some(n) if n <= file_len => n,
+            _ => anyhow::bail!(
+                "Atom '{:?}' at offset {offset} with size {box_size} exceeds file length {file_len}",
+                String::from_utf8_lossy(box_type)
+            ),
         };
 
         if box_type == b"moov" {
-            // A valid moov atom must have payload child boxes (at least 16 bytes total)
-            return box_size >= 16 && offset.saturating_add(box_size) <= file_len;
+            moov_count += 1;
+            if moov_count > 1 {
+                anyhow::bail!(
+                    "Corrupted MP4 container in '{}': duplicate 'moov' atom detected at offset {offset} (previous at offset {})",
+                    path.display(),
+                    moov_info.map(|(o, _, _)| o).unwrap_or(0)
+                );
+            }
+            if box_size < 16 {
+                anyhow::bail!(
+                    "Corrupted MP4 container in '{}': 'moov' atom at offset {offset} is too small ({box_size} bytes)",
+                    path.display()
+                );
+            }
+            moov_info = Some((offset, header_size, box_size));
+        } else if box_type == b"mdat" {
+            if first_mdat_info.is_none() {
+                first_mdat_info = Some((offset, box_size));
+            }
+            let payload_start = offset + header_size;
+            let payload_end = next_offset;
+            mdat_ranges.push((payload_start, payload_end));
         }
 
-        match offset.checked_add(box_size) {
-            Some(next_offset) => {
-                if next_offset <= offset || next_offset > file_len {
-                    return false;
-                }
-                offset = next_offset;
-            }
-            None => return false,
+        offset = next_offset;
+    }
+
+    if offset != file_len {
+        anyhow::bail!(
+            "Corrupted MP4 container in '{}': trailing unindexed data ({} bytes unparsed at end of file, offset {offset} vs file length {file_len})",
+            path.display(),
+            file_len - offset
+        );
+    }
+
+    let (moov_offset, moov_hdr_size, moov_size) = moov_info.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Corrupted MP4 container in '{}': missing required 'moov' atom",
+            path.display()
+        )
+    })?;
+
+    let (mdat_offset, mdat_size) = first_mdat_info.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Corrupted MP4 container in '{}': missing required 'mdat' atom",
+            path.display()
+        )
+    })?;
+
+    // Scan chunk offsets in moov and verify they point inside mdat payload ranges
+    let mut chunk_offsets = Vec::new();
+    scan_moov_chunk_offsets(
+        &mut file,
+        moov_offset + moov_hdr_size,
+        moov_offset + moov_size,
+        &mut chunk_offsets,
+    );
+
+    for &chunk_offset in &chunk_offsets {
+        let inside_any_mdat = mdat_ranges
+            .iter()
+            .any(|&(start, end)| chunk_offset >= start && chunk_offset < end);
+        if !inside_any_mdat {
+            anyhow::bail!(
+                "Corrupted MP4 container in '{}': sample chunk offset {chunk_offset} does not fall within any 'mdat' media payload range",
+                path.display()
+            );
         }
     }
 
-    false
+    let is_faststart = moov_offset < mdat_offset;
+
+    Ok(Mp4ContainerInfo {
+        file_size: file_len,
+        moov_offset,
+        moov_size,
+        mdat_offset,
+        mdat_size,
+        is_faststart,
+        track_chunk_offsets: chunk_offsets,
+    })
+}
+
+/// Inspects an MP4 file on disk for container sanity by validating all container integrity invariants.
+///
+/// Returns `true` if the file exists, has non-zero size, and passes full container integrity verification.
+pub fn probe_moov_atom(path: &Path) -> bool {
+    validate_mp4_container_integrity(path).is_ok()
 }
 
 /// Checks whether existing staging files in `staging_dir` satisfy all integrity criteria
