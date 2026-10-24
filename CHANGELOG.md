@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-24
+
+### Added
+- **Post-Recording Consolidation Subcommand (`chzzk-load consolidate`)**: Introduced an offline and cloud-capable consolidation command to losslessly remux fragmented video chunks (`chunk_%04d.ts`) and deduplicate live chat segments (`chat_%04d.jsonl`) into unified artifacts (`stream.mp4` and `chat.jsonl`) (#21, #22, ADR 0010, ADR 0011, ADR 0012).
+- **Locally-Staged Seekable Remuxing & Ephemeral HTTP Loopback**: Implemented FFmpeg Concat Demuxer (`-f concat -safe 0`) remuxing with start offset normalization (`-avoid_negative_ts make_zero`) and faststart seek table (`-movflags +faststart`). For cloud storage sessions, chunks stream on demand into memory via an ephemeral read-only HTTP loopback server (`rclone serve http`) while writing seekable output directly to a local staging file (`stream.mp4.part`), bounding peak local disk consumption strictly to 1× the stream size while eliminating playback freezes and desktop scrubbing issues (#58, #59, #70, ADR 0010, ADR 0011).
+- **Monotonic DTS Bitstream Filtering & Stream Mapping**: Configured container-aware bitstream filters (`VIDEO_MONOTONIC_DTS_BSF` and `AUDIO_MONOTONIC_DTS_BSF` / `aac_adtstoasc`) to resolve DTS collisions and micro-discontinuities across chunk boundaries without video re-encoding, paired with explicit single-stream mapping (`-map 0:v:0 -map 0:a:0?`) to prevent extraneous stream metadata conflicts (#66).
+- **Pre-Flight Capacity Verification & Resilient Upload Resume**: Added staging workspace capacity checks ensuring at least $1.15\times$ total video bytes are available before remuxing begins, with support for custom workspace paths (`--temp-dir <PATH>`). Interrupted cloud uploads inspect existing staged files via `moov` atom container probing and resume transfers immediately without re-remuxing (#69, #72, ADR 0011).
+- **Container Structural Integrity Validation**: Added MP4 container structural integrity verification (`validate_mp4_container_integrity`) prior to promoting or resuming staged files: enforces a single `moov` atom, at least one `mdat` atom, complete file coverage without trailing unindexed garbage, and verifies that `stco`/`co64` sample chunk offsets point strictly within the `mdat` media payload (d1b8501).
+- **Sliding-Window Chat Deduplication**: Implemented a streaming sliding-window deduplication algorithm that merges chunked chat records into `chat.jsonl.part` in parallel with video remuxing, eliminating duplicate boundary messages while preserving $O(1)$ memory consumption (#23, #71).
+- **Concurrent Cloud Upload & Large-File Transfer Optimizations**: Concurrently uploads `stream.mp4` and `chat.jsonl` using two-stage atomic staging (`.part` files renamed via `rclone moveto`) with sibling process abort on failure. Applied large-file transfer optimizations (`--drive-chunk-size 128M`, `--s3-chunk-size 64M`, multi-threading) configurable via `consolidate_extra_args` in `[rclone]` settings (#76, #77, ADR 0012).
+- **Dual-Track Consolidation Progress Telemetry**: Responsive ANSI progress tracking with 10 Hz dirty render loop for media remuxing (`VID`, `CHAT`), cloud uploading (`UP V`, `UP C`), and chunk purging (`DEL`), with automatic fallback to 20% milestone boundaries and 30-second heartbeats in non-interactive/headless environments (#55, #62, #63, #78, ADR 0012).
+- **Concurrent Chunk Purge**: Added bounded asynchronous purge loop (`--delete-concurrency`, default: 16) for deleting original chunks after verified consolidation, featuring robust error aggregation and silent handling of nonexistent remote targets (#54).
+- **Session Custodian Directory Lifecycle Consolidation**: Consolidated all recording session directory tracking, strict 0-entry unlinking verification, and unmanaged empty directory sweeps under `SessionCustodian` (#48, #49, #50, #51).
+
+### Changed
+- **Canonical Media Output Naming**: Standardized consolidation output filenames on `stream.mp4` and `chat.jsonl` (staged as `.part`), replacing the previous `consolidated.mp4` and `consolidated.jsonl` convention (#75, ADR 0012).
+- **Windows Concat Manifest Path Sanitization**: Canonicalized directory paths and sanitized extended-length verbatim UNC prefixes (`\\?\`) that caused FFmpeg concat demuxer failures on Windows (#65).
+- **Shared Sync File Unlink Retries**: Centralized file unlinking retry logic across workers with exponential backoff to absorb transient Windows file sharing locks (#44, #90).
+
+### Removed
+- **Legacy Fragmented MP4 Pure-Streaming Pipeline**: Deprecated and completely removed stdout pipe remuxing into `rclone rcat` and fragmented MP4 container configurations (`frag_keyframe+empty_moov`), standardizing seekable MP4 containers across both local and remote operations (#73, ADR 0011).
+
 ## [1.0.0] - 2026-10-04
 
 ### Added
