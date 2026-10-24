@@ -48,6 +48,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Multi-Track Process Helper Parameter Bundling**: Functions coordinating concurrent video, chat, and upload pipelines must bundle communication channels, cancel tokens, and flags into cohesive option or context structs (e.g., session options or progress sender bundles) to keep parameter counts within Clippy limits ($\le 7$).
   - *Code Smell (Too Many Arguments)*: Accumulating individual per-track sender channels (`video_tx`, `chat_tx`), tokens, and configuration flags as loose function parameters, requiring `#[allow(clippy::too_many_arguments)]`.
   - *Resolution*: Group multi-track communication handles and cancellation controls into dedicated data structures (such as `UploadProgressSenders` or execution options) passed by value or reference.
+- **Strict Container Integrity Verification**: Video container validation prior to promotion (`stream.mp4.part` $\to$ `stream.mp4`) or upload resume must verify full structural integrity (`validate_mp4_container_integrity`). Never rely on superficial atom string sniffing.
+  - *Hard Violation*: Checking only for the presence of an atom type without verifying container tiling (`offset == file_len`), box cardinality (`moov_count == 1`, `mdat_count >= 1`), and chunk offset boundary alignment.
+  - *Resolution*: Validate top-level box sequence, ensure zero trailing unindexed data, and scan `stbl` (`stco`/`co64`) to confirm sample offsets fall strictly within `mdat` media payload ranges.
 
 ---
 
