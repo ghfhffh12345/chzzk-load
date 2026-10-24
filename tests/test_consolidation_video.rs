@@ -14,6 +14,8 @@ use std::process::Command;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+static VIDEO_REMOTE_TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn ensure_ffmpeg_available() -> bool {
     let bin = std::env::var("CHZZK_LOAD_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
     Command::new(&bin)
@@ -233,6 +235,7 @@ fn assert_concat_stream_and_bsf_args(args: &[String], i_pos: usize) {
 
 #[test]
 fn test_ffmpeg_bin_resolution() {
+    let _lock = VIDEO_REMOTE_TEST_MUTEX.blocking_lock();
     // 1. Direct override takes highest priority
     let resolved = resolve_ffmpeg_bin(Some("custom_ffmpeg"));
     assert_eq!(resolved, "custom_ffmpeg");
@@ -633,11 +636,8 @@ async fn test_consolidate_video_local_with_real_ffmpeg() {
 
 #[tokio::test]
 async fn test_staged_video_atomic_finalization_remote() {
-    if !ensure_rclone_available() {
-        eprintln!("[SKIP] rclone not available, skipping remote finalization test");
-        return;
-    }
-
+    let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
+    let mock_bin = common::mock_rclone::get_mock_rclone_bin();
     let temp_dir = create_temp_test_dir("test_finalize_remote");
     let staged_file = temp_dir.join("stream.mp4.part");
     let final_file = temp_dir.join("stream.mp4");
@@ -647,16 +647,8 @@ async fn test_staged_video_atomic_finalization_remote() {
         .unwrap();
 
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
-    let remote_name = format!("tstremfin{}", rand::random::<u16>());
-    unsafe {
-        std::env::set_var(
-            format!("RCLONE_CONFIG_{}_TYPE", remote_name.to_ascii_uppercase()),
-            "local",
-        );
-    }
-
-    let target = TargetLocation::Remote(format!("{remote_name}:{remote_dir_str}"));
-    finalize_staged_video(&target, None)
+    let target = TargetLocation::Remote(format!("mockremfin:{remote_dir_str}"));
+    finalize_staged_video(&target, Some(mock_bin.to_str().unwrap()))
         .await
         .expect("Remote finalization should succeed");
 
@@ -670,11 +662,8 @@ async fn test_staged_video_atomic_finalization_remote() {
 
 #[tokio::test]
 async fn test_staged_video_cleanup_on_abort_remote() {
-    if !ensure_rclone_available() {
-        eprintln!("[SKIP] rclone not available, skipping remote cleanup test");
-        return;
-    }
-
+    let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
+    let mock_bin = common::mock_rclone::get_mock_rclone_bin();
     let temp_dir = create_temp_test_dir("test_cleanup_remote");
     let staged_file = temp_dir.join("stream.mp4.part");
     let chunk0 = temp_dir.join("chunk_0000.ts");
@@ -687,16 +676,8 @@ async fn test_staged_video_cleanup_on_abort_remote() {
         .unwrap();
 
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
-    let remote_name = format!("tstremcln{}", rand::random::<u16>());
-    unsafe {
-        std::env::set_var(
-            format!("RCLONE_CONFIG_{}_TYPE", remote_name.to_ascii_uppercase()),
-            "local",
-        );
-    }
-
-    let target = TargetLocation::Remote(format!("{remote_name}:{remote_dir_str}"));
-    cleanup_staged_video(&target, None)
+    let target = TargetLocation::Remote(format!("mockremcln:{remote_dir_str}"));
+    cleanup_staged_video(&target, Some(mock_bin.to_str().unwrap()))
         .await
         .expect("Remote cleanup should succeed");
 
@@ -708,6 +689,7 @@ async fn test_staged_video_cleanup_on_abort_remote() {
 
 #[tokio::test]
 async fn test_consolidate_video_remote_with_rclone() {
+    let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
     if !ensure_ffmpeg_available() || !ensure_rclone_available() {
         eprintln!("[SKIP] ffmpeg or rclone not available, skipping remote consolidation test");
         return;
@@ -814,10 +796,8 @@ async fn test_consolidate_video_remote_with_rclone() {
 
 #[tokio::test]
 async fn test_consolidate_video_remote_failure_cleans_up_part() {
-    if !ensure_rclone_available() {
-        eprintln!("[SKIP] rclone not available, skipping remote failure test");
-        return;
-    }
+    let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
+    let mock_bin = common::mock_rclone::get_mock_rclone_bin();
 
     let temp_dir = create_temp_test_dir("test_cons_rem_fail");
     let staging_dir = create_temp_test_dir("test_cons_rem_fail_staging");
@@ -833,16 +813,9 @@ async fn test_consolidate_video_remote_failure_cleans_up_part() {
     }];
 
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
-    let remote_name = format!("tstremfail{}", rand::random::<u16>());
-    unsafe {
-        std::env::set_var(
-            format!("RCLONE_CONFIG_{}_TYPE", remote_name.to_ascii_uppercase()),
-            "local",
-        );
-    }
-
-    let target = TargetLocation::Remote(format!("{remote_name}:{remote_dir_str}"));
+    let target = TargetLocation::Remote(format!("mockremfail:{remote_dir_str}"));
     let options = VideoConsolidationOptions::default()
+        .with_rclone_bin(mock_bin.to_str().unwrap())
         .with_ffmpeg_bin("nonexistent_ffmpeg_bin_abc")
         .with_staging_dir(&staging_dir);
     let cancel_token = CancellationToken::new();
@@ -851,7 +824,10 @@ async fn test_consolidate_video_remote_failure_cleans_up_part() {
         .await
         .expect_err("Remote consolidation with invalid ffmpeg must fail");
 
-    assert!(err.to_string().contains("nonexistent_ffmpeg_bin_abc"));
+    assert!(
+        err.to_string().contains("nonexistent_ffmpeg_bin_abc"),
+        "Expected error to contain 'nonexistent_ffmpeg_bin_abc', but got: {err:#}"
+    );
     assert!(
         !staging_dir.join("stream.mp4.part").exists(),
         ".part file must be cleaned up in staging directory on remote failure"
@@ -1318,6 +1294,7 @@ async fn test_consolidate_video_local_path_with_korean_and_special_characters() 
 
 #[tokio::test]
 async fn test_consolidate_video_remote_concat_demuxer_zero_frame_drops() {
+    let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
     if !ensure_ffmpeg_available() || !ensure_rclone_available() {
         eprintln!("[SKIP] ffmpeg or rclone not available, skipping remote zero frame drops test");
         return;
@@ -1491,13 +1468,13 @@ async fn test_consolidate_video_remote_concat_demuxer_zero_frame_drops() {
 
 #[tokio::test]
 async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
-    if !ensure_ffmpeg_available() || !ensure_rclone_available() {
-        eprintln!(
-            "[SKIP] ffmpeg or rclone not available, skipping remote active cancellation test"
-        );
+    let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
+    if !ensure_ffmpeg_available() {
+        eprintln!("[SKIP] ffmpeg not available, skipping remote active cancellation test");
         return;
     }
 
+    let mock_bin = common::mock_rclone::get_mock_rclone_bin();
     let temp_dir = create_temp_test_dir("test_cons_rem_act_cancel");
     let chunk0 = temp_dir.join("chunk_0000.ts");
     let chunk1 = temp_dir.join("chunk_0001.ts");
@@ -1566,17 +1543,11 @@ async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
     ];
 
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
-    let remote_name = format!("tstremactc{}", rand::random::<u16>());
-    unsafe {
-        std::env::set_var(
-            format!("RCLONE_CONFIG_{}_TYPE", remote_name.to_ascii_uppercase()),
-            "local",
-        );
-    }
-
     let staging_dir = create_temp_test_dir("test_cons_rem_act_cancel_staging");
-    let target = TargetLocation::Remote(format!("{remote_name}:{remote_dir_str}"));
-    let options = VideoConsolidationOptions::default().with_staging_dir(&staging_dir);
+    let target = TargetLocation::Remote(format!("mockremactc:{remote_dir_str}"));
+    let options = VideoConsolidationOptions::default()
+        .with_rclone_bin(mock_bin.to_str().unwrap())
+        .with_staging_dir(&staging_dir);
     let cancel_token = CancellationToken::new();
 
     let cancel_token_clone = cancel_token.clone();
@@ -1621,6 +1592,7 @@ async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
 
 #[tokio::test]
 async fn test_consolidate_video_remote_hermetic_with_mock_rclone() {
+    let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
     if !ensure_ffmpeg_available() {
         eprintln!("[SKIP] ffmpeg not available, skipping test");
         return;
