@@ -268,7 +268,7 @@ fn test_ffmpeg_bin_resolution() {
 #[test]
 fn test_build_local_concat_ffmpeg_args_contains_required_flags() {
     let manifest_path = PathBuf::from("temp/concat_manifest.txt");
-    let output_path = PathBuf::from("recordings/stream.mp4.part");
+    let output_path = PathBuf::from("recordings/livestream.mp4.part");
     let args = build_local_concat_ffmpeg_args(&manifest_path, &output_path);
 
     // Verify Concat Demuxer input flags
@@ -320,7 +320,7 @@ fn test_build_local_concat_ffmpeg_args_contains_required_flags() {
 #[test]
 fn test_build_remote_concat_ffmpeg_args_contains_required_flags() {
     let manifest_path = PathBuf::from("temp/concat_manifest.txt");
-    let output_path = PathBuf::from("temp_staging/stream.mp4.part");
+    let output_path = PathBuf::from("temp_staging/livestream.mp4.part");
     let args = build_remote_concat_ffmpeg_args(&manifest_path, &output_path);
 
     // Verify Concat Demuxer input flags
@@ -401,8 +401,8 @@ fn test_join_remote_path_formatting() {
 #[tokio::test]
 async fn test_staged_video_atomic_finalization_local() {
     let temp_dir = create_temp_test_dir("test_finalize_local");
-    let staged_file = temp_dir.join("stream.mp4.part");
-    let final_file = temp_dir.join("stream.mp4");
+    let staged_file = temp_dir.join("livestream.mp4.part");
+    let final_file = temp_dir.join("livestream.mp4");
 
     tokio::fs::write(&staged_file, b"test-mp4-payload")
         .await
@@ -426,7 +426,7 @@ async fn test_staged_video_atomic_finalization_local() {
 #[tokio::test]
 async fn test_staged_video_cleanup_on_abort_local() {
     let temp_dir = create_temp_test_dir("test_cleanup_local");
-    let staged_file = temp_dir.join("stream.mp4.part");
+    let staged_file = temp_dir.join("livestream.mp4.part");
     let chunk0 = temp_dir.join("chunk_0000.ts");
     let chunk1 = temp_dir.join("chunk_0001.ts");
 
@@ -478,8 +478,8 @@ async fn test_consolidate_video_empty_chunks_noop() {
 
     assert_eq!(result.chunks_processed, 0);
     assert_eq!(result.bytes_written, 0);
-    assert!(!temp_dir.join("stream.mp4.part").exists());
-    assert!(!temp_dir.join("stream.mp4").exists());
+    assert!(!temp_dir.join("livestream.mp4.part").exists());
+    assert!(!temp_dir.join("livestream.mp4").exists());
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
@@ -511,7 +511,7 @@ async fn test_consolidate_video_failure_cleans_up_part_and_preserves_chunks() {
     assert!(err.to_string().contains("nonexistent_ffmpeg_bin_xyz"));
 
     assert!(
-        !temp_dir.join("stream.mp4.part").exists(),
+        !temp_dir.join("livestream.mp4.part").exists(),
         ".part file must be cleaned up on failure"
     );
     assert!(
@@ -608,15 +608,15 @@ async fn test_consolidate_video_local_with_real_ffmpeg() {
     assert_eq!(result.chunks_processed, 2);
     assert!(result.bytes_written > 0);
 
-    let part_mp4 = temp_dir.join("stream.mp4.part");
-    let final_mp4 = temp_dir.join("stream.mp4");
+    let part_mp4 = temp_dir.join("livestream.mp4.part");
+    let final_mp4 = temp_dir.join("livestream.mp4");
     assert!(
         part_mp4.exists(),
         "Staged .part file must exist before finalization"
     );
     assert!(
         !final_mp4.exists(),
-        "Final stream.mp4 must not exist before finalization"
+        "Final livestream.mp4 must not exist before finalization"
     );
 
     // Atomically finalize staged video
@@ -624,7 +624,7 @@ async fn test_consolidate_video_local_with_real_ffmpeg() {
         .await
         .expect("finalize_staged_video must succeed");
 
-    assert!(final_mp4.exists(), "Final stream.mp4 must exist");
+    assert!(final_mp4.exists(), "Final livestream.mp4 must exist");
     assert!(!part_mp4.exists(), "Staged .part file must be renamed");
     assert!(
         chunk0.exists() && chunk1.exists(),
@@ -639,8 +639,8 @@ async fn test_staged_video_atomic_finalization_remote() {
     let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
     let mock_bin = common::mock_rclone::get_mock_rclone_bin();
     let temp_dir = create_temp_test_dir("test_finalize_remote");
-    let staged_file = temp_dir.join("stream.mp4.part");
-    let final_file = temp_dir.join("stream.mp4");
+    let staged_file = temp_dir.join("livestream.mp4.part");
+    let final_file = temp_dir.join("livestream.mp4");
 
     tokio::fs::write(&staged_file, b"remote-mp4-payload")
         .await
@@ -665,7 +665,7 @@ async fn test_staged_video_cleanup_on_abort_remote() {
     let _lock = VIDEO_REMOTE_TEST_MUTEX.lock().await;
     let mock_bin = common::mock_rclone::get_mock_rclone_bin();
     let temp_dir = create_temp_test_dir("test_cleanup_remote");
-    let staged_file = temp_dir.join("stream.mp4.part");
+    let staged_file = temp_dir.join("livestream.mp4.part");
     let chunk0 = temp_dir.join("chunk_0000.ts");
 
     tokio::fs::write(&staged_file, b"remote-garbage")
@@ -771,15 +771,15 @@ async fn test_consolidate_video_remote_with_rclone() {
     assert_eq!(result.chunks_processed, 2);
     assert!(result.bytes_written > 0);
 
-    let part_mp4 = staging_dir.join("stream.mp4.part");
-    let final_mp4 = staging_dir.join("stream.mp4");
+    let part_mp4 = staging_dir.join("livestream.mp4.part");
+    let final_mp4 = staging_dir.join("livestream.mp4");
     assert!(
         final_mp4.exists(),
-        "Final stream.mp4 must exist locally in staging directory upon zero-exit FFmpeg completion"
+        "Final livestream.mp4 must exist locally in staging directory upon zero-exit FFmpeg completion"
     );
     assert!(
         !part_mp4.exists(),
-        "Staged .part file must be atomically finalized locally to stream.mp4"
+        "Staged .part file must be atomically finalized locally to livestream.mp4"
     );
 
     // Verify 0x chunk storage and faststart seek table
@@ -829,11 +829,11 @@ async fn test_consolidate_video_remote_failure_cleans_up_part() {
         "Expected error to contain 'nonexistent_ffmpeg_bin_abc', but got: {err:#}"
     );
     assert!(
-        !staging_dir.join("stream.mp4.part").exists(),
+        !staging_dir.join("livestream.mp4.part").exists(),
         ".part file must be cleaned up in staging directory on remote failure"
     );
     assert!(
-        !staging_dir.join("stream.mp4").exists(),
+        !staging_dir.join("livestream.mp4").exists(),
         "final .mp4 must not exist in staging directory on remote failure"
     );
     assert!(
@@ -871,11 +871,11 @@ async fn test_consolidate_video_cooperative_cancellation() {
     );
 
     assert!(
-        !temp_dir.join("stream.mp4.part").exists(),
+        !temp_dir.join("livestream.mp4.part").exists(),
         "Staged .part file must be cleaned up on cancellation"
     );
     assert!(
-        !temp_dir.join("stream.mp4").exists(),
+        !temp_dir.join("livestream.mp4").exists(),
         "Final file must not exist on cancellation"
     );
     assert!(
@@ -1008,8 +1008,8 @@ async fn test_consolidate_video_local_faststart_seek_table_and_preserved_frames(
     );
     assert!(last_chunk_fed.1 > 0, "Final bytes_fed must be positive");
 
-    let part_mp4 = temp_dir.join("stream.mp4.part");
-    let final_mp4 = temp_dir.join("stream.mp4");
+    let part_mp4 = temp_dir.join("livestream.mp4.part");
+    let final_mp4 = temp_dir.join("livestream.mp4");
     assert!(
         part_mp4.exists(),
         "Staged .part file must exist before finalization"
@@ -1024,7 +1024,7 @@ async fn test_consolidate_video_local_faststart_seek_table_and_preserved_frames(
         .await
         .expect("finalize_staged_video must succeed");
 
-    assert!(final_mp4.exists(), "Final stream.mp4 must exist");
+    assert!(final_mp4.exists(), "Final livestream.mp4 must exist");
     assert!(!part_mp4.exists(), "Staged .part file must no longer exist");
     assert!(
         chunk0.exists() && chunk1.exists(),
@@ -1169,8 +1169,8 @@ async fn test_consolidate_video_local_active_cancellation_cleans_up_part() {
             .contains("cancelled by cooperative cancellation token")
     );
 
-    let staged_file = temp_dir.join("stream.mp4.part");
-    let final_file = temp_dir.join("stream.mp4");
+    let staged_file = temp_dir.join("livestream.mp4.part");
+    let final_file = temp_dir.join("livestream.mp4");
     assert!(
         !staged_file.exists(),
         "Staged .part file must be cleaned up on active cancellation"
@@ -1272,7 +1272,7 @@ async fn test_consolidate_video_local_path_with_korean_and_special_characters() 
     assert_eq!(result.chunks_processed, 2);
     assert!(result.bytes_written > 0);
 
-    let final_mp4 = temp_dir.join("stream.mp4");
+    let final_mp4 = temp_dir.join("livestream.mp4");
     finalize_staged_video(&target, None)
         .await
         .expect("finalize_staged_video must succeed");
@@ -1426,11 +1426,11 @@ async fn test_consolidate_video_remote_concat_demuxer_zero_frame_drops() {
     );
     assert!(last_chunk_fed.1 > 0, "Final bytes_fed must be positive");
 
-    let part_mp4 = staging_dir.join("stream.mp4.part");
-    let final_mp4 = staging_dir.join("stream.mp4");
+    let part_mp4 = staging_dir.join("livestream.mp4.part");
+    let final_mp4 = staging_dir.join("livestream.mp4");
     assert!(
         final_mp4.exists(),
-        "Final stream.mp4 must exist locally in staging directory upon zero-exit FFmpeg completion"
+        "Final livestream.mp4 must exist locally in staging directory upon zero-exit FFmpeg completion"
     );
     assert!(!part_mp4.exists(), "Staged .part file must no longer exist");
     assert!(
@@ -1574,8 +1574,8 @@ async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
             .contains("cancelled by cooperative cancellation token")
     );
 
-    let staged_file = staging_dir.join("stream.mp4.part");
-    let final_file = staging_dir.join("stream.mp4");
+    let staged_file = staging_dir.join("livestream.mp4.part");
+    let final_file = staging_dir.join("livestream.mp4");
     assert!(
         !staged_file.exists(),
         "Staged .part file must be cleaned up on active remote cancellation"
@@ -1671,11 +1671,11 @@ async fn test_consolidate_video_remote_hermetic_with_mock_rclone() {
     let res = result.unwrap();
     assert_eq!(res.chunks_processed, 2);
 
-    let final_mp4 = staging_dir.join("stream.mp4");
-    let staged_part = staging_dir.join("stream.mp4.part");
+    let final_mp4 = staging_dir.join("livestream.mp4");
+    let staged_part = staging_dir.join("livestream.mp4.part");
     assert!(
         final_mp4.exists(),
-        "Final stream.mp4 must exist locally in staging directory after mock consolidation"
+        "Final livestream.mp4 must exist locally in staging directory after mock consolidation"
     );
     assert!(!staged_part.exists(), "Staged .part file must be finalized");
     assert!(
@@ -1801,7 +1801,7 @@ async fn test_consolidate_video_local_relative_directory_path() {
     assert_eq!(result.chunks_processed, 2);
     assert!(result.bytes_written > 0);
 
-    let part_mp4 = temp_dir.join("stream.mp4.part");
+    let part_mp4 = temp_dir.join("livestream.mp4.part");
     assert!(
         part_mp4.exists(),
         "Staged .part file must exist after local consolidation"
@@ -1955,8 +1955,8 @@ async fn test_consolidate_video_monotonic_dts_collision_resolution() {
         .await
         .expect("finalize_staged_video must succeed");
 
-    let final_mp4 = temp_dir.join("stream.mp4");
-    assert!(final_mp4.exists(), "Final stream.mp4 must exist");
+    let final_mp4 = temp_dir.join("livestream.mp4");
+    assert!(final_mp4.exists(), "Final livestream.mp4 must exist");
 
     // 6. Verify container start time normalization and strictly monotonic output DTS
     if ensure_ffprobe_available() {

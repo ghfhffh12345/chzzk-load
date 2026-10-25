@@ -94,19 +94,19 @@ fn main() {
             let has_token = |t: &str, f: &str| {
                 (src.contains(t) || dst.contains(t)) && (src.contains(f) || dst.contains(f))
             };
-            if has_token("fail_hang_vid", "stream.mp4")
-                || has_token("fail_hang_chat", "chat.jsonl")
+            if has_token("fail_hang_vid", "livestream.mp4")
+                || has_token("fail_hang_chat", "livechat.jsonl")
                 || src.contains("fail_copy_hang")
                 || dst.contains("fail_copy_hang")
             {
                 std::thread::sleep(std::time::Duration::from_secs(60));
                 std::process::exit(0);
             }
-            if has_token("fail_err_vid", "stream.mp4") {
+            if has_token("fail_err_vid", "livestream.mp4") {
                 eprintln!("mock error: failed to copyto video {} to {}", src, dst);
                 std::process::exit(1);
             }
-            if has_token("fail_err_chat", "chat.jsonl") {
+            if has_token("fail_err_chat", "livechat.jsonl") {
                 eprintln!("mock error: failed to copyto chat {} to {}", src, dst);
                 std::process::exit(1);
             }

@@ -240,11 +240,11 @@ impl RecordingSession {
                 return;
             }
 
-            let metadata_path = session_dir.join("metadata.jsonl");
+            let metadata_path = session_dir.join("livemetadata.jsonl");
             if let Err(e) = tokio::fs::write(&metadata_path, &initial_metadata_jsonl).await {
                 let _ = event_tx
                     .send(AppEvent::Log(LogEntry::rec(format!(
-                        "[{channel_id}] Failed to write 'metadata.jsonl': {e}"
+                        "[{channel_id}] Failed to write 'livemetadata.jsonl': {e}"
                     ))))
                     .await;
             }
@@ -261,7 +261,7 @@ impl RecordingSession {
                 if let Err(e) = upload_tx.send(task).await {
                     let _ = event_tx
                         .send(AppEvent::Log(LogEntry::warn(format!(
-                            "[{channel_id}] Failed to enqueue initial 'metadata.jsonl': {e}"
+                            "[{channel_id}] Failed to enqueue initial 'livemetadata.jsonl': {e}"
                         ))))
                         .await;
                 }
@@ -412,7 +412,7 @@ impl RecordingSession {
                         chat_handle.abort();
                     }
                     let _ = crate::uploader::unlink_local_file_with_retry(
-                        &session_dir.join("metadata.jsonl"),
+                        &session_dir.join("livemetadata.jsonl"),
                     )
                     .await;
                     custodian.mark_concluded(&session_dir);
@@ -496,7 +496,7 @@ impl RecordingSession {
                 // Clean up any partial media files, then let custodian perform gated purge
                 if let Ok(mut rd) = tokio::fs::read_dir(&session_dir).await {
                     while let Ok(Some(entry)) = rd.next_entry().await {
-                        if entry.file_name() != "metadata.jsonl" {
+                        if entry.file_name() != "livemetadata.jsonl" {
                             let _ = unlink_local_file_with_retry(&entry.path()).await;
                         }
                     }
@@ -572,7 +572,7 @@ impl RecordingSession {
                     if let Err(e) = upload_tx.send(task).await {
                         let _ = event_tx
                             .send(AppEvent::Log(LogEntry::warn(format!(
-                                "[{channel_id}] Failed to enqueue final 'metadata.jsonl': {e}"
+                                "[{channel_id}] Failed to enqueue final 'livemetadata.jsonl': {e}"
                             ))))
                             .await;
                     }
@@ -1070,7 +1070,7 @@ mod tests {
             .try_recv()
             .expect("initial metadata must be enqueued");
         assert_eq!(task.channel_id, "test_chan_meta_start");
-        assert_eq!(task.chunk_name, "metadata.jsonl");
+        assert_eq!(task.chunk_name, "livemetadata.jsonl");
         assert!(task.is_metadata());
         assert!(
             !task.delete_on_success,

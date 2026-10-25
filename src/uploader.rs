@@ -57,7 +57,7 @@ impl UploadTask {
         }
     }
 
-    /// Creates a metadata snapshot upload task (`metadata.jsonl`),
+    /// Creates a metadata snapshot upload task (`livemetadata.jsonl`),
     /// with an explicit `delete_on_success` retention policy (`false` for live sync,
     /// `true` for stream conclusion or crash recovery).
     pub fn metadata(
@@ -73,16 +73,16 @@ impl UploadTask {
             session_folder_id: session_folder_id.into(),
             remote_dir: remote_dir.into(),
             chunk_path: chunk_path.into(),
-            chunk_name: "metadata.jsonl".to_string(),
+            chunk_name: "livemetadata.jsonl".to_string(),
             streamer_name: streamer_name.into(),
             delete_on_success,
         }
     }
 
-    /// Returns true if this upload task represents the broadcast metadata snapshot (`metadata.jsonl`).
+    /// Returns true if this upload task represents the broadcast metadata snapshot (`livemetadata.jsonl`).
     #[inline]
     pub fn is_metadata(&self) -> bool {
-        self.chunk_name == "metadata.jsonl"
+        self.chunk_name == "livemetadata.jsonl"
     }
 
     /// Returns the broadcast identifier for this upload task.
@@ -124,11 +124,11 @@ mod tests {
             "chan_2",
             "session_2",
             "remote/dir",
-            "recordings/metadata.jsonl",
+            "recordings/livemetadata.jsonl",
             "Streamer B",
             false,
         );
-        assert_eq!(live_sync_task.chunk_name, "metadata.jsonl");
+        assert_eq!(live_sync_task.chunk_name, "livemetadata.jsonl");
         assert!(
             !live_sync_task.delete_on_success,
             "live sync metadata must have delete_on_success false"
@@ -138,11 +138,11 @@ mod tests {
             "chan_2",
             "session_2",
             "remote/dir",
-            "recordings/metadata.jsonl",
+            "recordings/livemetadata.jsonl",
             "Streamer B",
             true,
         );
-        assert_eq!(teardown_task.chunk_name, "metadata.jsonl");
+        assert_eq!(teardown_task.chunk_name, "livemetadata.jsonl");
         assert!(
             teardown_task.delete_on_success,
             "teardown metadata must have delete_on_success true"

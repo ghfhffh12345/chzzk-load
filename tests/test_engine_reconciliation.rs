@@ -490,7 +490,7 @@ async fn test_reconciliation_enqueues_orphaned_metadata_after_media_chunks() {
     let chunk0 = session_dir.join("chunk_0000.ts");
     let chat0 = session_dir.join("chat_0000.jsonl");
     let chunk1 = session_dir.join("chunk_0001.ts");
-    let meta = session_dir.join("metadata.jsonl");
+    let meta = session_dir.join("livemetadata.jsonl");
 
     fs::write(&chunk0, vec![0u8; 1024]).expect("write chunk 0");
     fs::write(&chat0, vec![0u8; 256]).expect("write chat 0");
@@ -507,7 +507,7 @@ async fn test_reconciliation_enqueues_orphaned_metadata_after_media_chunks() {
 
     let report = reconcile_orphaned_sessions(guard.path(), &upload_tx, &event_tx, &settings).await;
 
-    // chunk 0, chat 0, and metadata.jsonl should be enqueued (3 tasks), chunk 1 quarantined
+    // chunk 0, chat 0, and livemetadata.jsonl should be enqueued (3 tasks), chunk 1 quarantined
     assert_eq!(report.orphaned_sessions_scanned, 1);
     assert_eq!(report.chunks_enqueued, 3);
     assert_eq!(report.chunks_quarantined, 1);
@@ -520,7 +520,7 @@ async fn test_reconciliation_enqueues_orphaned_metadata_after_media_chunks() {
     assert_eq!(tasks.len(), 3);
     assert_eq!(tasks[0].chunk_name, "chunk_0000.ts");
     assert_eq!(tasks[1].chunk_name, "chat_0000.jsonl");
-    assert_eq!(tasks[2].chunk_name, "metadata.jsonl");
+    assert_eq!(tasks[2].chunk_name, "livemetadata.jsonl");
     assert!(tasks[2].is_metadata());
     assert!(
         tasks[2].delete_on_success,
@@ -536,7 +536,7 @@ async fn test_reconciliation_enqueues_orphaned_metadata_when_chunks_already_purg
         .join("[2026-10-01_1000] [TestStreamer] TestStreamer - Title");
     fs::create_dir_all(&session_dir).expect("failed to create session directory");
 
-    let meta = session_dir.join("metadata.jsonl");
+    let meta = session_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\",\"stream_offset_ms\":0}\n").expect("write metadata");
 
     let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(100);
@@ -558,7 +558,7 @@ async fn test_reconciliation_enqueues_orphaned_metadata_when_chunks_already_purg
         tasks.push(task);
     }
     assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].chunk_name, "metadata.jsonl");
+    assert_eq!(tasks[0].chunk_name, "livemetadata.jsonl");
     assert!(tasks[0].is_metadata());
     assert!(tasks[0].delete_on_success);
 }

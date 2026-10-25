@@ -68,9 +68,9 @@ pub struct ConsolidationSummary {
 
 pub const DEFAULT_DELETE_CONCURRENCY: usize = 16;
 
-/// Returns true if a chunk is eligible for post-consolidation purging (.ts or .jsonl, strictly excluding metadata.jsonl).
+/// Returns true if a chunk is eligible for post-consolidation purging (.ts or .jsonl, strictly excluding livemetadata.jsonl).
 pub(crate) fn is_purgeable_chunk(chunk: &ConsolidationChunk) -> bool {
-    chunk.name != "metadata.jsonl"
+    chunk.name != "livemetadata.jsonl"
         && (chunk.name.ends_with(".ts") || chunk.name.ends_with(".jsonl"))
 }
 
@@ -93,7 +93,7 @@ pub(crate) fn collect_purgeable_chunks(
 /// Under `TargetLocation::Local`, unlinks files using bounded retry logic handling Windows locks.
 /// Under `TargetLocation::Remote`, deletes files using `rclone deletefile`.
 ///
-/// Invariant: `metadata.jsonl` is NEVER deleted.
+/// Invariant: `livemetadata.jsonl` is NEVER deleted.
 pub async fn delete_original_chunks(
     target: &TargetLocation,
     video_chunks: &[ConsolidationChunk],
@@ -132,7 +132,7 @@ pub async fn delete_original_chunks_with_bin(
 /// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded worker limit.
 ///
 /// Pools video chunks (`.ts`) and chat chunks (`.jsonl`) into a single unified queue,
-/// strictly excluding `metadata.jsonl`.
+/// strictly excluding `livemetadata.jsonl`.
 ///
 /// Implements best-effort failure aggregation: all tasks run to completion, and any failures
 /// are collected and reported in an aggregate error summary upon completion.
@@ -420,8 +420,8 @@ pub async fn upload_remote_staged_file(
     upload_remote_staged_file_with_args(bin, local_path, remote_dest, &[]).await
 }
 
-/// Concurrently uploads staged media files (`stream.mp4` and `chat.jsonl`) to remote destinations
-/// (`remote_base/stream.mp4.part` and `remote_base/chat.jsonl.part`) via `rclone copyto`,
+/// Concurrently uploads staged media files (`livestream.mp4` and `livechat.jsonl`) to remote destinations
+/// (`remote_base/livestream.mp4.part` and `remote_base/livechat.jsonl.part`) via `rclone copyto`,
 /// dispatching live progress telemetry to optional senders.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
@@ -448,12 +448,12 @@ pub async fn upload_remote_staged_media_with_progress(
         return Ok(());
     }
 
-    let remote_video_part = join_remote_path(remote_base, "stream.mp4.part");
-    let remote_chat_part = join_remote_path(remote_base, "chat.jsonl.part");
+    let remote_video_part = join_remote_path(remote_base, "livestream.mp4.part");
+    let remote_chat_part = join_remote_path(remote_base, "livechat.jsonl.part");
 
     let video_upload_fut = async {
         if has_video {
-            let local_mp4 = staging_dir.join("stream.mp4");
+            let local_mp4 = staging_dir.join("livestream.mp4");
             upload_remote_staged_file_with_progress(
                 bin,
                 &local_mp4,
@@ -469,7 +469,7 @@ pub async fn upload_remote_staged_media_with_progress(
 
     let chat_upload_fut = async {
         if has_chat {
-            let local_jsonl = staging_dir.join("chat.jsonl");
+            let local_jsonl = staging_dir.join("livechat.jsonl");
             upload_remote_staged_file_with_progress(
                 bin,
                 &local_jsonl,
@@ -508,8 +508,8 @@ pub async fn upload_remote_staged_media_with_progress(
     Ok(())
 }
 
-/// Concurrently uploads staged media files (`stream.mp4` and `chat.jsonl`) to remote destinations
-/// (`remote_base/stream.mp4.part` and `remote_base/chat.jsonl.part`) via `rclone copyto`.
+/// Concurrently uploads staged media files (`livestream.mp4` and `livechat.jsonl`) to remote destinations
+/// (`remote_base/livestream.mp4.part` and `remote_base/livechat.jsonl.part`) via `rclone copyto`.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
 /// is promptly aborted and killed (`kill_on_drop`).
@@ -597,7 +597,7 @@ pub async fn run_consolidation_with_coordinator(
 /// and chat deduplication pipelines via `tokio::join!`, atomically finalizes staged `.part`
 /// files upon zero-exit completion of all active pipelines, concurrently uploads finalized
 /// media files to cloud remotes with fail-fast sibling abort, and purges original chunks
-/// when `--keep-original` is false while strictly preserving `metadata.jsonl`.
+/// when `--keep-original` is false while strictly preserving `livemetadata.jsonl`.
 pub async fn run_consolidation_with_coordinator_and_cancel(
     args: ConsolidateArgs,
     coordinator: ConsolidationProgressCoordinator,
@@ -687,7 +687,7 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             .expect("staging_dir must be resolved for remote resume");
 
         let resumed_video_result = if has_video {
-            let mp4_path = staging_dir.join("stream.mp4");
+            let mp4_path = staging_dir.join("livestream.mp4");
             let bytes_written = std::fs::metadata(&mp4_path).map(|m| m.len()).unwrap_or(0);
             if let Some(v_tx) = media_session.video_sender() {
                 let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
@@ -859,7 +859,7 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
 
         // 1. Two-stage cloud upload: upload local files to remote .part destinations concurrently via rclone copyto
         let video_bytes = if has_video {
-            tokio::fs::metadata(staging_dir.join("stream.mp4"))
+            tokio::fs::metadata(staging_dir.join("livestream.mp4"))
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0)
@@ -867,7 +867,7 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             0
         };
         let chat_bytes = if has_chat {
-            tokio::fs::metadata(staging_dir.join("chat.jsonl"))
+            tokio::fs::metadata(staging_dir.join("livechat.jsonl"))
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0)
@@ -928,8 +928,16 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
                 Some(&rclone_bin),
             )
             .await;
-            delete_remote_file(&rclone_bin, &join_remote_path(remote_base, "stream.mp4")).await;
-            delete_remote_file(&rclone_bin, &join_remote_path(remote_base, "chat.jsonl")).await;
+            delete_remote_file(
+                &rclone_bin,
+                &join_remote_path(remote_base, "livestream.mp4"),
+            )
+            .await;
+            delete_remote_file(
+                &rclone_bin,
+                &join_remote_path(remote_base, "livechat.jsonl"),
+            )
+            .await;
             eprintln!(
                 "[INFO] Cloud finalization failed, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload.",
                 staging_dir.display()
@@ -1037,7 +1045,7 @@ mod tests {
     #[test]
     fn test_is_purgeable_chunk_filters_metadata_and_non_chunks() {
         let meta = ConsolidationChunk {
-            name: "metadata.jsonl".to_string(),
+            name: "livemetadata.jsonl".to_string(),
             index: 0,
             size: 100,
         };
@@ -1074,7 +1082,7 @@ mod tests {
                 size: 100,
             },
             ConsolidationChunk {
-                name: "metadata.jsonl".to_string(),
+                name: "livemetadata.jsonl".to_string(),
                 index: 1,
                 size: 50,
             },
@@ -1150,8 +1158,8 @@ mod tests {
 
     #[test]
     fn test_build_remote_staged_upload_command_structure() {
-        let local_path = std::path::Path::new("local/stream.mp4");
-        let remote_dest = "remote:bucket/stream.mp4.part";
+        let local_path = std::path::Path::new("local/livestream.mp4");
+        let remote_dest = "remote:bucket/livestream.mp4.part";
         let extra = vec!["--checkers".to_string(), "8".to_string()];
         let cmd = build_remote_staged_upload_command("my_rclone", local_path, remote_dest, &extra);
         let std_cmd = cmd.as_std();

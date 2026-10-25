@@ -324,7 +324,7 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     let remote_guard = TempDirGuard::new("test_rclone_disk_evict_dst");
 
     // Metadata task (oldest, enqueued first): should strictly be immune to disk eviction
-    let meta_path = local_guard.path().join("metadata.jsonl");
+    let meta_path = local_guard.path().join("livemetadata.jsonl");
     let meta_payload = b"{\"version\":2,\"event\":\"INITIAL_STATE\",\"stream_offset_ms\":0}\n";
     std::fs::write(&meta_path, meta_payload).expect("failed to write meta");
     let task_meta = UploadTask::metadata(
@@ -402,15 +402,15 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     // Verify metadata was spared from eviction, uploaded via real rclone, and retained locally
     assert!(
         meta_path.exists(),
-        "metadata.jsonl must strictly be immune from DLQ eviction and remain on disk"
+        "livemetadata.jsonl must strictly be immune from DLQ eviction and remain on disk"
     );
     let remote_meta = remote_guard
         .path()
         .join("session_evict")
-        .join("metadata.jsonl");
+        .join("livemetadata.jsonl");
     assert!(
         remote_meta.exists(),
-        "metadata.jsonl must exist on remote after real rclone upload"
+        "livemetadata.jsonl must exist on remote after real rclone upload"
     );
     assert_eq!(
         std::fs::read(&remote_meta).expect("read remote meta"),
@@ -507,15 +507,15 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
             }
             if entry
                 .message
-                .contains("[DLQ] Successfully uploaded metadata.jsonl on retry 1")
+                .contains("[DLQ] Successfully uploaded livemetadata.jsonl on retry 1")
             {
                 saw_meta_retry_success = true;
             }
             assert!(
                 !entry
                     .message
-                    .contains("Evicted oldest chunk metadata.jsonl"),
-                "metadata.jsonl must strictly be immune from DLQ eviction"
+                    .contains("Evicted oldest chunk livemetadata.jsonl"),
+                "livemetadata.jsonl must strictly be immune from DLQ eviction"
             );
         }
     }
@@ -530,7 +530,7 @@ async fn test_real_rclone_dlq_disk_aware_eviction_drops_oldest_pair() {
     );
     assert!(
         saw_meta_retry_success,
-        "Retry 1 success log must be emitted for spared metadata.jsonl"
+        "Retry 1 success log must be emitted for spared livemetadata.jsonl"
     );
 }
 
@@ -543,7 +543,7 @@ async fn test_real_rclone_metadata_snapshot_live_sync_and_teardown_retention() {
     let local_guard = TempDirGuard::new("test_rclone_meta_src");
     let remote_guard = TempDirGuard::new("test_rclone_meta_dst");
 
-    let meta_path = local_guard.path().join("metadata.jsonl");
+    let meta_path = local_guard.path().join("livemetadata.jsonl");
     let payload_initial = b"{\"version\":2,\"event\":\"INITIAL_STATE\",\"stream_offset_ms\":0}\n";
     std::fs::write(&meta_path, payload_initial).expect("failed to write initial metadata");
 
@@ -582,7 +582,7 @@ async fn test_real_rclone_metadata_snapshot_live_sync_and_teardown_retention() {
         {
             if entry
                 .message
-                .contains("[MetaStreamer] Uploaded metadata.jsonl (synced)")
+                .contains("[MetaStreamer] Uploaded livemetadata.jsonl (synced)")
             {
                 saw_synced_log = true;
                 break;
@@ -591,27 +591,27 @@ async fn test_real_rclone_metadata_snapshot_live_sync_and_teardown_retention() {
     }
     assert!(saw_synced_log, "Uploaded (synced) log must be recorded");
 
-    // Local metadata.jsonl must remain on disk
+    // Local livemetadata.jsonl must remain on disk
     assert!(
         meta_path.exists(),
-        "metadata.jsonl must remain on disk after live sync snapshot"
+        "livemetadata.jsonl must remain on disk after live sync snapshot"
     );
 
     // Remote file must exist and match payload
     let remote_meta = remote_guard
         .path()
         .join("session_meta_1")
-        .join("metadata.jsonl");
+        .join("livemetadata.jsonl");
     assert!(
         remote_meta.exists(),
-        "Remote metadata.jsonl must exist after real rclone upload"
+        "Remote livemetadata.jsonl must exist after real rclone upload"
     );
     assert_eq!(
         std::fs::read(&remote_meta).expect("read remote meta"),
         payload_initial
     );
 
-    // 2. Append teardown event to metadata.jsonl
+    // 2. Append teardown event to livemetadata.jsonl
     let payload_teardown =
         b"{\"version\":2,\"event\":\"METADATA_CHANGED\",\"stream_offset_ms\":5000}\n";
     let mut full_payload = payload_initial.to_vec();
@@ -632,17 +632,17 @@ async fn test_real_rclone_metadata_snapshot_live_sync_and_teardown_retention() {
 
     worker_handle.await.unwrap();
 
-    // Local metadata.jsonl must be unlinked after confirmed teardown upload
+    // Local livemetadata.jsonl must be unlinked after confirmed teardown upload
     assert!(
         !meta_path.exists(),
-        "metadata.jsonl must be deleted locally after final teardown upload"
+        "livemetadata.jsonl must be deleted locally after final teardown upload"
     );
 
     // Remote file must match updated payload
     assert_eq!(
         std::fs::read(&remote_meta).expect("read remote meta final"),
         full_payload,
-        "Remote metadata.jsonl must reflect updated content"
+        "Remote livemetadata.jsonl must reflect updated content"
     );
 
     let mut saw_deleted_log = false;
@@ -650,7 +650,7 @@ async fn test_real_rclone_metadata_snapshot_live_sync_and_teardown_retention() {
         if let AppEvent::Log(entry) = ev {
             if entry
                 .message
-                .contains("[MetaStreamer] Uploaded & deleted metadata.jsonl")
+                .contains("[MetaStreamer] Uploaded & deleted livemetadata.jsonl")
             {
                 saw_deleted_log = true;
             }

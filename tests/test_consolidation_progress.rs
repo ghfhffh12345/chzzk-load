@@ -1508,7 +1508,7 @@ async fn test_run_consolidation_with_coordinator_interactive_e2e() {
     )
     .unwrap();
 
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {
@@ -1531,8 +1531,8 @@ async fn test_run_consolidation_with_coordinator_interactive_e2e() {
     assert!(summary.video_result.is_some());
     assert!(summary.chat_stats.is_some());
 
-    // Invariant: metadata.jsonl preserved, original chunks purged
-    assert!(meta.exists(), "metadata.jsonl must remain intact");
+    // Invariant: livemetadata.jsonl preserved, original chunks purged
+    assert!(meta.exists(), "livemetadata.jsonl must remain intact");
     assert!(!chunk0.exists(), "chunk_0000.ts must be purged");
     assert!(!chunk1.exists(), "chunk_0001.ts must be purged");
     assert!(!chat0.exists(), "chat_0000.jsonl must be purged");
@@ -1572,7 +1572,7 @@ async fn test_run_consolidation_with_coordinator_interactive_video_only() {
     let chunk0 = temp_dir.join("chunk_0000.ts");
     fs::write(&chunk0, vec![1u8; 100]).unwrap();
 
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {
@@ -1631,7 +1631,7 @@ async fn test_run_consolidation_with_coordinator_non_interactive_e2e() {
     )
     .unwrap();
 
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {
@@ -1654,8 +1654,8 @@ async fn test_run_consolidation_with_coordinator_non_interactive_e2e() {
     assert!(summary.video_result.is_some());
     assert!(summary.chat_stats.is_some());
 
-    // Invariant: metadata.jsonl preserved, original chunks purged
-    assert!(meta.exists(), "metadata.jsonl must remain intact");
+    // Invariant: livemetadata.jsonl preserved, original chunks purged
+    assert!(meta.exists(), "livemetadata.jsonl must remain intact");
     assert!(!chunk0.exists(), "chunk_0000.ts must be purged");
     assert!(!chat0.exists(), "chat_0000.jsonl must be purged");
 

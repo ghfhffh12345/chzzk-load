@@ -9,7 +9,7 @@
 
 네이버 치지직(Chzzk) 라이브 방송을 자동으로 감지하여 실시간 영상 및 라이브 채팅을 녹화하고, 녹화 후 미디어 통합 및 클라우드 스토리지([rclone](https://rclone.org/) 연동)로 동기화하는 고성능 독립 실행형 CLI 도구입니다. [Ratatui](https://github.com/ratatui/ratatui) 기반의 대화형 터미널 사용자 인터페이스(TUI)를 제공합니다.
 
-`chzzk-load`는 방송 상태를 실시간 모니터링하며, FFmpeg 스트림 복사(`-c copy`)를 통해 원본 손실 없이 영상을 MPEG-TS 세그먼트로 분할 저장하고 WebSocket을 통해 실시간 라이브 채팅을 구조화된 JSON Lines(`chat_%04d.jsonl`) 형식으로 동시 수집합니다. 분할 완료된 영상 세그먼트와 채팅 로그는 백그라운드에서 rclone을 통해 클라우드 스토리지로 즉시 업로드되며 (또는 로컬 전용 모드로 로컬에 보관), 업로드 성공이 확인되는 즉시 로컬 파일을 삭제하여 디스크 사용량을 최소한으로 엄격히 유지합니다. 또한 분할 저장된 청크들을 재생 탐색이 가능한 단일 MP4(`stream.mp4`, `+faststart`) 및 중복 제거된 채팅 로그(`chat.jsonl`)로 무손실 통합하는 녹화 후 통합 파이프라인(`chzzk-load consolidate`)을 제공합니다.
+`chzzk-load`는 방송 상태를 실시간 모니터링하며, FFmpeg 스트림 복사(`-c copy`)를 통해 원본 손실 없이 영상을 MPEG-TS 세그먼트로 분할 저장하고 WebSocket을 통해 실시간 라이브 채팅을 구조화된 JSON Lines(`chat_%04d.jsonl`) 형식으로 동시 수집합니다. 분할 완료된 영상 세그먼트와 채팅 로그는 백그라운드에서 rclone을 통해 클라우드 스토리지로 즉시 업로드되며 (또는 로컬 전용 모드로 로컬에 보관), 업로드 성공이 확인되는 즉시 로컬 파일을 삭제하여 디스크 사용량을 최소한으로 엄격히 유지합니다. 또한 분할 저장된 청크들을 재생 탐색이 가능한 단일 MP4(`livestream.mp4`, `+faststart`) 및 중복 제거된 채팅 로그(`livechat.jsonl`)로 무손실 통합하는 녹화 후 통합 파이프라인(`chzzk-load consolidate`)을 제공합니다.
 
 ![chzzk-load TUI 대시보드](assets/tui-preview.png)
 
@@ -21,14 +21,14 @@
 - 🌐 **직접 CDN 스트림 주소 자동 추출 (P2P/그리드 우회)**: 치지직 `p2pPath` 플레이리스트에 포함된 base64 인코딩 `cdn_url` 매개변수를 자동 디코딩하여, 별도의 그리드 소프트웨어 설치 없이 원본 화질(1080p, 720p 등)의 직접 CDN HLS 스트림을 수집합니다.
 - 💬 **실시간 라이브 채팅 녹화 (`chat_%04d.jsonl`)**: WebSocket을 통해 실시간 방송 채팅을 동시 수집하여 시간 단위 분할 세그먼트(`chat_%04d.jsonl`)로 저장하며, 타임스탬프, 사용자 닉네임, 뱃지, 후원(치즈) 내역, 메시지 내용이 포함된 구조화된 JSON Lines 형식을 유지합니다.
 - 💽 **플래시 수명 보호 배치 I/O (SBC 최적화)**: 라즈베리 파이(Raspberry Pi), ARM64 등 단일 보드 컴퓨터(SBC)의 microSD 및 플래시 메모리 수명을 보존하기 위해 바이트 버퍼 메모리 버퍼링 및 듀얼 트리거 플러시(500개 메시지 / 64KB 도달 또는 주기적 타이머)를 적용하여 디스크 쓰기 빈도를 최소화합니다.
-- 📊 **실시간 방송 메타데이터 이벤트 추적 (`metadata.jsonl`)**: 방송 중 변경되는 핵심 상태 전이(방제, 카테고리, 태그, 시청 권한 등급, 시청 및 채팅 정책 플래그)를 v2 경량 JSON Lines 스냅샷 형식으로 밀리초 단위의 비디오 싱크와 함께 기록하고, 통합 비차단 업로드 파이프라인을 통해 실시간 클라우드 동기화를 지원합니다.
+- 📊 **실시간 방송 메타데이터 이벤트 추적 (`livemetadata.jsonl`)**: 방송 중 변경되는 핵심 상태 전이(방제, 카테고리, 태그, 시청 권한 등급, 시청 및 채팅 정책 플래그)를 v2 경량 JSON Lines 스냅샷 형식으로 밀리초 단위의 비디오 싱크와 함께 기록하고, 통합 비차단 업로드 파이프라인을 통해 실시간 클라우드 동기화를 지원합니다.
 - 💾 **엄격히 제한된 디스크 사용량 & 디스크 고갈 보호**: 활성 스트림당 최대 1~2개의 영상 세그먼트 및 1개의 채팅 청크만 로컬 디스크에 유지합니다. 클라우드 업로드 완료가 확인되는 즉시 세그먼트 청크는 로컬에서 영구 삭제됩니다. 크로스 플랫폼 디스크 공간 서킷 브레이커(`min_free_disk_gb`)가 작동하여 잔여 용량이 부족할 경우 녹화를 안전하게 일시 정지하고 메타데이터는 안전하게 보존하면서 데드 레터 큐(DLQ)에서 가장 오래된 실패 청크들을 능동적으로 삭제하여 디스크 공간을 확보합니다.
 - 🛡️ **N+1 세그먼트 경계 안전성**: 명시적 숫자 시퀀스 파싱(`chunk_%04d.ts`)을 통해 $N$번째 청크는 다음 $N+1$번째 청크가 디스크에 생성(파일 크기 > 0)된 것이 확인된 후에만 업로드 큐로 전달되어, 불완전하거나 손상된 청크의 업로드를 원천 차단합니다.
-- 🎬 **녹화 후 미디어 통합 (`chzzk-load consolidate`)**: 분할된 영상 세그먼트(`chunk_%04d.ts`)를 탐색 가능한 타임라인 정규화 MP4(`stream.mp4`, `+faststart`)로 무손실 리먹싱하고 채팅 로그를 단일 `chat.jsonl`로 중복 제거 통합합니다. 로컬 디렉터리와 클라우드 원격지(`remote:path`)를 모두 지원하며, 원격 청크를 임시 HTTP 루프백 서버(`rclone serve http`)로 메모리에 스트리밍하여 로컬 디스크 사용량을 영상 크기의 1배로 엄격히 제한합니다.
-- 🚀 **고처리량 동시 클라우드 업로드 및 복원력 있는 스테이징**: 통합 완료된 `stream.mp4`와 `chat.jsonl`을 2단계 원자적 스테이징(`.part` 업로드 후 `rclone moveto`)으로 동시 업로드하며, 대용량 파일 전송 최적화(`--drive-chunk-size 128M`, 멀티스레딩)가 적용됩니다. 업로드 실패 시 형제 프로세스 즉시 중단 및 원격 `.part` 정리, 컨테이너 정밀 검증(`moov` 아톰)을 통한 즉각적인 재개 지원, 사전 디스크 용량 검증($1.15\times$ 확보)을 갖추고 있습니다.
+- 🎬 **녹화 후 미디어 통합 (`chzzk-load consolidate`)**: 분할된 영상 세그먼트(`chunk_%04d.ts`)를 탐색 가능한 타임라인 정규화 MP4(`livestream.mp4`, `+faststart`)로 무손실 리먹싱하고 채팅 로그를 단일 `livechat.jsonl`로 중복 제거 통합합니다. 로컬 디렉터리와 클라우드 원격지(`remote:path`)를 모두 지원하며, 원격 청크를 임시 HTTP 루프백 서버(`rclone serve http`)로 메모리에 스트리밍하여 로컬 디스크 사용량을 영상 크기의 1배로 엄격히 제한합니다.
+- 🚀 **고처리량 동시 클라우드 업로드 및 복원력 있는 스테이징**: 통합 완료된 `livestream.mp4`와 `livechat.jsonl`을 2단계 원자적 스테이징(`.part` 업로드 후 `rclone moveto`)으로 동시 업로드하며, 대용량 파일 전송 최적화(`--drive-chunk-size 128M`, 멀티스레딩)가 적용됩니다. 업로드 실패 시 형제 프로세스 즉시 중단 및 원격 `.part` 정리, 컨테이너 정밀 검증(`moov` 아톰)을 통한 즉각적인 재개 지원, 사전 디스크 용량 검증($1.15\times$ 확보)을 갖추고 있습니다.
 - 📊 **반응형 미디어 통합 진행률 텔레메트리**: 리먹싱(`VID`, `CHAT`), 클라우드 업로드(`UP V`, `UP C`), 청크 정리(`DEL`) 상태를 10 Hz 갱신 주기의 대화형 TrueColor ANSI 게이지바로 실시간 표시하며, 비대화형/헤드리스 환경에서는 20% 마일스톤 로그 및 30초 생존 주기 로그로 자동 전환됩니다.
 - 📬 **비차단 데드 레터 큐 (DLQ) 재시도 구조**: 개별 청크나 메타데이터 업로드가 실패하더라도 후속 작업이 차단(Head-of-Line Blocking)되지 않고 백그라운드 DLQ로 즉시 이관되어 지수 백오프(초기 2초, 최대 5분 캡, 무한 재시도, 채널당 메모리 내 최대 20개 태스크 제한)로 재시도됩니다.
-- 🔄 **비정상 종료 자동 복구 및 꼬리 청크 격리**: 프로그램 비정상 종료나 서버 재부팅 시 이전 세션의 고아 청크 및 잔여 `metadata.jsonl`을 자동 스캔하여, N+1 검증이 완료된 완전한 청크와 메타데이터는 데드 레터 큐(DLQ)로 재주입하여 업로드하고 미완성된 마지막 꼬리 청크는 안전하게 격리(`.quarantine`)합니다.
+- 🔄 **비정상 종료 자동 복구 및 꼬리 청크 격리**: 프로그램 비정상 종료나 서버 재부팅 시 이전 세션의 고아 청크 및 잔여 `livemetadata.jsonl`을 자동 스캔하여, N+1 검증이 완료된 완전한 청크와 메타데이터는 데드 레터 큐(DLQ)로 재주입하여 업로드하고 미완성된 마지막 꼬리 청크는 안전하게 격리(`.quarantine`)합니다.
 - 🤖 **헤드리스 콘솔 모드 (`--headless` / `--no-tui`)**: 비대화형 환경(non-TTY, Docker 컨테이너, systemd 서비스 등)을 자동 감지하거나 플래그를 통해 TUI 원시 모드를 건너뛰고 포맷팅된 실시간 로그를 stdout으로 스트리밍합니다.
 - ☁️ **Rclone 기반 다양한 클라우드 스토리지 동기화**: [rclone](https://rclone.org/)과 연동하여 Google Drive, OneDrive, Amazon S3, Dropbox, WebDAV, SFTP 등 70여 개 이상의 다양한 클라우드 스토리지로 원활하게 전송합니다. 클라우드 동기화를 비활성화(`remote_path: ""`)하면 자동으로 **로컬 전용 녹화 모드**로 동작합니다.
 - 🔀 **채널별 순차 직렬화 & 다중 스트림 동시 업로드**: 동일 채널의 세그먼트는 순차(FIFO) 업로드를 보장하여 순서 꼬임과 대역폭 경합을 방지하며, 여러 채널 간에는 최대 `upload_concurrency`(기본값: 3)개까지 병렬 업로드합니다.
@@ -85,7 +85,7 @@ chzzk-load consolidate remote:chzzk/[2026-09-30_140000]\ [StreamerAlias]\ Stream
 
 ## 녹화 후 파일 통합 (`chzzk-load consolidate`)
 
-방송 녹화가 완료된 후 세션 폴더에는 분할 영상 청크(`chunk_%04d.ts`), 분할 채팅 로그(`chat_%04d.jsonl`), 방송 메타데이터(`metadata.jsonl`)가 보관됩니다. `consolidate` 서브커맨드는 이러한 분할 파일들을 손실 없이 탐색 가능한 표준 규격 파일(`stream.mp4` 및 `chat.jsonl`)로 병합 및 리먹싱하며, 로컬 디스크 사용량을 엄격하게 제한합니다.
+방송 녹화가 완료된 후 세션 폴더에는 분할 영상 청크(`chunk_%04d.ts`), 분할 채팅 로그(`chat_%04d.jsonl`), 방송 메타데이터(`livemetadata.jsonl`)가 보관됩니다. `consolidate` 서브커맨드는 이러한 분할 파일들을 손실 없이 탐색 가능한 표준 규격 파일(`livestream.mp4` 및 `livechat.jsonl`)로 병합 및 리먹싱하며, 로컬 디스크 사용량을 엄격하게 제한합니다.
 
 ```bash
 # 로컬 녹화 세션 디렉터리 무손실 통합
@@ -97,7 +97,7 @@ chzzk-load consolidate remote:chzzk/[2026-09-30_140000]\ [StreamerAlias]\ Stream
 # 원본 영상 및 채팅 청크 유지 (성공 후 청크 자동 삭제 비활성화)
 chzzk-load consolidate recordings/... --keep-original
 
-# 대상 폴더에 이미 존재하는 stream.mp4 또는 chat.jsonl 강제 덮어쓰기
+# 대상 폴더에 이미 존재하는 livestream.mp4 또는 livechat.jsonl 강제 덮어쓰기
 chzzk-load consolidate recordings/... --overwrite
 
 # 청크 번호 누락이나 비정상 파일 발견 시 통합 즉시 중단
@@ -119,21 +119,21 @@ chzzk-load --headless consolidate recordings/...
 | :--- | :--- | :--- |
 | `<PATH>` | *(필수)* | 녹화 세션의 로컬 디렉터리 경로 또는 rclone 원격지 경로 (`<원격지이름>:<경로>`). |
 | `--keep-original` | `false` | 통합 성공 후 원본 영상 및 채팅 청크를 삭제하지 않고 유지합니다. 지정하지 않으면 검증 완료 후 원본 청크가 자동 삭제됩니다. |
-| `--overwrite` | `false` | 대상 디렉터리에 이미 존재하는 `stream.mp4` 또는 `chat.jsonl` 파일을 덮어씁니다. |
+| `--overwrite` | `false` | 대상 디렉터리에 이미 존재하는 `livestream.mp4` 또는 `livechat.jsonl` 파일을 덮어씁니다. |
 | `--strict` | `false` | 청크 시퀀스 누락(예: `chunk_0002.ts` 부재)이나 손상된 항목 감지 시 작업을 즉시 중단합니다. |
 | `--delete-concurrency <N>` | `16` | 원본 청크 정리 시 실행할 최대 병렬 삭제 작업 수. |
-| `--temp-dir <PATH>` | 시스템 임시 폴더 | 임시 스테이징 파일(`stream.mp4.part`, `chat.jsonl.part`)이 저장될 작업 디렉터리. |
+| `--temp-dir <PATH>` | 시스템 임시 폴더 | 임시 스테이징 파일(`livestream.mp4.part`, `livechat.jsonl.part`)이 저장될 작업 디렉터리. |
 | `-c`, `--config <PATH>` | 자동 감지 | rclone 바이너리, 원격지 경로 및 `consolidate_extra_args`를 불러올 `settings.toml` 설정 파일 경로. |
 
 ### 아키텍처 및 안전성 특징
 
 - **무손실 Concat Demuxer 리먹싱 (`-c copy`)**: 원시 바이트 파이프 대신 FFmpeg의 내장 Concat Demuxer(`-f concat -safe 0`)를 사용하여 트랜스포트 스트림 패킷 경계를 온전히 보존하며, 영상 재인코딩이나 경계 프레임 유실 없이 무손실 병합합니다.
 - **타임라인 정규화 및 단조 증가 DTS 보정**: `-avoid_negative_ts make_zero`를 적용하여 재생 시작 타임스탬프를 0.0초로 초기화함으로써 초기 재생 멈춤 및 싱크 어긋남을 방지합니다. 단조 증가 비트스트림 필터(`VIDEO_MONOTONIC_DTS_BSF`, `AUDIO_MONOTONIC_DTS_BSF` / `aac_adtstoasc`)가 청크 연결부의 DTS 충돌을 영상 재인코딩 없이 자동으로 보정합니다.
-- **데스크톱 친화적 Faststart 탐색 테이블 (`+faststart`)**: `stream.mp4` 파일의 앞부분에 `moov` 아톰 헤더를 재배치하여 데스크톱 플레이어(VLC, 팟플레이어, 퀵타임) 및 웹 브라우저에서 총 재생 시간 확인 및 즉각적인 탐색(스크러빙)을 지원합니다.
-- **엄격히 제한된 1배 디스크 스테이징 (원격 청크 로컬 다운로드 배제)**: 원격 통합 시 청크들을 로컬 디스크에 저장하지 않고 임시 읽기 전용 HTTP 루프백 서버(`rclone serve http`)를 통해 메모리로 직접 스트리밍하며, 탐색 가능한 결과물(`stream.mp4.part`)만 로컬에 기록하여 로컬 디스크 사용량을 영상 파일 크기의 1배로 엄격히 제한합니다.
+- **데스크톱 친화적 Faststart 탐색 테이블 (`+faststart`)**: `livestream.mp4` 파일의 앞부분에 `moov` 아톰 헤더를 재배치하여 데스크톱 플레이어(VLC, 팟플레이어, 퀵타임) 및 웹 브라우저에서 총 재생 시간 확인 및 즉각적인 탐색(스크러빙)을 지원합니다.
+- **엄격히 제한된 1배 디스크 스테이징 (원격 청크 로컬 다운로드 배제)**: 원격 통합 시 청크들을 로컬 디스크에 저장하지 않고 임시 읽기 전용 HTTP 루프백 서버(`rclone serve http`)를 통해 메모리로 직접 스트리밍하며, 탐색 가능한 결과물(`livestream.mp4.part`)만 로컬에 기록하여 로컬 디스크 사용량을 영상 파일 크기의 1배로 엄격히 제한합니다.
 - **사전 디스크 용량 검증**: 리먹싱을 시작하기 전 스테이징 경로의 여유 디스크 공간이 전체 영상 용량의 $1.15\times$ 이상인지 사전 검증하며, 용량이 부족할 경우 즉각 중단하고 해결 안내를 출력합니다.
 - **컨테이너 구조 무결성 검증**: 스테이징 완료된 `.part` 파일 승격 및 업로드 재개 전 MP4 컨테이너 구조 무결성(`validate_mp4_container_integrity`)을 검증합니다: 단일 `moov` 아톰, 최소 1개의 `mdat` 아톰, 후속 미색인 잔여 데이터 없는 정확한 파일 경계 일치, 청크 오프셋(`stco`/`co64`)의 `mdat` 페이로드 내부 유효성을 확인합니다.
-- **동시 클라우드 업로드 및 형제 프로세스 즉시 중단**: `stream.mp4`와 `chat.jsonl`을 대용량 전송 최적화 플래그(`--drive-chunk-size 128M`, 멀티스레딩)와 함께 병렬 업로드합니다. 하나의 업로드가 실패할 경우 형제 프로세스를 즉각 중단하고 원격 미완성 `.part` 파일을 정리하며 로컬 스테이징 파일은 유지하여 재실행 시 즉시 업로드를 재개할 수 있습니다.
+- **동시 클라우드 업로드 및 형제 프로세스 즉시 중단**: `livestream.mp4`와 `livechat.jsonl`을 대용량 전송 최적화 플래그(`--drive-chunk-size 128M`, 멀티스레딩)와 함께 병렬 업로드합니다. 하나의 업로드가 실패할 경우 형제 프로세스를 즉각 중단하고 원격 미완성 `.part` 파일을 정리하며 로컬 스테이징 파일은 유지하여 재실행 시 즉시 업로드를 재개할 수 있습니다.
 - **슬라이딩 윈도우 채팅 중복 제거**: 영상 리먹싱과 병렬로 슬라이딩 윈도우 알고리즘을 수행하여 청크 경계에서 중복 수신된 채팅 메시지를 제거하고 $O(1)$ 메모리 사용량으로 시간 순서를 엄격히 유지합니다.
 - **동시 원본 청크 정리**: 무손실 통합 및 클라우드 업로드 완료가 확인된 후 원본 `.ts` 및 `.jsonl` 파일들을 병렬(`--delete-concurrency 16`)로 빠르게 삭제하여 저장 공간을 신속히 회수합니다.
 
@@ -244,7 +244,7 @@ recordings/
     ├── chunk_0001.ts
     ├── chat_0000.jsonl        # 채팅 로그 세그먼트 (JSON Lines)
     ├── chat_0001.jsonl
-    └── metadata.jsonl         # 방송 메타데이터 상태 전이 및 비디오 싱크 타임라인
+    └── livemetadata.jsonl     # 방송 메타데이터 상태 전이 및 비디오 싱크 타임라인
 ```
 
 `chzzk-load consolidate`를 실행하여 통합을 완료하면, 원본 청크들이 정리(단, `--keep-original` 지정 시 유지)되고 탐색 가능한 단일 통합 파일로 대체됩니다:
@@ -252,9 +252,9 @@ recordings/
 ```
 recordings/
 └── [2026-09-30_140000] [StreamerAlias] StreamerName - Live Stream Title/
-    ├── stream.mp4             # 통합된 탐색 가능 MP4 영상 (타임라인 정규화, +faststart moov 아톰)
-    ├── chat.jsonl             # 통합 및 중복 제거된 전체 채팅 로그 (JSON Lines)
-    └── metadata.jsonl         # 방송 메타데이터 상태 전이 및 비디오 싱크 타임라인
+    ├── livestream.mp4         # 통합된 탐색 가능 MP4 영상 (타임라인 정규화, +faststart moov 아톰)
+    ├── livechat.jsonl         # 통합 및 중복 제거된 전체 채팅 로그 (JSON Lines)
+    └── livemetadata.jsonl     # 방송 메타데이터 상태 전이 및 비디오 싱크 타임라인
 ```
 
 ---
@@ -321,9 +321,9 @@ WebSocket을 통해 수집된 라이브 채팅 메시지는 구조화된 JSON Li
 
 ---
 
-### 2. 방송 메타데이터 및 동기화 타임라인 포맷 (`metadata.jsonl`)
+### 2. 방송 메타데이터 및 동기화 타임라인 포맷 (`livemetadata.jsonl`)
 
-`metadata.jsonl`은 방송 중 일어나는 핵심 상태 전이(방제 변경, 카테고리 전환, 시청 권한, 정책 플래그 등)를 밀리초 단위의 비디오 싱크 타임라인(`stream_offset_ms`)과 함께 기록하는 경량(v2) 추가 전용(append-only) JSON Lines 이벤트 스트림입니다. 로컬 디스크에 순차 추가(append)됨과 동시에 통합 업로드 파이프라인(`rclone copyto`)을 통해 클라우드 스토리지로 실시간 동기화됩니다. 실시간 방송 중에는 로컬에 파일을 보존하며(`delete_on_success: false`), 방송 종료 시 최종 메타데이터 업로드 완료 후 로컬 파일이 자동 삭제(`delete_on_success: true`)되어 세션 폴더의 완전한 비움(Strict Directory Emptiness)을 보장합니다.
+`livemetadata.jsonl`은 방송 중 일어나는 핵심 상태 전이(방제 변경, 카테고리 전환, 시청 권한, 정책 플래그 등)를 밀리초 단위의 비디오 싱크 타임라인(`stream_offset_ms`)과 함께 기록하는 경량(v2) 추가 전용(append-only) JSON Lines 이벤트 스트림입니다. 로컬 디스크에 순차 추가(append)됨과 동시에 통합 업로드 파이프라인(`rclone copyto`)을 통해 클라우드 스토리지로 실시간 동기화됩니다. 실시간 방송 중에는 로컬에 파일을 보존하며(`delete_on_success: false`), 방송 종료 시 최종 메타데이터 업로드 완료 후 로컬 파일이 자동 삭제(`delete_on_success: true`)되어 세션 폴더의 완전한 비움(Strict Directory Emptiness)을 보장합니다.
 
 #### 이벤트 유형
 
@@ -403,11 +403,11 @@ WebSocket을 통해 수집된 라이브 채팅 메시지는 구조화된 JSON Li
 
 ---
 
-### 3. 통합 미디어 파일 형식 (`stream.mp4`, `chat.jsonl`)
+### 3. 통합 미디어 파일 형식 (`livestream.mp4`, `livechat.jsonl`)
 
 `chzzk-load consolidate`를 실행하면 분할 아카이브가 두 개의 표준 규격 파일로 무손실 병합됩니다:
 
-#### `stream.mp4` (무손실 통합 비디오)
+#### `livestream.mp4` (무손실 통합 비디오)
 - **컨테이너 규격**: MPEG-4 Part 14 (`.mp4`) 및 faststart 탐색 테이블 (`-movflags +faststart`). `moov` 아톰 헤더를 파일 맨 앞으로 재배치하여 데스크톱 미디어 플레이어(VLC, 팟플레이어, QuickTime) 및 웹 브라우저에서 총 재생 시간 확인과 버퍼링 없는 즉각적인 탐색을 지원합니다.
 - **인코딩 방식**: 치지직 CDN의 원본 H.264 비디오 및 AAC 오디오 비트스트림을 그대로 보존하는 무손실 스트림 복사(`-c copy`)로 동작하며, 화질 저하나 CPU 인코딩 부하가 발생하지 않습니다.
 - **타임라인 정규화**: 시작 프레임 타임스탬프를 `0.0s`로 리셋(`-avoid_negative_ts make_zero`)하여 시작 시 화면 멈춤 및 오디오/비디오 싱크 어긋남 현상을 원천 방지합니다.
@@ -415,7 +415,7 @@ WebSocket을 통해 수집된 라이브 채팅 메시지는 구조화된 JSON Li
 - **명시적 스트림 매핑**: 단일 스트림 매핑(`-map 0:v:0 -map 0:a:0?`)을 강제하여 예기치 않은 부가 메타데이터 트랙 오류 없이 비디오와 오디오만 깔끔하게 수록합니다.
 - **컨테이너 구조 무결성 검증**: 스테이징 완료된 `.part` 파일 승격 및 업로드 재개 전 MP4 컨테이너 구조 무결성(`validate_mp4_container_integrity`)을 검증합니다: 단일 `moov` 아톰, 최소 1개의 `mdat` 아톰, 후속 미색인 잔여 데이터 없는 정확한 파일 경계 일치, 청크 오프셋(`stco`/`co64`)의 `mdat` 페이로드 내부 유효성을 확인합니다.
 
-#### `chat.jsonl` (통합 라이브 채팅)
+#### `livechat.jsonl` (통합 라이브 채팅)
 - **포맷**: JSON Lines (`.jsonl`), 기존 개별 채팅 청크 스키마(`time_ms`, `datetime`, `msg_type`, `nickname`, `user_id_hash`, `content`, `donation_amount`, `extras`, `raw`)를 동일하게 유지합니다.
 - **중복 제거**: 연속 청크 간 슬라이딩 윈도우 중복 제거를 적용하여 청크 경계에서 중복 수신된 메시지를 제거하고 엄격한 시간 순서와 $O(1)$ 메모리 사용량을 보장합니다.
 
@@ -433,7 +433,7 @@ WebSocket을 통해 수집된 라이브 채팅 메시지는 구조화된 JSON Li
 
 ## 클라우드 스토리지 연동 설정 (rclone)
 
-`remote_path`를 빈 문자열(`""`)로 설정한 경우, `chzzk-load`는 자동으로 **로컬 전용 녹화 모드**로 동작하며 `.ts` 파일들과 `chat_%04d.jsonl` 파일들, 그리고 `metadata.jsonl`을 `recordings_dir`에 보관하고 업로드 및 삭제를 진행하지 않습니다.
+`remote_path`를 빈 문자열(`""`)로 설정한 경우, `chzzk-load`는 자동으로 **로컬 전용 녹화 모드**로 동작하며 `.ts` 파일들과 `chat_%04d.jsonl` 파일들, 그리고 `livemetadata.jsonl`을 `recordings_dir`에 보관하고 업로드 및 삭제를 진행하지 않습니다.
 
 클라우드 스토리지 자동 업로드를 활성화하려면:
 1. 시스템에 [rclone](https://rclone.org/downloads/)을 설치합니다:

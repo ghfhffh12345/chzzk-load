@@ -208,7 +208,7 @@ impl ChatDeduplicator {
     }
 }
 
-/// Atomically finalizes the staged `chat.jsonl.part` into `chat.jsonl`.
+/// Atomically finalizes the staged `livechat.jsonl.part` into `livechat.jsonl`.
 ///
 /// In local mode: unlinks any pre-existing destination and renames with Windows retry logic.
 /// In remote mode: executes `rclone moveto <staged> <final>`.
@@ -218,8 +218,8 @@ pub async fn finalize_staged_chat(
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
-            let part_path = dir.join("chat.jsonl.part");
-            let final_path = dir.join("chat.jsonl");
+            let part_path = dir.join("livechat.jsonl.part");
+            let final_path = dir.join("livechat.jsonl");
             let _ = unlink_local_file_with_retry(&final_path).await;
             rename_local_file_with_retry(&part_path, &final_path)
                 .await
@@ -234,8 +234,8 @@ pub async fn finalize_staged_chat(
         }
         TargetLocation::Remote(remote_base) => {
             let bin = resolve_rclone_bin(rclone_bin);
-            let remote_part_path = join_remote_path(remote_base, "chat.jsonl.part");
-            let remote_final_path = join_remote_path(remote_base, "chat.jsonl");
+            let remote_part_path = join_remote_path(remote_base, "livechat.jsonl.part");
+            let remote_final_path = join_remote_path(remote_base, "livechat.jsonl");
 
             let mut move_cmd = tokio::process::Command::new(&bin);
             move_cmd.kill_on_drop(true);
@@ -264,11 +264,11 @@ pub async fn finalize_staged_chat(
     }
 }
 
-/// Deletes the temporary staged `chat.jsonl.part` if present upon error or abort.
+/// Deletes the temporary staged `livechat.jsonl.part` if present upon error or abort.
 ///
-/// In local mode: unlinks `chat.jsonl.part` with retry (treating NotFound as success).
-/// In remote mode: unlinks local staged `chat.jsonl.part` and executes `rclone deletefile <staged>` on remote.
-/// Finalized `chat.jsonl` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
+/// In local mode: unlinks `livechat.jsonl.part` with retry (treating NotFound as success).
+/// In remote mode: unlinks local staged `livechat.jsonl.part` and executes `rclone deletefile <staged>` on remote.
+/// Finalized `livechat.jsonl` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
 pub async fn cleanup_staged_chat(
     target: &TargetLocation,
     rclone_bin: Option<&str>,
@@ -284,17 +284,17 @@ pub async fn cleanup_staged_chat_in<P: AsRef<Path>>(
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
-            let part_path = dir.join("chat.jsonl.part");
+            let part_path = dir.join("livechat.jsonl.part");
             let _ = unlink_local_file_with_retry(&part_path).await;
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
             let staging_dir = super::staging::resolve_staging_dir(target, custom_temp_dir);
-            let staged_local_part = staging_dir.join("chat.jsonl.part");
+            let staged_local_part = staging_dir.join("livechat.jsonl.part");
             let _ = unlink_local_file_with_retry(&staged_local_part).await;
 
             let bin = resolve_rclone_bin(rclone_bin);
-            let remote_part_path = join_remote_path(remote_base, "chat.jsonl.part");
+            let remote_part_path = join_remote_path(remote_base, "livechat.jsonl.part");
             delete_remote_file(&bin, &remote_part_path).await;
             Ok(())
         }
@@ -337,10 +337,10 @@ pub async fn consolidate_chat_with_options(
     }
 }
 
-/// Consolidates chat chunks for a recording session into a staged deduplicated `chat.jsonl.part`.
+/// Consolidates chat chunks for a recording session into a staged deduplicated `livechat.jsonl.part`.
 ///
 /// Supports both local directories and remote rclone paths. Employs staged streaming write
-/// into `chat.jsonl.part` without final rename, allowing atomic two-stage finalization
+/// into `livechat.jsonl.part` without final rename, allowing atomic two-stage finalization
 /// in `run_consolidation`. Original chat chunks are left untouched.
 pub async fn consolidate_chat(
     target: &TargetLocation,
@@ -386,7 +386,7 @@ pub async fn consolidate_chat_with_progress(
     .await
 }
 
-/// Consolidates local chat chunks into staged `chat.jsonl.part`.
+/// Consolidates local chat chunks into staged `livechat.jsonl.part`.
 pub async fn consolidate_chat_local(
     dir: &Path,
     chat_chunks: &[ConsolidationChunk],
@@ -396,7 +396,7 @@ pub async fn consolidate_chat_local(
     consolidate_chat_local_with_progress(dir, chat_chunks, strict, cancel_token, None).await
 }
 
-/// Consolidates local chat chunks into staged `chat.jsonl.part` with progress telemetry.
+/// Consolidates local chat chunks into staged `livechat.jsonl.part` with progress telemetry.
 pub async fn consolidate_chat_local_with_progress(
     dir: &Path,
     chat_chunks: &[ConsolidationChunk],
@@ -404,7 +404,7 @@ pub async fn consolidate_chat_local_with_progress(
     cancel_token: CancellationToken,
     progress_sender: Option<tokio::sync::mpsc::UnboundedSender<ChatProgressUpdate>>,
 ) -> anyhow::Result<ChatConsolidationStats> {
-    let part_path = dir.join("chat.jsonl.part");
+    let part_path = dir.join("livechat.jsonl.part");
 
     // Clean up any stale .part file from previous aborted runs
     let _ = unlink_local_file_with_retry(&part_path).await;
@@ -485,13 +485,13 @@ pub async fn consolidate_chat_local_with_progress(
         return Err(err);
     }
 
-    // Do NOT rename to chat.jsonl here!
-    // Staged output is retained in chat.jsonl.part for atomic two-stage finalization.
+    // Do NOT rename to livechat.jsonl here!
+    // Staged output is retained in livechat.jsonl.part for atomic two-stage finalization.
     Ok(deduplicator.into_stats())
 }
 
-/// Consolidates remote chat chunks via local staging into staged `chat.jsonl.part` and
-/// atomically finalizes to `chat.jsonl` upon zero-exit completion.
+/// Consolidates remote chat chunks via local staging into staged `livechat.jsonl.part` and
+/// atomically finalizes to `livechat.jsonl` upon zero-exit completion.
 pub async fn consolidate_chat_remote(
     remote_base: &str,
     chat_chunks: &[ConsolidationChunk],
@@ -536,8 +536,8 @@ pub async fn consolidate_chat_remote_with_progress(
     .await
 }
 
-/// Consolidates remote chat chunks into local staging `chat.jsonl.part` and
-/// atomically finalizes to `chat.jsonl` upon zero-exit completion.
+/// Consolidates remote chat chunks into local staging `livechat.jsonl.part` and
+/// atomically finalizes to `livechat.jsonl` upon zero-exit completion.
 pub async fn consolidate_chat_remote_with_options(
     remote_base: &str,
     chat_chunks: &[ConsolidationChunk],
@@ -565,8 +565,8 @@ pub async fn consolidate_chat_remote_with_options(
             )
         })?;
 
-    let staged_path = staging_dir.join("chat.jsonl.part");
-    let final_path = staging_dir.join("chat.jsonl");
+    let staged_path = staging_dir.join("livechat.jsonl.part");
+    let final_path = staging_dir.join("livechat.jsonl");
 
     // Clean up any stale staged file from prior runs
     let _ = unlink_local_file_with_retry(&staged_path).await;

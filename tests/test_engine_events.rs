@@ -975,12 +975,12 @@ async fn test_engine_orchestrator_stream_metadata_change_uploads_metadata_jsonl(
     drop(upload_tx);
     worker_handle.await.unwrap();
 
-    // Verify backend received metadata.jsonl upload
+    // Verify backend received livemetadata.jsonl upload
     let uploads = mock_backend.uploads.lock().await;
     assert_eq!(uploads.len(), 1);
     assert_eq!(
         uploads[0].0.file_name().unwrap().to_string_lossy(),
-        "metadata.jsonl"
+        "livemetadata.jsonl"
     );
     let content = fs::read_to_string(&uploads[0].0).unwrap();
     assert!(content.contains("\"INITIAL_STATE\""));
@@ -1070,7 +1070,7 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
         })
         .unwrap()
     );
-    fs::write(session_dir.join("metadata.jsonl"), &initial_jsonl).unwrap();
+    fs::write(session_dir.join("livemetadata.jsonl"), &initial_jsonl).unwrap();
 
     orchestrator.register_active_session(
         "chan_rename",
@@ -1095,7 +1095,7 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
     assert_eq!(uploads.len(), 1);
     assert_eq!(
         uploads[0].0.file_name().unwrap().to_string_lossy(),
-        "metadata.jsonl"
+        "livemetadata.jsonl"
     );
     let content = fs::read_to_string(&uploads[0].0).unwrap();
     assert!(content.contains("\"INITIAL_STATE\""));
@@ -1104,7 +1104,7 @@ async fn test_engine_orchestrator_stream_metadata_change_updates_metadata_jsonl_
     assert!(content.contains("Updated Stream Title? Playing Now?"));
 
     // Verify local file exists and has both JSON Lines
-    let local_file = fs::read_to_string(session_dir.join("metadata.jsonl")).unwrap();
+    let local_file = fs::read_to_string(session_dir.join("livemetadata.jsonl")).unwrap();
     let local_lines: Vec<&str> = local_file.trim().lines().collect();
     assert_eq!(local_lines.len(), 2);
     assert!(local_lines[0].contains("\"INITIAL_STATE\""));
@@ -1283,7 +1283,7 @@ async fn test_engine_orchestrator_stream_category_and_watch_party_metadata_trans
     assert_eq!(uploads.len(), 1);
     assert_eq!(
         uploads[0].0.file_name().unwrap().to_string_lossy(),
-        "metadata.jsonl"
+        "livemetadata.jsonl"
     );
     let content = fs::read_to_string(&uploads[0].0).unwrap();
     assert!(content.contains("\"METADATA_CHANGED\""));
@@ -2633,7 +2633,7 @@ async fn test_empty_session_folder_deleted_after_broadcast_ends_and_uploads_fini
     let chunk_path = session_dir.join("chunk_0000.ts");
     fs::write(&chunk_path, vec![0u8; 1024 * 1024]).unwrap();
 
-    let metadata_path = session_dir.join("metadata.jsonl");
+    let metadata_path = session_dir.join("livemetadata.jsonl");
     fs::write(
         &metadata_path,
         b"{\"version\":2,\"event\":\"INITIAL_STATE\",\"stream_offset_ms\":0}\n",
@@ -3139,13 +3139,13 @@ async fn test_recording_session_with_backend_uploads_metadata_and_purges_empty_f
     let uploads = mock_backend.uploads.lock().await;
     assert!(
         !uploads.is_empty(),
-        "MockUploadBackend must have received metadata.jsonl uploads"
+        "MockUploadBackend must have received livemetadata.jsonl uploads"
     );
     assert!(
-        uploads
-            .iter()
-            .all(|(path, _)| path.file_name().and_then(|n| n.to_str()) == Some("metadata.jsonl")),
-        "All uploaded files should be metadata.jsonl"
+        uploads.iter().all(
+            |(path, _)| path.file_name().and_then(|n| n.to_str()) == Some("livemetadata.jsonl")
+        ),
+        "All uploaded files should be livemetadata.jsonl"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

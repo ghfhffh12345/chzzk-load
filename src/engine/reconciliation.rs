@@ -113,7 +113,7 @@ fn match_channel_info(folder_name: &str, settings: &Settings) -> (String, String
 /// 2. Any chunk without a higher index counterpart (e.g. the active tail chunk being written when crash occurred)
 ///    is quarantined by renaming to `.ts.quarantine` or `.jsonl.quarantine`.
 /// 3. Valid sealed chunks (and their matching completed chat `.jsonl` files) are enqueued to `upload_tx` to reclaim local disk space.
-/// 4. Orphaned `metadata.jsonl` files are enqueued with `delete_on_success: true` following all media chunks.
+/// 4. Orphaned `livemetadata.jsonl` files are enqueued with `delete_on_success: true` following all media chunks.
 pub async fn reconcile_orphaned_sessions(
     recordings_dir: &Path,
     upload_tx: &Sender<UploadTask>,
@@ -197,7 +197,7 @@ pub async fn reconcile_orphaned_sessions_with_custodian(
                 // Empty files are quarantined
                 let ext_opt = if file_name.ends_with(".ts") {
                     Some("ts")
-                } else if file_name == "metadata.jsonl"
+                } else if file_name == "livemetadata.jsonl"
                     || (file_name.starts_with("chat_") && file_name.ends_with(".jsonl"))
                 {
                     Some("jsonl")
@@ -213,7 +213,7 @@ pub async fn reconcile_orphaned_sessions_with_custodian(
                 continue;
             }
 
-            if file_name == "metadata.jsonl" {
+            if file_name == "livemetadata.jsonl" {
                 orphaned_metadata = Some(file_path);
             } else if file_name.ends_with(".ts") {
                 if let Some(index) = parse_chunk_index(&file_name) {
@@ -325,7 +325,7 @@ pub async fn reconcile_orphaned_sessions_with_custodian(
             }
         }
 
-        // Enqueue orphaned metadata.jsonl with unlinking enabled following all orphaned media chunks
+        // Enqueue orphaned livemetadata.jsonl with unlinking enabled following all orphaned media chunks
         if let Some(metadata_path) = orphaned_metadata {
             let task = UploadTask::metadata(
                 &channel_id,
@@ -381,7 +381,7 @@ mod tests {
         fs::write(&chunk0, vec![0u8; 1024]).unwrap();
         fs::write(&chunk1, vec![0u8; 512]).unwrap();
 
-        let meta = session_dir.join("metadata.jsonl");
+        let meta = session_dir.join("livemetadata.jsonl");
         fs::write(&meta, b"{\"event\":\"start\",\"stream_offset_ms\":0}\n").unwrap();
 
         let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
@@ -414,7 +414,7 @@ mod tests {
         let task_meta = upload_rx
             .try_recv()
             .expect("metadata task must be enqueued after media");
-        assert_eq!(task_meta.chunk_name, "metadata.jsonl");
+        assert_eq!(task_meta.chunk_name, "livemetadata.jsonl");
         assert!(task_meta.is_metadata());
         assert!(task_meta.delete_on_success);
 

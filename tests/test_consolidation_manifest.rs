@@ -126,6 +126,7 @@ fn test_chunk_index_parsing() {
     assert_eq!(parse_video_chunk_index("other_0001.ts"), None);
     assert_eq!(parse_video_chunk_index("chunk_0001.mp4"), None);
     assert_eq!(parse_video_chunk_index("stream.mp4"), None);
+    assert_eq!(parse_video_chunk_index("livestream.mp4"), None);
     assert_eq!(parse_video_chunk_index("consolidated.mp4"), None);
 
     // Chat chunk index parsing
@@ -137,7 +138,9 @@ fn test_chunk_index_parsing() {
     // Invalid chat chunk names
     assert_eq!(parse_chat_chunk_index("chat_.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("chat_xyz.jsonl"), None);
+    assert_eq!(parse_chat_chunk_index("livemetadata.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("metadata.jsonl"), None);
+    assert_eq!(parse_chat_chunk_index("livechat.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("chat.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("consolidated.jsonl"), None);
 }
@@ -193,7 +196,7 @@ fn test_build_manifest_from_entries_success() {
             is_dir: false,
         },
         RawManifestEntry {
-            name: "metadata.jsonl".to_string(),
+            name: "livemetadata.jsonl".to_string(),
             size: 128,
             is_dir: false,
         },
@@ -279,16 +282,16 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
             is_dir: false,
         },
         RawManifestEntry {
-            name: "stream.mp4".to_string(),
+            name: "livestream.mp4".to_string(),
             size: 5000,
             is_dir: false,
         },
     ];
 
-    // 1. Without overwrite -> error mentioning stream.mp4
+    // 1. Without overwrite -> error mentioning livestream.mp4
     let err = build_manifest_from_entries(target.clone(), entries.clone(), false, false)
-        .expect_err("Should error when pre-existing stream.mp4 exists without overwrite");
-    assert!(err.to_string().contains("stream.mp4"));
+        .expect_err("Should error when pre-existing livestream.mp4 exists without overwrite");
+    assert!(err.to_string().contains("livestream.mp4"));
     assert!(err.to_string().contains("--overwrite"));
 
     // 2. With overwrite -> succeeds
@@ -297,7 +300,7 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
     assert!(manifest.pre_existing_video);
     assert_eq!(manifest.video_chunks.len(), 1);
 
-    // 3. Pre-existing chat.jsonl without overwrite -> error mentioning chat.jsonl
+    // 3. Pre-existing livechat.jsonl without overwrite -> error mentioning livechat.jsonl
     let chat_entries = vec![
         RawManifestEntry {
             name: "chat_0000.jsonl".to_string(),
@@ -305,14 +308,14 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
             is_dir: false,
         },
         RawManifestEntry {
-            name: "chat.jsonl".to_string(),
+            name: "livechat.jsonl".to_string(),
             size: 5000,
             is_dir: false,
         },
     ];
     let err = build_manifest_from_entries(target.clone(), chat_entries.clone(), false, false)
-        .expect_err("Should error when pre-existing chat.jsonl exists without overwrite");
-    assert!(err.to_string().contains("chat.jsonl"));
+        .expect_err("Should error when pre-existing livechat.jsonl exists without overwrite");
+    assert!(err.to_string().contains("livechat.jsonl"));
     assert!(err.to_string().contains("--overwrite"));
 
     // 4. Chat overwrite -> succeeds
@@ -353,7 +356,7 @@ fn test_build_manifest_single_media_handling() {
     // 3. Zero chunks of both types -> error
     let empty_entries = vec![
         RawManifestEntry {
-            name: "metadata.jsonl".to_string(),
+            name: "livemetadata.jsonl".to_string(),
             size: 200,
             is_dir: false,
         },
@@ -380,7 +383,7 @@ async fn test_discover_local_manifest_filesystem_scan() {
     let chunk0 = temp_dir.join("chunk_0000.ts");
     let chunk1 = temp_dir.join("chunk_0001.ts");
     let chat0 = temp_dir.join("chat_0000.jsonl");
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
 
     fs::write(&chunk0, vec![1u8; 100]).unwrap();
     fs::write(&chunk1, vec![2u8; 200]).unwrap();
@@ -408,7 +411,7 @@ fn test_parse_rclone_lsjson_output() {
         {"Path": "chunk_0000.ts", "Name": "chunk_0000.ts", "Size": 1048576, "IsDir": false},
         {"Path": "chunk_0001.ts", "Name": "chunk_0001.ts", "Size": 2097152, "IsDir": false},
         {"Path": "chat_0000.jsonl", "Name": "chat_0000.jsonl", "Size": 4096, "IsDir": false},
-        {"Path": "metadata.jsonl", "Name": "metadata.jsonl", "Size": 1024, "IsDir": false},
+        {"Path": "livemetadata.jsonl", "Name": "livemetadata.jsonl", "Size": 1024, "IsDir": false},
         {"Path": "subfolder", "Name": "subfolder", "Size": -1, "IsDir": true}
     ]"#;
 
@@ -433,7 +436,7 @@ fn test_cli_binary_smoke_consolidate_execution() {
 
     let chunk0 = temp_dir.join("chunk_0000.ts");
     fs::write(&chunk0, vec![1u8; 100]).unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let mock_bin = get_mock_ffmpeg_bin();
@@ -459,7 +462,7 @@ fn test_cli_binary_smoke_consolidate_execution() {
         "Stdout should count 1 video chunk: {stdout}"
     );
 
-    assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
+    assert!(meta.exists(), "livemetadata.jsonl must NEVER be deleted");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -483,7 +486,7 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
         b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
     )
     .unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {
@@ -511,20 +514,20 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
 
     // Output files exist
     assert!(
-        temp_dir.join("stream.mp4").exists(),
-        "stream.mp4 must exist"
+        temp_dir.join("livestream.mp4").exists(),
+        "livestream.mp4 must exist"
     );
     assert!(
-        temp_dir.join("chat.jsonl").exists(),
-        "chat.jsonl must exist"
+        temp_dir.join("livechat.jsonl").exists(),
+        "livechat.jsonl must exist"
     );
 
     // Original chunks deleted when keep_original is false
     assert!(!chunk0.exists(), "Original chunk_0000.ts must be deleted");
     assert!(!chat0.exists(), "Original chat_0000.jsonl must be deleted");
 
-    // metadata.jsonl preserved
-    assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
+    // livemetadata.jsonl preserved
+    assert!(meta.exists(), "livemetadata.jsonl must NEVER be deleted");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -548,7 +551,7 @@ async fn test_run_consolidation_keep_original_flag() {
         b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
     )
     .unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {
@@ -571,7 +574,7 @@ async fn test_run_consolidation_keep_original_flag() {
     // Original chunks must remain when keep_original is true
     assert!(chunk0.exists(), "chunk_0000.ts must remain intact");
     assert!(chat0.exists(), "chat_0000.jsonl must remain intact");
-    assert!(meta.exists(), "metadata.jsonl must remain intact");
+    assert!(meta.exists(), "livemetadata.jsonl must remain intact");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -588,7 +591,7 @@ async fn test_run_consolidation_single_media_video_only() {
 
     let chunk0 = temp_dir.join("chunk_0000.ts");
     fs::write(&chunk0, vec![1u8; 100]).unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {
@@ -609,8 +612,8 @@ async fn test_run_consolidation_single_media_video_only() {
     assert_eq!(summary.chat_chunks_count, 0);
     assert!(summary.video_result.is_some());
     assert!(summary.chat_stats.is_none());
-    assert!(temp_dir.join("stream.mp4").exists());
-    assert!(!temp_dir.join("chat.jsonl").exists());
+    assert!(temp_dir.join("livestream.mp4").exists());
+    assert!(!temp_dir.join("livechat.jsonl").exists());
     assert!(!chunk0.exists());
     assert!(meta.exists());
 
@@ -628,7 +631,7 @@ async fn test_run_consolidation_single_media_chat_only() {
         b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
     )
     .unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {
@@ -649,8 +652,8 @@ async fn test_run_consolidation_single_media_chat_only() {
     assert_eq!(summary.chat_chunks_count, 1);
     assert!(summary.video_result.is_none());
     assert!(summary.chat_stats.is_some());
-    assert!(!temp_dir.join("stream.mp4").exists());
-    assert!(temp_dir.join("chat.jsonl").exists());
+    assert!(!temp_dir.join("livestream.mp4").exists());
+    assert!(temp_dir.join("livechat.jsonl").exists());
     assert!(!chat0.exists());
     assert!(meta.exists());
 
@@ -667,7 +670,7 @@ async fn test_delete_original_chunks_never_deletes_metadata() {
     fs::write(&chunk0, b"video chunk").unwrap();
     let chat0 = temp_dir.join("chat_0000.jsonl");
     fs::write(&chat0, b"chat chunk").unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"precious metadata").unwrap();
 
     let target = TargetLocation::Local(temp_dir.clone());
@@ -688,7 +691,7 @@ async fn test_delete_original_chunks_never_deletes_metadata() {
 
     assert!(!chunk0.exists(), "video chunk must be deleted");
     assert!(!chat0.exists(), "chat chunk must be deleted");
-    assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
+    assert!(meta.exists(), "livemetadata.jsonl must NEVER be deleted");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -706,7 +709,7 @@ async fn test_delete_original_chunks_remote_preserves_metadata() {
     fs::write(&chunk0, b"video chunk").unwrap();
     let chat0 = temp_dir.join("chat_0000.jsonl");
     fs::write(&chat0, b"chat chunk").unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"precious metadata").unwrap();
 
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
@@ -733,7 +736,7 @@ async fn test_delete_original_chunks_remote_preserves_metadata() {
 
     assert!(!chunk0.exists(), "remote video chunk must be deleted");
     assert!(!chat0.exists(), "remote chat chunk must be deleted");
-    assert!(meta.exists(), "metadata.jsonl must NEVER be deleted");
+    assert!(meta.exists(), "livemetadata.jsonl must NEVER be deleted");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -760,8 +763,8 @@ fn test_canonical_join_remote_path() {
         "remote:bucket/chunk_0000.ts"
     );
     assert_eq!(
-        join_remote_path("remote:bucket/sub", "stream.mp4"),
-        "remote:bucket/sub/stream.mp4"
+        join_remote_path("remote:bucket/sub", "livestream.mp4"),
+        "remote:bucket/sub/livestream.mp4"
     );
 }
 
@@ -781,7 +784,7 @@ async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_prese
     let chat0 = temp_dir.join("chat_0000.jsonl");
     // Malformed chat message in strict mode causes chat pipeline to fail
     fs::write(&chat0, b"not valid json\n").unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {
@@ -802,17 +805,17 @@ async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_prese
 
     // Verify .part files are cleaned up
     assert!(
-        !temp_dir.join("stream.mp4.part").exists(),
+        !temp_dir.join("livestream.mp4.part").exists(),
         "Video part file must be cleaned up on failure"
     );
     assert!(
-        !temp_dir.join("chat.jsonl.part").exists(),
+        !temp_dir.join("livechat.jsonl.part").exists(),
         "Chat part file must be cleaned up on failure"
     );
 
     // Verify final targets are NOT created
-    assert!(!temp_dir.join("stream.mp4").exists());
-    assert!(!temp_dir.join("chat.jsonl").exists());
+    assert!(!temp_dir.join("livestream.mp4").exists());
+    assert!(!temp_dir.join("livechat.jsonl").exists());
 
     // Verify original chunks are completely preserved
     assert!(
@@ -823,7 +826,7 @@ async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_prese
         chat0.exists(),
         "Original chat_0000.jsonl must be preserved on failure"
     );
-    assert!(meta.exists(), "metadata.jsonl must be preserved");
+    assert!(meta.exists(), "livemetadata.jsonl must be preserved");
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
@@ -853,7 +856,7 @@ async fn test_run_consolidation_video_failure_surfaces_video_error_not_chat_canc
         ));
     }
     fs::write(&chat0, chat_content.as_bytes()).unwrap();
-    let meta = temp_dir.join("metadata.jsonl");
+    let meta = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta, b"{\"event\":\"start\"}\n").unwrap();
 
     let args = ConsolidateArgs {

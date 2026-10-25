@@ -366,12 +366,12 @@ impl EngineOrchestrator {
                             display_name,
                             title,
                         } => {
-                            // 1. Append locally to <session_dir>/metadata.jsonl
+                            // 1. Append locally to <session_dir>/livemetadata.jsonl
                             let recordings_base =
                                 resolve_path(Path::new(&self.settings.general.recordings_dir));
                             let session_dir = recordings_base.join(&remote_dir);
                             let _ = tokio::fs::create_dir_all(&session_dir).await;
-                            let metadata_path = session_dir.join("metadata.jsonl");
+                            let metadata_path = session_dir.join("livemetadata.jsonl");
                             if metadata_path.exists() {
                                 if let Ok(event_line) = event.to_json_line() {
                                     use tokio::io::AsyncWriteExt;
@@ -403,7 +403,7 @@ impl EngineOrchestrator {
                                     let _ = self
                                         .event_tx
                                         .send(AppEvent::Log(LogEntry::warn(format!(
-                                            "[{channel_id}] Failed to enqueue 'metadata.jsonl' snapshot: {e}"
+                                            "[{channel_id}] Failed to enqueue 'livemetadata.jsonl' snapshot: {e}"
                                         ))))
                                         .await;
                                 }
@@ -413,7 +413,7 @@ impl EngineOrchestrator {
                             let _ = self
                                 .event_tx
                                 .send(AppEvent::Log(LogEntry::rec(format!(
-                                    "[{channel_id}] Stream metadata changed. Updated 'metadata.jsonl'"
+                                    "[{channel_id}] Stream metadata changed. Updated 'livemetadata.jsonl'"
                                 ))))
                                 .await;
 
@@ -836,7 +836,7 @@ pub mod tests {
             .try_recv()
             .expect("metadata upload task must be enqueued");
         assert_eq!(task.channel_id, "chan_enq");
-        assert_eq!(task.chunk_name, "metadata.jsonl");
+        assert_eq!(task.chunk_name, "livemetadata.jsonl");
         assert!(task.is_metadata());
         assert!(
             !task.delete_on_success,

@@ -90,8 +90,8 @@ async fn test_concurrent_chunk_purge_local_success_and_preserves_metadata() {
         });
     }
 
-    // Create metadata.jsonl
-    let meta_path = temp_dir.join("metadata.jsonl");
+    // Create livemetadata.jsonl
+    let meta_path = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta_path, b"{\"event\":\"start\"}\n").unwrap();
 
     let target = TargetLocation::Local(temp_dir.clone());
@@ -115,10 +115,10 @@ async fn test_concurrent_chunk_purge_local_success_and_preserves_metadata() {
         );
     }
 
-    // metadata.jsonl must strictly remain
+    // livemetadata.jsonl must strictly remain
     assert!(
         meta_path.exists(),
-        "metadata.jsonl must strictly be preserved"
+        "livemetadata.jsonl must strictly be preserved"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -152,7 +152,7 @@ async fn test_concurrent_chunk_purge_remote_success_and_preserves_metadata() {
         });
     }
 
-    let meta_path = temp_dir.join("metadata.jsonl");
+    let meta_path = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta_path, b"{\"event\":\"start\"}\n").unwrap();
 
     let remote_path = format!("remote:{}", temp_dir.to_string_lossy().replace('\\', "/"));
@@ -188,10 +188,10 @@ async fn test_concurrent_chunk_purge_remote_success_and_preserves_metadata() {
         );
     }
 
-    // metadata.jsonl must remain
+    // livemetadata.jsonl must remain
     assert!(
         meta_path.exists(),
-        "metadata.jsonl must strictly be preserved on remote"
+        "livemetadata.jsonl must strictly be preserved on remote"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
@@ -363,10 +363,10 @@ async fn test_concurrent_chunk_purge_metadata_exclusion() {
 
     let chunk0 = temp_dir.join("chunk_0000.ts");
     fs::write(&chunk0, b"video data").unwrap();
-    let meta_file = temp_dir.join("metadata.jsonl");
+    let meta_file = temp_dir.join("livemetadata.jsonl");
     fs::write(&meta_file, b"{\"event\":\"start\"}\n").unwrap();
 
-    // Inadvertently include metadata.jsonl in chunk lists
+    // Inadvertently include livemetadata.jsonl in chunk lists
     let v_chunks = vec![
         ConsolidationChunk {
             name: "chunk_0000.ts".to_string(),
@@ -374,13 +374,13 @@ async fn test_concurrent_chunk_purge_metadata_exclusion() {
             size: 10,
         },
         ConsolidationChunk {
-            name: "metadata.jsonl".to_string(),
+            name: "livemetadata.jsonl".to_string(),
             index: 999,
             size: 20,
         },
     ];
     let c_chunks = vec![ConsolidationChunk {
-        name: "metadata.jsonl".to_string(),
+        name: "livemetadata.jsonl".to_string(),
         index: 999,
         size: 20,
     }];
@@ -392,7 +392,7 @@ async fn test_concurrent_chunk_purge_metadata_exclusion() {
     assert!(!chunk0.exists(), "chunk_0000.ts must be deleted");
     assert!(
         meta_file.exists(),
-        "metadata.jsonl must strictly NOT be deleted even if passed in chunk list"
+        "livemetadata.jsonl must strictly NOT be deleted even if passed in chunk list"
     );
 
     let _ = fs::remove_dir_all(&temp_dir);

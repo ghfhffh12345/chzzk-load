@@ -265,8 +265,8 @@ fn test_probe_moov_atom_valid_faststart_and_end_moov() {
 fn test_check_staging_resume_readiness() {
     let temp_dir = create_temp_test_dir("test_staging_resume");
 
-    let mp4_path = temp_dir.join("stream.mp4");
-    let jsonl_path = temp_dir.join("chat.jsonl");
+    let mp4_path = temp_dir.join("livestream.mp4");
+    let jsonl_path = temp_dir.join("livechat.jsonl");
 
     // Case 1: Empty staging dir
     assert!(!check_staging_resume_readiness(&temp_dir, true, true));
@@ -312,10 +312,10 @@ fn test_check_staging_resume_readiness() {
 async fn test_invalidate_staging_files() {
     let temp_dir = create_temp_test_dir("test_invalidate");
 
-    let mp4 = temp_dir.join("stream.mp4");
-    let jsonl = temp_dir.join("chat.jsonl");
-    let mp4_part = temp_dir.join("stream.mp4.part");
-    let jsonl_part = temp_dir.join("chat.jsonl.part");
+    let mp4 = temp_dir.join("livestream.mp4");
+    let jsonl = temp_dir.join("livechat.jsonl");
+    let mp4_part = temp_dir.join("livestream.mp4.part");
+    let jsonl_part = temp_dir.join("livechat.jsonl.part");
     let other_file = temp_dir.join("keep_this.txt");
 
     std::fs::write(&mp4, b"mp4").unwrap();
@@ -327,10 +327,10 @@ async fn test_invalidate_staging_files() {
     let res = invalidate_staging_files(&temp_dir).await;
     assert!(res.is_ok());
 
-    assert!(!mp4.exists(), "stream.mp4 must be removed");
-    assert!(!jsonl.exists(), "chat.jsonl must be removed");
-    assert!(!mp4_part.exists(), "stream.mp4.part must be removed");
-    assert!(!jsonl_part.exists(), "chat.jsonl.part must be removed");
+    assert!(!mp4.exists(), "livestream.mp4 must be removed");
+    assert!(!jsonl.exists(), "livechat.jsonl must be removed");
+    assert!(!mp4_part.exists(), "livestream.mp4.part must be removed");
+    assert!(!jsonl_part.exists(), "livechat.jsonl.part must be removed");
     assert!(other_file.exists(), "other files must remain untouched");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -342,7 +342,7 @@ fn test_probe_moov_atom_rejects_duplicate_moov_and_trailing_garbage() {
 
     // Replicate Rakoko corrupted MP4 layout:
     // ftyp (24 bytes) + moov (16 bytes) + mdat (16 bytes) + duplicate moov (16 bytes) + trailing garbage (16 bytes)
-    let corrupt_mp4 = temp_dir.join("stream.mp4");
+    let corrupt_mp4 = temp_dir.join("livestream.mp4");
     let mut bytes = vec![0x00, 0x00, 0x00, 0x18];
     bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
     bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
@@ -423,7 +423,7 @@ fn build_mp4_with_co64(target_chunk_offset: u64) -> Vec<u8> {
 #[test]
 fn test_validate_mp4_container_integrity_valid_faststart_co64() {
     let temp_dir = create_temp_test_dir("test_validate_valid_faststart");
-    let mp4_path = temp_dir.join("stream.mp4");
+    let mp4_path = temp_dir.join("livestream.mp4");
 
     // Valid offset: 96 is inside mdat payload [96, 112)
     let bytes = build_mp4_with_co64(96);
@@ -446,7 +446,7 @@ fn test_validate_mp4_container_integrity_valid_faststart_co64() {
 #[test]
 fn test_validate_mp4_container_integrity_rejects_offset_pointing_to_moov() {
     let temp_dir = create_temp_test_dir("test_validate_desync_offset");
-    let mp4_path = temp_dir.join("stream.mp4");
+    let mp4_path = temp_dir.join("livestream.mp4");
 
     // Desync offset: 40 points inside moov (not mdat)
     let bytes = build_mp4_with_co64(40);
@@ -466,7 +466,7 @@ fn test_validate_mp4_container_integrity_rejects_offset_pointing_to_moov() {
 #[test]
 fn test_validate_mp4_container_integrity_rejects_missing_mdat() {
     let temp_dir = create_temp_test_dir("test_validate_missing_mdat");
-    let mp4_path = temp_dir.join("stream.mp4");
+    let mp4_path = temp_dir.join("livestream.mp4");
 
     // ftyp (24 bytes) + moov (16 bytes) only, no mdat
     let mut bytes = vec![0x00, 0x00, 0x00, 0x18];
@@ -488,7 +488,7 @@ fn test_validate_mp4_container_integrity_rejects_missing_mdat() {
 #[test]
 fn test_validate_mp4_container_integrity_rejects_trailing_garbage() {
     let temp_dir = create_temp_test_dir("test_validate_trailing_garbage");
-    let mp4_path = temp_dir.join("stream.mp4");
+    let mp4_path = temp_dir.join("livestream.mp4");
 
     // Case 1: unindexed trailing bytes less than atom header size (5 bytes)
     let mut bytes_sub = build_mp4_with_co64(96);
