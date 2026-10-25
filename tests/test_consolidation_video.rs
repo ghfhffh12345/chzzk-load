@@ -1156,8 +1156,15 @@ async fn test_consolidate_video_local_active_cancellation_cleans_up_part() {
         consolidate_video(&target_clone, &chunks_clone, &options, cancel_token_clone).await
     });
 
-    // Let FFmpeg start, then cooperatively cancel
-    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let staged_file = temp_dir.join("livestream.mp4.part");
+
+    // Wait until FFmpeg actively spawns and creates the staged .part file
+    for _ in 0..100 {
+        if staged_file.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
     cancel_token.cancel();
 
     let result = handle.await.unwrap();
@@ -1169,7 +1176,6 @@ async fn test_consolidate_video_local_active_cancellation_cleans_up_part() {
             .contains("cancelled by cooperative cancellation token")
     );
 
-    let staged_file = temp_dir.join("livestream.mp4.part");
     let final_file = temp_dir.join("livestream.mp4");
     assert!(
         !staged_file.exists(),
@@ -1544,7 +1550,7 @@ async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
 
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
     let staging_dir = create_temp_test_dir("test_cons_rem_act_cancel_staging");
-    let target = TargetLocation::Remote(format!("mockremactc:{remote_dir_str}"));
+    let target = TargetLocation::Remote(format!("mockremactc_slow_chunk:{remote_dir_str}"));
     let options = VideoConsolidationOptions::default()
         .with_rclone_bin(mock_bin.to_str().unwrap())
         .with_staging_dir(&staging_dir);
@@ -1558,8 +1564,19 @@ async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
         consolidate_video(&target_clone, &chunks_clone, &options, cancel_token_clone).await
     });
 
-    // Let loopback server and FFmpeg start, then cooperatively cancel
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let staged_file = staging_dir.join("livestream.mp4.part");
+
+    // Wait until FFmpeg actively spawns and writes initial media bytes into staged .part file
+    for _ in 0..200 {
+        if staged_file.exists()
+            && fs::metadata(&staged_file)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     cancel_token.cancel();
 
     let result = handle.await.unwrap();
@@ -1574,7 +1591,6 @@ async fn test_consolidate_video_remote_active_cancellation_cleans_up_part() {
             .contains("cancelled by cooperative cancellation token")
     );
 
-    let staged_file = staging_dir.join("livestream.mp4.part");
     let final_file = staging_dir.join("livestream.mp4");
     assert!(
         !staged_file.exists(),

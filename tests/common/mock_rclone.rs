@@ -17,6 +17,9 @@ static MOCK_BIN: OnceLock<PathBuf> = OnceLock::new();
 ///   If path contains "fail_move", exits with code 1.
 /// - `deletefile <remote_path>`: removes local path.
 /// - `lsjson <remote_path>`: lists directory entries as JSON array.
+/// - `serve http <remote_path>`: serves HTTP loopback.
+///   If path contains "fail_serve", exits with code 1; if "hang_serve", hangs;
+///   if "slow_chunk", delays chunk_0001 to enable deterministic active cancellation testing.
 pub fn get_mock_rclone_bin() -> &'static Path {
     MOCK_BIN.get_or_init(|| {
         let temp_dir =
@@ -216,9 +219,11 @@ fn main() {
             let port = listener.local_addr().unwrap().port();
             eprintln!("NOTICE: HTTP Server started on [http://127.0.0.1:{}/]", port);
 
+            let remote_base_owned = remote_base.to_string();
             for stream in listener.incoming() {
                 if let Ok(mut stream) = stream {
                     let local_dir = local_dir.clone();
+                    let remote_base = remote_base_owned.clone();
                     std::thread::spawn(move || {
                         let mut buf = [0u8; 4096];
                         let n = match stream.read(&mut buf) {
@@ -239,6 +244,9 @@ fn main() {
                         let path = raw_path.split('?').next().unwrap_or(raw_path).trim_start_matches('/');
                         let file_path = std::path::Path::new(&local_dir).join(path);
                         if file_path.exists() && file_path.is_file() {
+                            if remote_base.contains("slow_chunk") && path.contains("chunk_0001") && method != "HEAD" {
+                                std::thread::sleep(std::time::Duration::from_millis(2000));
+                            }
                             if let Ok(bytes) = std::fs::read(&file_path) {
                                 let header = format!(
                                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n",
