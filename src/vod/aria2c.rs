@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
@@ -85,6 +85,84 @@ pub fn generate_aria2c_input_file(segments: &[VodSegment]) -> String {
     out
 }
 
+/// Resolves the staging workspace directory for a VOD archival session.
+///
+/// If `temp_dir` is provided, stages inside `<temp_dir>/.vod_staging_<video_id>`
+/// (or `<temp_dir>` directly if it already ends with that name).
+/// Otherwise, defaults to `<output_dir>/.vod_staging_<video_id>`.
+pub fn resolve_vod_staging_dir(
+    output_dir: &Path,
+    video_id: &str,
+    temp_dir: Option<&Path>,
+) -> PathBuf {
+    let folder_name = format!(".vod_staging_{video_id}");
+    if let Some(custom) = temp_dir {
+        if custom.file_name().and_then(|n| n.to_str()) == Some(&folder_name) {
+            custom.to_path_buf()
+        } else {
+            custom.join(folder_name)
+        }
+    } else {
+        output_dir.join(folder_name)
+    }
+}
+
+/// Checks whether a segment has already been fully downloaded to `staging_dir`.
+///
+/// A segment is considered completed if:
+/// 1. Its file exists and has size > 0 bytes.
+/// 2. No `.aria2` control file exists for it.
+pub(crate) async fn is_segment_completed(staging_dir: &Path, filename: &str) -> bool {
+    let path = staging_dir.join(filename);
+    let aria2_path = staging_dir.join(format!("{filename}.aria2"));
+    if tokio::fs::try_exists(&aria2_path).await.unwrap_or(false) {
+        return false;
+    }
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) => meta.is_file() && meta.len() > 0,
+        Err(_) => false,
+    }
+}
+
+/// Dispatches completion progress metrics for all segments in `staging_dir`.
+async fn send_completed_segments_progress(
+    staging_dir: &Path,
+    segments: &[VodSegment],
+    progress_tx: Option<
+        &tokio::sync::mpsc::UnboundedSender<crate::vod::progress::VodVideoProgressUpdate>,
+    >,
+) {
+    if let Some(tx) = progress_tx {
+        let mut final_bytes = 0;
+        for seg in segments {
+            let seg_path = staging_dir.join(&seg.filename);
+            if let Ok(meta) = tokio::fs::metadata(&seg_path).await {
+                final_bytes += meta.len();
+            }
+        }
+        let _ = tx.send(
+            crate::vod::progress::VodVideoProgressUpdate::SegmentsDownloaded {
+                segments: segments.len(),
+                bytes: final_bytes,
+            },
+        );
+    }
+}
+
+/// Filters `segments` against `staging_dir`, returning only those that are missing or incomplete.
+pub async fn filter_missing_segments(
+    staging_dir: &Path,
+    segments: &[VodSegment],
+) -> Vec<VodSegment> {
+    let mut missing = Vec::with_capacity(segments.len());
+    for seg in segments {
+        if !is_segment_completed(staging_dir, &seg.filename).await {
+            missing.push(seg.clone());
+        }
+    }
+    missing
+}
+
 /// Executes aria2c to download the specified segments into `staging_dir`.
 ///
 /// Multi-socket chunking flags:
@@ -125,6 +203,16 @@ pub async fn download_segments_with_aria2c_and_progress(
         bail!("VOD download cancelled by token before aria2c execution");
     }
 
+    // If input file has 0 bytes (no missing segments), bypass aria2c execution
+    let input_len = tokio::fs::metadata(input_file)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if input_len == 0 {
+        send_completed_segments_progress(staging_dir, segments, progress_tx.as_ref()).await;
+        return Ok(());
+    }
+
     let mut cmd = Command::new(aria2c_bin);
     cmd.kill_on_drop(true);
     cmd.stdin(Stdio::null());
@@ -135,6 +223,7 @@ pub async fn download_segments_with_aria2c_and_progress(
         "-j16",
         "-x16",
         "-s16",
+        "-c",
         "--allow-overwrite=true",
         "--auto-file-renaming=false",
         "--summary-interval=1",
@@ -233,18 +322,7 @@ pub async fn download_segments_with_aria2c_and_progress(
                 );
             }
 
-            if let Some(ref tx) = progress_tx {
-                let mut final_bytes = 0;
-                for seg in segments {
-                    if let Ok(meta) = tokio::fs::metadata(staging_dir.join(&seg.filename)).await {
-                        final_bytes += meta.len();
-                    }
-                }
-                let _ = tx.send(crate::vod::progress::VodVideoProgressUpdate::SegmentsDownloaded {
-                    segments: segments.len(),
-                    bytes: final_bytes,
-                });
-            }
+            send_completed_segments_progress(staging_dir, segments, progress_tx.as_ref()).await;
 
             Ok(())
         }
@@ -295,5 +373,103 @@ mod tests {
             content,
             "https://example.com/seg0.ts\n  out=segment_00000.ts\nhttps://example.com/seg1.ts\n  out=segment_00001.ts\n"
         );
+    }
+
+    #[test]
+    fn test_resolve_vod_staging_dir() {
+        let output_dir = Path::new("/var/recordings/vod_session");
+        let video_id = "abc123xyz";
+
+        // Default: nested .vod_staging_<video_id> under output_dir
+        let default_staging = resolve_vod_staging_dir(output_dir, video_id, None);
+        assert_eq!(
+            default_staging,
+            PathBuf::from("/var/recordings/vod_session/.vod_staging_abc123xyz")
+        );
+
+        // Custom temp_dir path
+        let custom_temp = Path::new("/mnt/fast_nvme");
+        let custom_staging = resolve_vod_staging_dir(output_dir, video_id, Some(custom_temp));
+        assert_eq!(
+            custom_staging,
+            PathBuf::from("/mnt/fast_nvme/.vod_staging_abc123xyz")
+        );
+
+        // Custom temp_dir already ending with .vod_staging_<video_id>
+        let already_nested = Path::new("/mnt/fast_nvme/.vod_staging_abc123xyz");
+        let direct_staging = resolve_vod_staging_dir(output_dir, video_id, Some(already_nested));
+        assert_eq!(
+            direct_staging,
+            PathBuf::from("/mnt/fast_nvme/.vod_staging_abc123xyz")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filter_missing_segments() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_filter_seg_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let segments = vec![
+            VodSegment {
+                index: 0,
+                filename: "seg_00.ts".to_string(),
+                url: "https://example.com/00.ts".to_string(),
+                duration: 6.0,
+            },
+            VodSegment {
+                index: 1,
+                filename: "seg_01.ts".to_string(),
+                url: "https://example.com/01.ts".to_string(),
+                duration: 6.0,
+            },
+            VodSegment {
+                index: 2,
+                filename: "seg_02.ts".to_string(),
+                url: "https://example.com/02.ts".to_string(),
+                duration: 6.0,
+            },
+            VodSegment {
+                index: 3,
+                filename: "seg_03.ts".to_string(),
+                url: "https://example.com/03.ts".to_string(),
+                duration: 6.0,
+            },
+        ];
+
+        // Case 1: seg_00.ts is fully completed (file exists, size > 0, no .aria2 file)
+        tokio::fs::write(temp_dir.join("seg_00.ts"), b"valid MPEG-TS data")
+            .await
+            .unwrap();
+
+        // Case 2: seg_01.ts is incomplete (file exists, but seg_01.ts.aria2 control file exists)
+        tokio::fs::write(temp_dir.join("seg_01.ts"), b"partial data")
+            .await
+            .unwrap();
+        tokio::fs::write(temp_dir.join("seg_01.ts.aria2"), b"aria2 control")
+            .await
+            .unwrap();
+
+        // Case 3: seg_02.ts is 0 bytes (corrupt/empty)
+        tokio::fs::write(temp_dir.join("seg_02.ts"), b"")
+            .await
+            .unwrap();
+
+        // Case 4: seg_03.ts does not exist at all
+
+        let missing = filter_missing_segments(&temp_dir, &segments).await;
+
+        // Only seg_01, seg_02, seg_03 are missing; seg_00 must be skipped
+        let missing_names: Vec<String> = missing.into_iter().map(|s| s.filename).collect();
+        assert_eq!(
+            missing_names,
+            vec![
+                "seg_01.ts".to_string(),
+                "seg_02.ts".to_string(),
+                "seg_03.ts".to_string()
+            ]
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }

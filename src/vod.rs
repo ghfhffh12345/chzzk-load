@@ -21,7 +21,8 @@ use crate::consolidation::staging::remove_dir_all_with_retry;
 
 pub use aria2c::{
     download_segments_with_aria2c, download_segments_with_aria2c_and_progress,
-    ensure_aria2c_available, generate_aria2c_input_file, resolve_aria2c_bin,
+    ensure_aria2c_available, filter_missing_segments, generate_aria2c_input_file,
+    resolve_aria2c_bin, resolve_vod_staging_dir,
 };
 pub use chat::{
     VodChatArchivalSummary, VodChatPaginationOptions, VodChatStagedSummary, VodChatTarget,
@@ -67,19 +68,9 @@ pub struct VodArchivalSummary {
 pub struct VodOptions {
     pub aria2c_bin: Option<String>,
     pub ffmpeg_bin: Option<String>,
+    pub temp_dir: Option<PathBuf>,
     pub chat_options: Option<VodChatPaginationOptions>,
     pub coordinator: Option<VodProgressCoordinator>,
-}
-
-/// Cleans up staged files and the temporary staging workspace during abort or error recovery.
-async fn cleanup_vod_staging_artifacts(
-    staging_dir: &std::path::Path,
-    staged_files: &[&std::path::Path],
-) {
-    for file in staged_files {
-        let _ = crate::uploader::unlink_local_file_with_retry(file).await;
-    }
-    let _ = remove_dir_all_with_retry(staging_dir).await;
 }
 
 /// Coordinates the end-to-end VOD ingestion pipeline:
@@ -249,8 +240,13 @@ pub async fn run_vod_archival_with_options(
         None
     };
 
-    // 8. Staging directory: .vod_staging_<video_id>/ inside output folder
-    let staging_dir = output_dir.join(format!(".vod_staging_{}", detail.video_id));
+    // 8. Staging directory: resolve custom temp-dir or default to .vod_staging_<video_id>/ inside output folder
+    let temp_dir_override = options.temp_dir.as_ref().or(args.temp_dir.as_ref());
+    let staging_dir = resolve_vod_staging_dir(
+        &output_dir,
+        &detail.video_id,
+        temp_dir_override.map(|p| p.as_path()),
+    );
     tokio::fs::create_dir_all(&staging_dir)
         .await
         .with_context(|| {
@@ -260,9 +256,10 @@ pub async fn run_vod_archival_with_options(
             )
         })?;
 
-    // 9. Write aria2c input batch file
+    // 9. Filter already downloaded segments and write aria2c input batch file
+    let missing_segments = filter_missing_segments(&staging_dir, &segments).await;
     let input_file = staging_dir.join("input_segments.txt");
-    let batch_content = generate_aria2c_input_file(&segments);
+    let batch_content = generate_aria2c_input_file(&missing_segments);
     tokio::fs::write(&input_file, batch_content.as_bytes())
         .await
         .with_context(|| {
@@ -290,7 +287,7 @@ pub async fn run_vod_archival_with_options(
         if let Some(mut s) = progress_session {
             s.finish(false).await;
         }
-        cleanup_vod_staging_artifacts(&staging_dir, &[&metadata_target.part_path]).await;
+        // Retain unfinished .part files and staging folder upon failure for manual resume
         return Err(err);
     }
 
@@ -317,7 +314,7 @@ pub async fn run_vod_archival_with_options(
             if let Some(mut s) = progress_session {
                 s.finish(false).await;
             }
-            cleanup_vod_staging_artifacts(&staging_dir, &[&metadata_target.part_path]).await;
+            // Retain unfinished .part files and staging folder upon failure for manual resume
             return Err(err);
         }
     };
@@ -330,22 +327,14 @@ pub async fn run_vod_archival_with_options(
                 if let Some(mut s) = progress_session {
                     s.finish(false).await;
                 }
-                cleanup_vod_staging_artifacts(
-                    &staging_dir,
-                    &[&staged_path, &metadata_target.part_path],
-                )
-                .await;
+                // Retain unfinished .part files and staging folder upon failure for manual resume
                 return Err(err).context("VOD chat pagination failed");
             }
             Err(join_err) => {
                 if let Some(mut s) = progress_session {
                     s.finish(false).await;
                 }
-                cleanup_vod_staging_artifacts(
-                    &staging_dir,
-                    &[&staged_path, &metadata_target.part_path],
-                )
-                .await;
+                // Retain unfinished .part files and staging folder upon failure for manual resume
                 return Err(anyhow!("VOD chat pagination task panicked: {join_err}"));
             }
         }
@@ -362,11 +351,6 @@ pub async fn run_vod_archival_with_options(
         if let Some(mut s) = progress_session {
             s.finish(false).await;
         }
-        let mut to_clean = vec![staged_path.as_path(), metadata_target.part_path.as_path()];
-        if let Some(ref chat) = chat_summary {
-            to_clean.push(&chat.part_path);
-        }
-        cleanup_vod_staging_artifacts(&staging_dir, &to_clean).await;
         return Err(err).context("Failed to promote staged VOD video to final destination");
     }
 
@@ -376,15 +360,6 @@ pub async fn run_vod_archival_with_options(
                 if let Some(mut s) = progress_session {
                     s.finish(false).await;
                 }
-                cleanup_vod_staging_artifacts(
-                    &staging_dir,
-                    &[
-                        &finalized_video_path,
-                        &chat.part_path,
-                        &metadata_target.part_path,
-                    ],
-                )
-                .await;
                 return Err(err).context("Failed to promote staged VOD chat to final destination");
             }
         }
@@ -400,14 +375,6 @@ pub async fn run_vod_archival_with_options(
         if let Some(mut s) = progress_session {
             s.finish(false).await;
         }
-        let mut to_clean = vec![
-            finalized_video_path.as_path(),
-            metadata_target.part_path.as_path(),
-        ];
-        if let Some(ref chat) = final_chat_path {
-            to_clean.push(chat.as_path());
-        }
-        cleanup_vod_staging_artifacts(&staging_dir, &to_clean).await;
         return Err(err).context("Failed to promote staged VOD metadata to final destination");
     }
 

@@ -485,13 +485,14 @@ fn test_cli_vod_subcommand_parsing() {
             target: "https://chzzk.naver.com/video/4531238".to_string(),
             quality: "best".to_string(),
             output_dir: None,
+            temp_dir: None,
             no_chat: false,
             headless: false,
             config: None,
         }))
     );
 
-    // 2. Numeric ID with all flags including headless
+    // 2. Numeric ID with all flags including headless and temp-dir
     let cli_full = Cli::try_parse_from([
         "chzzk-load",
         "vod",
@@ -500,6 +501,8 @@ fn test_cli_vod_subcommand_parsing() {
         "720p",
         "-o",
         "/custom/vods",
+        "--temp-dir",
+        "/custom/staging",
         "--no-chat",
         "--headless",
         "-c",
@@ -512,6 +515,7 @@ fn test_cli_vod_subcommand_parsing() {
             target: "4531238".to_string(),
             quality: "720p".to_string(),
             output_dir: Some(std::path::PathBuf::from("/custom/vods")),
+            temp_dir: Some(std::path::PathBuf::from("/custom/staging")),
             no_chat: true,
             headless: true,
             config: Some(std::path::PathBuf::from("custom_settings.toml")),
@@ -545,6 +549,10 @@ fn test_cli_vod_subcommand_parsing() {
     assert!(
         sub_stdout.contains("--output-dir"),
         "Subcommand help must contain --output-dir: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--temp-dir"),
+        "Subcommand help must contain --temp-dir: {sub_stdout}"
     );
 }
 

@@ -114,6 +114,7 @@ async fn test_vod_archival_e2e_full_url_success() {
         target: format!("https://chzzk.naver.com/video/{video_no}?extra=true"),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
         no_chat: false,
         headless: false,
         config: None,
@@ -180,6 +181,7 @@ async fn test_vod_archival_numeric_id_and_quality_selector() {
         target: video_no.to_string(),
         quality: "720p".to_string(),
         output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
         no_chat: false,
         headless: false,
         config: None,
@@ -214,6 +216,7 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
         target: video_no.to_string(),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
         no_chat: false,
         headless: false,
         config: None,
@@ -222,6 +225,7 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
     let options = VodOptions {
         aria2c_bin: Some("/nonexistent/bin/aria2c_missing_binary".to_string()),
         ffmpeg_bin: None,
+        temp_dir: None,
         chat_options: None,
         coordinator: None,
     };
@@ -256,6 +260,7 @@ async fn test_vod_archival_cooperative_cancellation() {
         target: video_no.to_string(),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
         no_chat: false,
         headless: false,
         config: None,
@@ -362,6 +367,7 @@ async fn test_vod_archival_with_concurrent_chat_integration() {
         target: video_no.to_string(),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
         no_chat: false,
         headless: false,
         config: None,
@@ -417,6 +423,7 @@ async fn test_vod_archival_no_chat_flag_skips_chat() {
         target: video_no.to_string(),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
         no_chat: true,
         headless: false,
         config: None,
@@ -469,6 +476,7 @@ async fn test_vod_archival_dual_event_metadata_synthesis_and_promotion() {
         target: video_no.to_string(),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
         no_chat: true,
         headless: false,
         config: None,
@@ -524,12 +532,12 @@ async fn test_vod_archival_dual_event_metadata_synthesis_and_promotion() {
 }
 
 #[tokio::test]
-async fn test_vod_archival_failure_cleans_up_staged_metadata() {
+async fn test_vod_archival_retains_part_files_and_staging_dir_on_failure() {
     let _mock_aria2c = get_mock_aria2c_bin();
     let _mock_ffmpeg = get_mock_ffmpeg_bin();
 
     let temp_dir =
-        std::env::temp_dir().join(format!("test_vod_meta_fail_{}", rand::random::<u32>()));
+        std::env::temp_dir().join(format!("test_vod_fail_retain_{}", rand::random::<u32>()));
     let _ = std::fs::create_dir_all(&temp_dir);
 
     // video_id containing 'fail' causes mock_aria2c to exit with code 1
@@ -542,7 +550,8 @@ async fn test_vod_archival_failure_cleans_up_staged_metadata() {
         target: video_no.to_string(),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
-        no_chat: true,
+        temp_dir: None,
+        no_chat: false,
         headless: false,
         config: None,
     };
@@ -554,13 +563,20 @@ async fn test_vod_archival_failure_cleans_up_staged_metadata() {
 
     assert!(format!("{err:#}").contains("download failed"));
 
-    // Verify .part metadata file is unlinked and staging directory removed
     let folder_name = "[2026-09-30_110000] ProGamer - Chzzk Live Replay";
     let output_dir = temp_dir.join(folder_name);
+
+    // Verify .part files and staging directory are RETAINED upon failure for manual resume
     let part_meta = output_dir.join("vod_metadata.jsonl.part");
     assert!(
-        !part_meta.exists(),
-        "vod_metadata.jsonl.part must be unlinked on failure"
+        part_meta.exists(),
+        "vod_metadata.jsonl.part must be retained on failure"
+    );
+
+    let staging_dir = output_dir.join(format!(".vod_staging_{video_id}"));
+    assert!(
+        staging_dir.exists(),
+        "staging directory must be retained on failure for subsequent resume"
     );
 
     let final_meta = output_dir.join("vod_metadata.jsonl");
@@ -570,4 +586,170 @@ async fn test_vod_archival_failure_cleans_up_staged_metadata() {
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_resumes_partial_download_skipping_existing_segments() {
+    use chzzk_load::chzzk::models_vod::VodChatPage;
+
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!("test_vod_resume_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 444321;
+    let video_id = "neon_resume_vid";
+    let in_key = "key_resume";
+    let source = create_fake_vod_source(video_no, video_id, in_key);
+
+    // Setup chat pages:
+    // Chat page for cursor 10000 (resuming from probed cursor 10000)
+    source.set_chat_page(
+        video_no,
+        10000,
+        VodChatPage {
+            video_chats: vec![
+                // Overlapping duplicate at 10000 (must be skipped)
+                serde_json::json!({
+                    "playerMessageTime": 10000,
+                    "nickname": "Audience1",
+                    "content": "seeded msg"
+                }),
+                // New message at 20000
+                serde_json::json!({
+                    "playerMessageTime": 20000,
+                    "nickname": "Audience2",
+                    "content": "resumed msg"
+                }),
+            ],
+            next_player_message_time: None,
+        },
+    );
+
+    let source = Arc::new(source);
+
+    let folder_name = "[2026-09-30_110000] ProGamer - Chzzk Live Replay";
+    let output_dir = temp_dir.join(folder_name);
+    let staging_dir = output_dir.join(format!(".vod_staging_{video_id}"));
+    std::fs::create_dir_all(&staging_dir).unwrap();
+
+    // 1. Simulate existing completed segment: chunk_00.ts (with non-zero bytes and no .aria2 file)
+    let completed_seg = staging_dir.join("chunk_00.ts");
+    let initial_data = [0x47u8; 376];
+    std::fs::write(&completed_seg, initial_data).unwrap();
+
+    // 2. Simulate partially downloaded chat: vod_chat.jsonl.part
+    let seed_chat = serde_json::json!({
+        "playerMessageTime": 10000,
+        "time": 1727694010000_u64,
+        "nickname": "Audience1",
+        "content": "seeded msg",
+        "msgTypeCode": 1
+    });
+    let part_chat = output_dir.join("vod_chat.jsonl.part");
+    std::fs::write(
+        &part_chat,
+        format!(
+            "{}\n",
+            serde_json::to_string(&chzzk_load::vod::normalize_vod_chat_message(
+                seed_chat, 10000, None
+            ))
+            .unwrap()
+        ),
+    )
+    .unwrap();
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: false,
+        config: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source.clone(), cancel_token)
+        .await
+        .expect("Resumed archival should succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 3);
+    assert_eq!(summary.chat_messages, 2); // 1 seed + 1 resumed (duplicate 10000 suppressed)
+
+    // Verify finalized artifacts
+    let final_video = summary.output_dir.join("vod.mp4");
+    assert!(final_video.exists(), "vod.mp4 must exist");
+
+    let final_chat = summary.output_dir.join("vod_chat.jsonl");
+    assert!(final_chat.exists(), "vod_chat.jsonl must exist");
+    assert!(!part_chat.exists(), "vod_chat.jsonl.part must be promoted");
+
+    let chat_lines: Vec<String> = std::fs::read_to_string(&final_chat)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    assert_eq!(chat_lines.len(), 2);
+
+    let final_meta = summary.output_dir.join("vod_metadata.jsonl");
+    assert!(final_meta.exists(), "vod_metadata.jsonl must exist");
+
+    // Staging directory must be automatically purged upon success
+    assert!(
+        !staging_dir.exists(),
+        "staging dir must be purged on successful completion"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_custom_temp_dir() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_root =
+        std::env::temp_dir().join(format!("test_vod_custom_temp_{}", rand::random::<u32>()));
+    let output_base = temp_root.join("recordings");
+    let custom_temp = temp_root.join("fast_scratch");
+    std::fs::create_dir_all(&output_base).unwrap();
+    std::fs::create_dir_all(&custom_temp).unwrap();
+
+    let video_no = 555666;
+    let video_id = "neon_custom_scratch";
+    let in_key = "key_scratch";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(output_base.clone()),
+        temp_dir: Some(custom_temp.clone()),
+        no_chat: true,
+        headless: false,
+        config: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("run_vod_archival with custom --temp-dir should succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 3);
+
+    let final_video = summary.output_dir.join("vod.mp4");
+    assert!(final_video.exists(), "vod.mp4 must exist in output_dir");
+
+    // The custom staging directory (.vod_staging_<video_id>) inside custom_temp must be purged upon success
+    let custom_staging = custom_temp.join(format!(".vod_staging_{video_id}"));
+    assert!(
+        !custom_staging.exists(),
+        "custom staging dir in temp_dir must be purged upon success"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
 }

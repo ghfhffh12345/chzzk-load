@@ -197,40 +197,71 @@ pub fn normalize_vod_chat_message(
 
 /// Probes the last recorded chat message in an existing `vod_chat.jsonl.part` file.
 ///
-/// Returns the highest `playerMessageTime` recorded in the file to enable cursor-resumable staging.
+/// Returns the highest `playerMessageTime` recorded across all fully completed (newline-terminated)
+/// JSON Lines entries. Trailing unclosed or corrupted lines are safely ignored.
 pub async fn probe_last_chat_player_time(part_path: &Path) -> Result<Option<u64>> {
+    let (cursor, _) = probe_chat_cursor_and_valid_offset(part_path).await?;
+    Ok(cursor)
+}
+
+/// Helper that inspects `part_path` and returns both the highest `playerMessageTime`
+/// and the byte offset of the last complete, valid line ending with `\n`.
+pub(crate) async fn probe_chat_cursor_and_valid_offset(
+    part_path: &Path,
+) -> Result<(Option<u64>, u64)> {
     if !tokio::fs::try_exists(part_path).await.unwrap_or(false) {
-        return Ok(None);
+        return Ok((None, 0));
     }
 
     let file = match tokio::fs::File::open(part_path).await {
         Ok(f) => f,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok((None, 0)),
     };
 
-    let mut lines = tokio::io::BufReader::new(file).lines();
+    let mut reader = tokio::io::BufReader::new(file);
     let mut last_valid_time = None;
+    let mut last_valid_offset = 0u64;
+    let mut current_offset = 0u64;
+    let mut line_buf = Vec::new();
 
-    while let Some(line) = lines.next_line().await? {
-        let trimmed = line.trim();
+    while reader.read_until(b'\n', &mut line_buf).await? > 0 {
+        let line_len = line_buf.len() as u64;
+        let ends_with_newline = line_buf.ends_with(b"\n");
+        let trimmed = std::str::from_utf8(&line_buf).unwrap_or("").trim();
         if trimmed.is_empty() {
+            current_offset += line_len;
+            line_buf.clear();
             continue;
         }
 
-        if let Ok(msg) = serde_json::from_str::<RecordedChatMessage>(trimmed) {
-            if let Some(ts) = msg.player_message_time {
+        let is_valid = if ends_with_newline {
+            if let Ok(msg) = serde_json::from_str::<RecordedChatMessage>(trimmed) {
+                if let Some(ts) = msg.player_message_time {
+                    last_valid_time = Some(ts);
+                } else if let Some(ts) = msg.raw.get("playerMessageTime").and_then(|v| v.as_u64()) {
+                    last_valid_time = Some(ts);
+                }
+                true
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
+                && let Some(ts) = val.get("playerMessageTime").and_then(|v| v.as_u64())
+            {
                 last_valid_time = Some(ts);
-            } else if let Some(ts) = msg.raw.get("playerMessageTime").and_then(|v| v.as_u64()) {
-                last_valid_time = Some(ts);
+                true
+            } else {
+                false
             }
-        } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed)
-            && let Some(ts) = val.get("playerMessageTime").and_then(|v| v.as_u64())
-        {
-            last_valid_time = Some(ts);
+        } else {
+            false
+        };
+
+        current_offset += line_len;
+        if is_valid {
+            last_valid_offset = current_offset;
         }
+        line_buf.clear();
     }
 
-    Ok(last_valid_time)
+    Ok((last_valid_time, last_valid_offset))
 }
 
 async fn sleep_with_cancellation(
@@ -270,11 +301,20 @@ pub async fn paginate_vod_chat_to_staged(
     }
 
     // Cursor-resumable staging: probe last recorded offset from .part file
-    let resume_ts = probe_last_chat_player_time(&part_path).await?;
-    let mut current_ts = match resume_ts {
-        Some(ts) => ts.saturating_add(1),
-        None => 0,
-    };
+    let (resume_ts, valid_offset) = probe_chat_cursor_and_valid_offset(&part_path).await?;
+    let mut current_ts = resume_ts.unwrap_or(0);
+
+    // If the file contains trailing partial bytes past the last valid newline, truncate to clean boundary
+    if tokio::fs::try_exists(&part_path).await.unwrap_or(false)
+        && let Ok(meta) = tokio::fs::metadata(&part_path).await
+        && meta.len() > valid_offset
+    {
+        let f = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&part_path)
+            .await?;
+        f.set_len(valid_offset).await?;
+    }
 
     let mut open_options = tokio::fs::OpenOptions::new();
     open_options.create(true).write(true).append(true);
@@ -350,6 +390,12 @@ pub async fn paginate_vod_chat_to_staged(
         for raw_item in page.video_chats {
             let msg = normalize_vod_chat_message(raw_item, current_ts, target.anchor_time_ms);
             if let Some(ts) = msg.player_message_time {
+                if let Some(cursor) = resume_ts {
+                    if ts <= cursor {
+                        // Skip duplicate message that was already recorded prior to or at resume cursor
+                        continue;
+                    }
+                }
                 highest_ts_in_page = Some(highest_ts_in_page.map_or(ts, |prev: u64| prev.max(ts)));
             }
 
@@ -664,10 +710,10 @@ mod tests {
         let video_no = 777;
         let duration_ms = 50_000;
 
-        // Resume call must ask for current_ts = 10001
+        // Resume call must ask for current_ts = 10000 (the probed cursor)
         source.set_chat_page(
             video_no,
-            10001,
+            10000,
             VodChatPage {
                 video_chats: vec![
                     serde_json::json!({"playerMessageTime": 25000, "content": "resumed msg"}),
@@ -696,8 +742,121 @@ mod tests {
         assert_eq!(summary.message_count, 2);
         assert_eq!(
             source.chat_page_calls(),
-            vec![(video_no, 10001), (video_no, 25001)]
+            vec![(video_no, 10000), (video_no, 25001)]
         );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_probe_last_chat_player_time_with_trailing_garbage() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_probe_trunc_{}", rand::random::<u32>()));
+        let _ = tokio::fs::create_dir_all(&temp_dir).await;
+        let part_file = temp_dir.join("vod_chat.jsonl.part");
+
+        let raw1 = serde_json::json!({"playerMessageTime": 1000, "content": "valid 1"});
+        let raw2 = serde_json::json!({"playerMessageTime": 5000, "content": "valid 2"});
+        let msg1 = normalize_vod_chat_message(raw1, 1000, None);
+        let msg2 = normalize_vod_chat_message(raw2, 5000, None);
+
+        // 2 valid lines followed by an unclosed trailing line representing crash/SIGINT
+        let content = format!(
+            "{}\n{}\n{{\"playerMessageTime\":8000,\"content\":\"interrup",
+            serde_json::to_string(&msg1).unwrap(),
+            serde_json::to_string(&msg2).unwrap()
+        );
+        tokio::fs::write(&part_file, content.as_bytes())
+            .await
+            .unwrap();
+
+        let probed = probe_last_chat_player_time(&part_file).await.unwrap();
+        assert_eq!(probed, Some(5000));
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_paginate_vod_chat_resumes_without_prepending_duplicate_messages() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_pag_dedup_{}", rand::random::<u32>()));
+        let _ = tokio::fs::create_dir_all(&temp_dir).await;
+        let part_file = temp_dir.join("vod_chat.jsonl.part");
+
+        // Seed part file with message at playerMessageTime = 10000
+        let seed_msg = normalize_vod_chat_message(
+            serde_json::json!({"playerMessageTime": 10000, "content": "seed at 10s"}),
+            10000,
+            None,
+        );
+        tokio::fs::write(
+            &part_file,
+            format!("{}\n", serde_json::to_string(&seed_msg).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let source = Arc::new(FakeVodSource::new());
+        let video_no = 8881;
+        let duration_ms = 40_000;
+
+        // When resuming at probed cursor 10000, response contains:
+        // 1. A duplicate message overlapping at playerMessageTime = 10000
+        // 2. A new message at playerMessageTime = 15000
+        source.set_chat_page(
+            video_no,
+            10000,
+            VodChatPage {
+                video_chats: vec![
+                    serde_json::json!({"playerMessageTime": 10000, "content": "seed at 10s"}),
+                    serde_json::json!({"playerMessageTime": 15000, "content": "new message 15s"}),
+                ],
+                next_player_message_time: Some(30000),
+            },
+        );
+
+        source.set_chat_page(
+            video_no,
+            30000,
+            VodChatPage {
+                video_chats: vec![
+                    serde_json::json!({"playerMessageTime": 35000, "content": "new message 35s"}),
+                ],
+                next_player_message_time: None,
+            },
+        );
+
+        let options = VodChatPaginationOptions {
+            initial_pacing: Duration::from_millis(1),
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+
+        let target = VodChatTarget {
+            video_no,
+            duration_ms,
+            anchor_time_ms: None,
+            output_dir: temp_dir.clone(),
+        };
+
+        let summary = paginate_vod_chat(source.clone(), target, options, cancel)
+            .await
+            .unwrap();
+
+        // 1 seed message + 2 new messages = 3 total messages (duplicate must NOT be prepended)
+        assert_eq!(summary.message_count, 3);
+
+        let final_content = tokio::fs::read_to_string(&summary.path).await.unwrap();
+        let lines: Vec<&str> = final_content.lines().collect();
+        assert_eq!(lines.len(), 3);
+
+        let parsed_lines: Vec<RecordedChatMessage> = lines
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(parsed_lines[0].player_message_time, Some(10000));
+        assert_eq!(parsed_lines[1].player_message_time, Some(15000));
+        assert_eq!(parsed_lines[2].player_message_time, Some(35000));
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

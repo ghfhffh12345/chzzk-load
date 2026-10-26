@@ -56,6 +56,13 @@ pub struct VodArgs {
     )]
     pub output_dir: Option<PathBuf>,
 
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Custom staging directory for temporary download files (defaults to .vod_staging_<video_id> in output directory)"
+    )]
+    pub temp_dir: Option<PathBuf>,
+
     #[arg(long, help = "Skip chat history pagination and archiving entirely")]
     pub no_chat: bool,
 
