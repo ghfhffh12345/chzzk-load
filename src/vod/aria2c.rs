@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::process::Stdio;
+use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
@@ -98,6 +99,28 @@ pub async fn download_segments_with_aria2c(
     input_file: &Path,
     cancel_token: CancellationToken,
 ) -> Result<()> {
+    download_segments_with_aria2c_and_progress(
+        aria2c_bin,
+        staging_dir,
+        input_file,
+        &[],
+        None,
+        cancel_token,
+    )
+    .await
+}
+
+/// Executes aria2c to download the specified segments into `staging_dir` with live progress reporting.
+pub async fn download_segments_with_aria2c_and_progress(
+    aria2c_bin: &str,
+    staging_dir: &Path,
+    input_file: &Path,
+    segments: &[VodSegment],
+    progress_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::vod::progress::VodVideoProgressUpdate>,
+    >,
+    cancel_token: CancellationToken,
+) -> Result<()> {
     if cancel_token.is_cancelled() {
         bail!("VOD download cancelled by token before aria2c execution");
     }
@@ -114,7 +137,7 @@ pub async fn download_segments_with_aria2c(
         "-s16",
         "--allow-overwrite=true",
         "--auto-file-renaming=false",
-        "--summary-interval=0",
+        "--summary-interval=1",
         "--dir",
     ]);
     cmd.arg(staging_dir);
@@ -124,6 +147,21 @@ pub async fn download_segments_with_aria2c(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("Failed to spawn aria2c binary: '{aria2c_bin}'"))?;
+
+    let stdout = child.stdout.take();
+    let stdout_tx = progress_tx.clone();
+    let stdout_handle = tokio::spawn(async move {
+        if let Some(pipe) = stdout {
+            let mut lines = tokio::io::BufReader::new(pipe).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(ref tx) = stdout_tx {
+                    if let Some(speed) = crate::vod::progress::parse_aria2c_speed(&line) {
+                        let _ = tx.send(crate::vod::progress::VodVideoProgressUpdate::Speed(speed));
+                    }
+                }
+            }
+        }
+    });
 
     let stderr = child.stderr.take();
     let stderr_handle = tokio::spawn(async move {
@@ -136,13 +174,56 @@ pub async fn download_segments_with_aria2c(
         }
     });
 
+    let monitor_tx = progress_tx.clone();
+    let staging_dir_buf = staging_dir.to_path_buf();
+    let monitor_handle = tokio::spawn(async move {
+        if let Some(tx) = monitor_tx {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let mut completed = 0;
+                let mut bytes = 0;
+                if let Ok(mut read_dir) = tokio::fs::read_dir(&staging_dir_buf).await {
+                    while let Ok(Some(entry)) = read_dir.next_entry().await {
+                        let path = entry.path();
+                        if let Some(ext) = path.extension() {
+                            if ext == "ts" {
+                                let filename =
+                                    path.file_name().unwrap_or_default().to_string_lossy();
+                                let aria2_path = staging_dir_buf.join(format!("{filename}.aria2"));
+                                if !tokio::fs::try_exists(&aria2_path).await.unwrap_or(false)
+                                    && let Ok(meta) = entry.metadata().await
+                                    && meta.len() > 0
+                                {
+                                    completed += 1;
+                                    bytes += meta.len();
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = tx.send(
+                    crate::vod::progress::VodVideoProgressUpdate::SegmentsDownloaded {
+                        segments: completed,
+                        bytes,
+                    },
+                );
+            }
+        }
+    });
+
     tokio::select! {
         _ = cancel_token.cancelled() => {
             let _ = child.kill().await;
+            stdout_handle.abort();
             stderr_handle.abort();
+            monitor_handle.abort();
             bail!("VOD download cancelled by token during aria2c execution");
         }
         res = child.wait() => {
+            stdout_handle.abort();
+            monitor_handle.abort();
             let status = res.with_context(|| "Failed waiting on aria2c process")?;
             let stderr_logs = stderr_handle.await.unwrap_or_default();
             if !status.success() {
@@ -151,6 +232,20 @@ pub async fn download_segments_with_aria2c(
                     stderr_logs.trim()
                 );
             }
+
+            if let Some(ref tx) = progress_tx {
+                let mut final_bytes = 0;
+                for seg in segments {
+                    if let Ok(meta) = tokio::fs::metadata(staging_dir.join(&seg.filename)).await {
+                        final_bytes += meta.len();
+                    }
+                }
+                let _ = tx.send(crate::vod::progress::VodVideoProgressUpdate::SegmentsDownloaded {
+                    segments: segments.len(),
+                    bytes: final_bytes,
+                });
+            }
+
             Ok(())
         }
     }

@@ -48,6 +48,9 @@ async fn main() -> anyhow::Result<()> {
         if vod_args.config.is_none() {
             vod_args.config = args.config;
         }
+        if args.headless {
+            vod_args.headless = true;
+        }
         let config_path = vod_args.config.as_deref();
         let settings = Settings::resolve_for_consolidation(config_path)?;
         let client = Arc::new(ChzzkClient::new(&settings.chzzk));

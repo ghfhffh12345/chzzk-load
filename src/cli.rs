@@ -60,6 +60,13 @@ pub struct VodArgs {
     pub no_chat: bool,
 
     #[arg(
+        long,
+        visible_alias = "no-tui",
+        help = "Run in headless console mode without interactive ANSI progress bars"
+    )]
+    pub headless: bool,
+
+    #[arg(
         short,
         long,
         value_name = "PATH",

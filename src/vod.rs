@@ -3,10 +3,12 @@ pub mod chat;
 pub mod manifest;
 pub mod metadata;
 pub mod naming;
+pub mod progress;
 pub mod remux;
 pub mod target;
 
 use anyhow::{Context, Result, anyhow, bail};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -18,8 +20,8 @@ use crate::config::Settings;
 use crate::consolidation::staging::remove_dir_all_with_retry;
 
 pub use aria2c::{
-    download_segments_with_aria2c, ensure_aria2c_available, generate_aria2c_input_file,
-    resolve_aria2c_bin,
+    download_segments_with_aria2c, download_segments_with_aria2c_and_progress,
+    ensure_aria2c_available, generate_aria2c_input_file, resolve_aria2c_bin,
 };
 pub use chat::{
     VodChatArchivalSummary, VodChatPaginationOptions, VodChatStagedSummary, VodChatTarget,
@@ -36,6 +38,10 @@ pub use metadata::{
 };
 pub use naming::{
     format_broadcast_anchor_timestamp, parse_broadcast_anchor_timestamp_ms, resolve_vod_folder_name,
+};
+pub use progress::{
+    VodChatProgressSnapshot, VodChatProgressUpdate, VodMuxProgressSnapshot, VodProgressCoordinator,
+    VodProgressSession, VodVideoProgressSnapshot, VodVideoProgressUpdate,
 };
 pub use remux::{
     build_vod_concat_args, generate_vod_concat_script, remux_vod_to_staged, resolve_ffmpeg_bin,
@@ -62,6 +68,7 @@ pub struct VodOptions {
     pub aria2c_bin: Option<String>,
     pub ffmpeg_bin: Option<String>,
     pub chat_options: Option<VodChatPaginationOptions>,
+    pub coordinator: Option<VodProgressCoordinator>,
 }
 
 /// Cleans up staged files and the temporary staging workspace during abort or error recovery.
@@ -88,7 +95,13 @@ pub async fn run_vod_archival(
     source: Arc<dyn VodSource>,
     cancel_token: CancellationToken,
 ) -> Result<VodArchivalSummary> {
-    run_vod_archival_with_options(args, source, VodOptions::default(), cancel_token).await
+    let is_tty = !args.headless && std::io::stdout().is_terminal();
+    let coordinator = VodProgressCoordinator::new(is_tty);
+    let options = VodOptions {
+        coordinator: Some(coordinator),
+        ..Default::default()
+    };
+    run_vod_archival_with_options(args, source, options, cancel_token).await
 }
 
 /// Coordinates VOD archival with explicit binary overrides.
@@ -200,11 +213,24 @@ pub async fn run_vod_archival_with_options(
         .await
         .context("Failed to stage VOD metadata")?;
 
+    // Initialize progress session if coordinator is provided
+    let has_chat = !args.no_chat;
+    let mut progress_session = options
+        .coordinator
+        .as_ref()
+        .map(|coord| coord.start_session(segments.len(), duration_ms, true, has_chat));
+
+    let video_tx = progress_session.as_ref().and_then(|s| s.video_sender());
+    let chat_tx = progress_session.as_ref().and_then(|s| s.chat_sender());
+
     // 7. Concurrently paginate VOD chat history if not opted out via --no-chat
     let chat_task = if !args.no_chat {
         let chat_source = Arc::clone(&source);
         let chat_cancel = cancel_token.clone();
-        let chat_options = options.chat_options.clone().unwrap_or_default();
+        let mut chat_options = options.chat_options.clone().unwrap_or_default();
+        if chat_options.progress_sender.is_none() {
+            chat_options.progress_sender = chat_tx;
+        }
         let anchor_time_ms = parse_broadcast_anchor_timestamp_ms(
             detail.live_open_date.as_deref(),
             detail.publish_date.as_deref(),
@@ -246,17 +272,31 @@ pub async fn run_vod_archival_with_options(
             )
         })?;
 
-    // 10. Download video segments via aria2c
-    let download_res =
-        download_segments_with_aria2c(&aria2c_bin, &staging_dir, &input_file, cancel_token.clone())
-            .await;
+    // 10. Download video segments via aria2c with live progress reporting
+    let download_res = download_segments_with_aria2c_and_progress(
+        &aria2c_bin,
+        &staging_dir,
+        &input_file,
+        &segments,
+        video_tx,
+        cancel_token.clone(),
+    )
+    .await;
 
     if let Err(err) = download_res {
         if let Some(ref task) = chat_task {
             task.abort();
         }
+        if let Some(mut s) = progress_session {
+            s.finish(false).await;
+        }
         cleanup_vod_staging_artifacts(&staging_dir, &[&metadata_target.part_path]).await;
         return Err(err);
+    }
+
+    // Transition progress coordinator to MUX phase
+    if let Some(ref mut s) = progress_session {
+        s.transition_to_mux();
     }
 
     // 11. Remux via FFmpeg Concat Demuxer to staged vod.mp4.part
@@ -274,6 +314,9 @@ pub async fn run_vod_archival_with_options(
             if let Some(ref task) = chat_task {
                 task.abort();
             }
+            if let Some(mut s) = progress_session {
+                s.finish(false).await;
+            }
             cleanup_vod_staging_artifacts(&staging_dir, &[&metadata_target.part_path]).await;
             return Err(err);
         }
@@ -284,6 +327,9 @@ pub async fn run_vod_archival_with_options(
         match task.await {
             Ok(Ok(summary)) => Some(summary),
             Ok(Err(err)) => {
+                if let Some(mut s) = progress_session {
+                    s.finish(false).await;
+                }
                 cleanup_vod_staging_artifacts(
                     &staging_dir,
                     &[&staged_path, &metadata_target.part_path],
@@ -292,6 +338,9 @@ pub async fn run_vod_archival_with_options(
                 return Err(err).context("VOD chat pagination failed");
             }
             Err(join_err) => {
+                if let Some(mut s) = progress_session {
+                    s.finish(false).await;
+                }
                 cleanup_vod_staging_artifacts(
                     &staging_dir,
                     &[&staged_path, &metadata_target.part_path],
@@ -310,6 +359,9 @@ pub async fn run_vod_archival_with_options(
     if let Err(err) =
         crate::uploader::rename_local_file_with_retry(&staged_path, &finalized_video_path).await
     {
+        if let Some(mut s) = progress_session {
+            s.finish(false).await;
+        }
         let mut to_clean = vec![staged_path.as_path(), metadata_target.part_path.as_path()];
         if let Some(ref chat) = chat_summary {
             to_clean.push(&chat.part_path);
@@ -321,6 +373,9 @@ pub async fn run_vod_archival_with_options(
     let (final_chat_path, chat_messages) = if let Some(chat) = chat_summary {
         if chat.part_path != chat.final_path {
             if let Err(err) = promote_vod_chat(&chat.part_path, &chat.final_path).await {
+                if let Some(mut s) = progress_session {
+                    s.finish(false).await;
+                }
                 cleanup_vod_staging_artifacts(
                     &staging_dir,
                     &[
@@ -342,6 +397,9 @@ pub async fn run_vod_archival_with_options(
     if let Err(err) =
         promote_vod_metadata(&metadata_target.part_path, &finalized_metadata_path).await
     {
+        if let Some(mut s) = progress_session {
+            s.finish(false).await;
+        }
         let mut to_clean = vec![
             finalized_video_path.as_path(),
             metadata_target.part_path.as_path(),
@@ -353,7 +411,12 @@ pub async fn run_vod_archival_with_options(
         return Err(err).context("Failed to promote staged VOD metadata to final destination");
     }
 
-    // 14. Automatically purge staging directory upon successful remux & promotion
+    // 14. Finalize progress session on orchestrator success
+    if let Some(mut s) = progress_session {
+        s.finish(true).await;
+    }
+
+    // 15. Automatically purge staging directory upon successful remux & promotion
     let _ = remove_dir_all_with_retry(&staging_dir).await;
 
     Ok(VodArchivalSummary {

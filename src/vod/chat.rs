@@ -41,6 +41,8 @@ pub struct VodChatPaginationOptions {
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
     pub max_retries_per_page: usize,
+    pub progress_sender:
+        Option<tokio::sync::mpsc::UnboundedSender<crate::vod::progress::VodChatProgressUpdate>>,
 }
 
 impl Default for VodChatPaginationOptions {
@@ -50,6 +52,7 @@ impl Default for VodChatPaginationOptions {
             initial_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(30),
             max_retries_per_page: 10,
+            progress_sender: None,
         }
     }
 }
@@ -291,6 +294,13 @@ pub async fn paginate_vod_chat_to_staged(
     let mut consecutive_429 = 0;
     let mut current_backoff = options.initial_backoff;
 
+    if let Some(ref tx) = options.progress_sender {
+        let _ = tx.send(crate::vod::progress::VodChatProgressUpdate {
+            current_time_ms: current_ts.min(target.duration_ms),
+            emitted_messages: total_messages,
+        });
+    }
+
     while current_ts <= target.duration_ms {
         if cancel_token.is_cancelled() {
             let _ = writer.flush().await;
@@ -374,6 +384,13 @@ pub async fn paginate_vod_chat_to_staged(
             break;
         }
 
+        if let Some(ref tx) = options.progress_sender {
+            let _ = tx.send(crate::vod::progress::VodChatProgressUpdate {
+                current_time_ms: current_ts.min(target.duration_ms),
+                emitted_messages: total_messages,
+            });
+        }
+
         // Adaptive pacing between successful requests
         if options.initial_pacing > Duration::ZERO {
             sleep_with_cancellation(
@@ -384,6 +401,13 @@ pub async fn paginate_vod_chat_to_staged(
             )
             .await?;
         }
+    }
+
+    if let Some(ref tx) = options.progress_sender {
+        let _ = tx.send(crate::vod::progress::VodChatProgressUpdate {
+            current_time_ms: target.duration_ms,
+            emitted_messages: total_messages,
+        });
     }
 
     writer
@@ -705,6 +729,7 @@ mod tests {
             initial_backoff: Duration::from_millis(10),
             max_backoff: Duration::from_millis(50),
             max_retries_per_page: 3,
+            progress_sender: None,
         };
         let cancel = CancellationToken::new();
 

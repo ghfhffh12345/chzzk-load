@@ -486,11 +486,12 @@ fn test_cli_vod_subcommand_parsing() {
             quality: "best".to_string(),
             output_dir: None,
             no_chat: false,
+            headless: false,
             config: None,
         }))
     );
 
-    // 2. Numeric ID with all flags
+    // 2. Numeric ID with all flags including headless
     let cli_full = Cli::try_parse_from([
         "chzzk-load",
         "vod",
@@ -500,6 +501,7 @@ fn test_cli_vod_subcommand_parsing() {
         "-o",
         "/custom/vods",
         "--no-chat",
+        "--headless",
         "-c",
         "custom_settings.toml",
     ])
@@ -511,6 +513,7 @@ fn test_cli_vod_subcommand_parsing() {
             quality: "720p".to_string(),
             output_dir: Some(std::path::PathBuf::from("/custom/vods")),
             no_chat: true,
+            headless: true,
             config: Some(std::path::PathBuf::from("custom_settings.toml")),
         }))
     );

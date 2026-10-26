@@ -115,6 +115,7 @@ async fn test_vod_archival_e2e_full_url_success() {
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
         no_chat: false,
+        headless: false,
         config: None,
     };
 
@@ -180,6 +181,7 @@ async fn test_vod_archival_numeric_id_and_quality_selector() {
         quality: "720p".to_string(),
         output_dir: Some(temp_dir.clone()),
         no_chat: false,
+        headless: false,
         config: None,
     };
 
@@ -213,6 +215,7 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
         no_chat: false,
+        headless: false,
         config: None,
     };
 
@@ -220,6 +223,7 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
         aria2c_bin: Some("/nonexistent/bin/aria2c_missing_binary".to_string()),
         ffmpeg_bin: None,
         chat_options: None,
+        coordinator: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -253,6 +257,7 @@ async fn test_vod_archival_cooperative_cancellation() {
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
         no_chat: false,
+        headless: false,
         config: None,
     };
 
@@ -358,6 +363,7 @@ async fn test_vod_archival_with_concurrent_chat_integration() {
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
         no_chat: false,
+        headless: false,
         config: None,
     };
 
@@ -412,6 +418,7 @@ async fn test_vod_archival_no_chat_flag_skips_chat() {
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
         no_chat: true,
+        headless: false,
         config: None,
     };
 
@@ -463,6 +470,7 @@ async fn test_vod_archival_dual_event_metadata_synthesis_and_promotion() {
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
         no_chat: true,
+        headless: false,
         config: None,
     };
 
@@ -535,6 +543,7 @@ async fn test_vod_archival_failure_cleans_up_staged_metadata() {
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
         no_chat: true,
+        headless: false,
         config: None,
     };
 
