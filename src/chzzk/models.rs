@@ -16,7 +16,7 @@ pub struct ChzzkResponse<T> {
     pub content: Option<T>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelInfo {
     pub channel_id: String,

@@ -107,6 +107,24 @@ pub struct ChzzkConfig {
     pub nid_ses: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Aria2cConfig {
+    #[serde(default = "default_aria2c_bin")]
+    pub aria2c_bin: String,
+}
+
+fn default_aria2c_bin() -> String {
+    "aria2c".to_string()
+}
+
+impl Default for Aria2cConfig {
+    fn default() -> Self {
+        Self {
+            aria2c_bin: default_aria2c_bin(),
+        }
+    }
+}
+
 pub const DEFAULT_SETTINGS_TOML: &str = r#"# chzzk-load configuration
 
 [general]
@@ -143,6 +161,10 @@ consolidate_extra_args = []
 # Optional Naver session cookies for age-restricted (19+) or subscriber streams
 nid_aut = ""
 nid_ses = ""
+
+[aria2c]
+# Path to aria2c binary for high-speed VOD downloads
+aria2c_bin = "aria2c"
 
 # Monitored Channels:
 # Channels can be specified as a list of strings (shorthand ID) or an array of tables.
@@ -214,6 +236,8 @@ pub struct Settings {
     pub rclone: RcloneConfig,
     #[serde(default)]
     pub chzzk: ChzzkConfig,
+    #[serde(default)]
+    pub aria2c: Aria2cConfig,
     #[serde(default = "default_channels")]
     pub channels: Vec<ChannelConfig>,
 }
@@ -231,6 +255,7 @@ impl Default for Settings {
             general: GeneralConfig::default(),
             rclone: RcloneConfig::default(),
             chzzk: ChzzkConfig::default(),
+            aria2c: Aria2cConfig::default(),
             channels: default_channels(),
         }
     }

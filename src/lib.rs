@@ -8,3 +8,4 @@ pub mod engine;
 pub mod recorder;
 pub mod tui;
 pub mod uploader;
+pub mod vod;

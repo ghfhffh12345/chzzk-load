@@ -29,6 +29,40 @@ pub struct Cli {
 pub enum Commands {
     #[command(about = "Consolidate recorded video and chat chunks into unified files")]
     Consolidate(ConsolidateArgs),
+    #[command(about = "Download and archive a past Chzzk VOD")]
+    Vod(VodArgs),
+}
+
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
+pub struct VodArgs {
+    #[arg(
+        help = "Chzzk video URL (e.g. https://chzzk.naver.com/video/123456) or numeric video ID"
+    )]
+    pub target: String,
+
+    #[arg(
+        short,
+        long,
+        default_value = "best",
+        help = "Video stream quality resolution (e.g. 'best', '1080p', '720p', '480p', 'worst')"
+    )]
+    pub quality: String,
+
+    #[arg(
+        short,
+        long,
+        value_name = "DIR",
+        help = "Directory to store the downloaded VOD archive (defaults to settings.general.recordings_dir)"
+    )]
+    pub output_dir: Option<PathBuf>,
+
+    #[arg(
+        short,
+        long,
+        value_name = "PATH",
+        help = "Path to dedicated settings.toml file"
+    )]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]

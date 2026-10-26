@@ -44,6 +44,33 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if let Some(chzzk_load::cli::Commands::Vod(mut vod_args)) = args.command {
+        if vod_args.config.is_none() {
+            vod_args.config = args.config;
+        }
+        let config_path = vod_args.config.as_deref();
+        let settings = Settings::resolve_for_consolidation(config_path)?;
+        let client = Arc::new(ChzzkClient::new(&settings.chzzk));
+        let cancel_token = CancellationToken::new();
+
+        let cancel_token_clone = cancel_token.clone();
+        tokio::spawn(async move {
+            if wait_for_signal().await.is_some() {
+                eprintln!("[SHUTDOWN] Signal received. Cancelling VOD archival...");
+                cancel_token_clone.cancel();
+            }
+        });
+
+        let summary = chzzk_load::vod::run_vod_archival(vod_args, client, cancel_token).await?;
+        println!(
+            "[INFO] Successfully archived VOD #{} to '{}' ({} segments)",
+            summary.video_no,
+            summary.video_path.display(),
+            summary.segments_downloaded
+        );
+        return Ok(());
+    }
+
     let is_headless = args.headless || !std::io::stdout().is_terminal();
 
     // Register panic hook to restore terminal on panic (only if TUI was enabled)

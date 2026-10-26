@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::chzzk::models::LiveDetail;
+use crate::chzzk::models_vod::{VodDetail, VodPlaybackInfo};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -309,6 +310,164 @@ impl LiveStreamSource for MockLiveStreamSource {
     fn chat_ws_url(&self) -> Option<&str> {
         self.chat_ws_url_call_count.fetch_add(1, Ordering::SeqCst);
         self.chat_ws_url.as_deref()
+    }
+
+    fn cookie_header(&self) -> Option<&str> {
+        self.cookie_header.as_deref()
+    }
+}
+
+/// Trait defining the VOD ingestion intake contract.
+///
+/// Encapsulates fetching VOD metadata details, resolving NeonPlayer playback
+/// streams and playlists, and querying raw HLS playlists.
+pub trait VodSource: Send + Sync {
+    /// Fetches VOD metadata details for the specified numeric video ID.
+    fn get_video_detail<'a>(&'a self, video_no: u64) -> BoxFuture<'a, anyhow::Result<VodDetail>>;
+
+    /// Fetches NeonPlayer playback info containing stream/manifest descriptors.
+    fn get_playback_info<'a>(
+        &'a self,
+        video_id: &'a str,
+        in_key: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<VodPlaybackInfo>>;
+
+    /// Fetches the text content of an HLS playlist (.m3u8).
+    fn fetch_hls_playlist<'a>(&'a self, url: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
+
+    /// Returns an optional cookie header value for authenticated VOD playback.
+    fn cookie_header(&self) -> Option<&str> {
+        None
+    }
+}
+
+type VodDetailMap = Arc<Mutex<HashMap<u64, Result<VodDetail, String>>>>;
+type VodPlaybackMap = Arc<Mutex<HashMap<(String, String), Result<VodPlaybackInfo, String>>>>;
+type PlaylistMap = Arc<Mutex<HashMap<String, Result<String, String>>>>;
+
+/// In-memory fake implementation of [`VodSource`] for deterministic testing without network I/O.
+#[derive(Clone, Default)]
+pub struct FakeVodSource {
+    details: VodDetailMap,
+    playbacks: VodPlaybackMap,
+    playlists: PlaylistMap,
+    cookie_header: Option<String>,
+}
+
+impl FakeVodSource {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_cookie_header(mut self, cookie: impl Into<String>) -> Self {
+        self.cookie_header = Some(cookie.into());
+        self
+    }
+
+    pub fn with_video_detail(self, video_no: u64, detail: VodDetail) -> Self {
+        self.set_video_detail(video_no, detail);
+        self
+    }
+
+    pub fn set_video_detail(&self, video_no: u64, detail: VodDetail) {
+        let mut map = self.details.lock().unwrap();
+        map.insert(video_no, Ok(detail));
+    }
+
+    pub fn set_video_error(&self, video_no: u64, error: impl Into<String>) {
+        let mut map = self.details.lock().unwrap();
+        map.insert(video_no, Err(error.into()));
+    }
+
+    pub fn with_playback_info(
+        self,
+        video_id: impl Into<String>,
+        in_key: impl Into<String>,
+        info: VodPlaybackInfo,
+    ) -> Self {
+        self.set_playback_info(video_id, in_key, info);
+        self
+    }
+
+    pub fn set_playback_info(
+        &self,
+        video_id: impl Into<String>,
+        in_key: impl Into<String>,
+        info: VodPlaybackInfo,
+    ) {
+        let mut map = self.playbacks.lock().unwrap();
+        map.insert((video_id.into(), in_key.into()), Ok(info));
+    }
+
+    pub fn set_playback_error(
+        &self,
+        video_id: impl Into<String>,
+        in_key: impl Into<String>,
+        error: impl Into<String>,
+    ) {
+        let mut map = self.playbacks.lock().unwrap();
+        map.insert((video_id.into(), in_key.into()), Err(error.into()));
+    }
+
+    pub fn with_hls_playlist(self, url: impl Into<String>, content: impl Into<String>) -> Self {
+        self.set_hls_playlist(url, content);
+        self
+    }
+
+    pub fn set_hls_playlist(&self, url: impl Into<String>, content: impl Into<String>) {
+        let mut map = self.playlists.lock().unwrap();
+        map.insert(url.into(), Ok(content.into()));
+    }
+
+    pub fn set_playlist_error(&self, url: impl Into<String>, error: impl Into<String>) {
+        let mut map = self.playlists.lock().unwrap();
+        map.insert(url.into(), Err(error.into()));
+    }
+}
+
+impl VodSource for FakeVodSource {
+    fn get_video_detail<'a>(&'a self, video_no: u64) -> BoxFuture<'a, anyhow::Result<VodDetail>> {
+        Box::pin(async move {
+            let map = self.details.lock().unwrap();
+            match map.get(&video_no) {
+                Some(Ok(detail)) => Ok(detail.clone()),
+                Some(Err(err)) => anyhow::bail!("{err}"),
+                None => {
+                    anyhow::bail!(
+                        "FakeVodSource: no video detail configured for video_no {video_no}"
+                    )
+                }
+            }
+        })
+    }
+
+    fn get_playback_info<'a>(
+        &'a self,
+        video_id: &'a str,
+        in_key: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<VodPlaybackInfo>> {
+        Box::pin(async move {
+            let map = self.playbacks.lock().unwrap();
+            let key = (video_id.to_string(), in_key.to_string());
+            match map.get(&key) {
+                Some(Ok(info)) => Ok(info.clone()),
+                Some(Err(err)) => anyhow::bail!("{err}"),
+                None => anyhow::bail!(
+                    "FakeVodSource: no playback info configured for ({video_id}, {in_key})"
+                ),
+            }
+        })
+    }
+
+    fn fetch_hls_playlist<'a>(&'a self, url: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
+        Box::pin(async move {
+            let map = self.playlists.lock().unwrap();
+            match map.get(url) {
+                Some(Ok(content)) => Ok(content.clone()),
+                Some(Err(err)) => anyhow::bail!("{err}"),
+                None => anyhow::bail!("FakeVodSource: no playlist configured for {url}"),
+            }
+        })
     }
 
     fn cookie_header(&self) -> Option<&str> {

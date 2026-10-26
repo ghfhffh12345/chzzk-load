@@ -1,7 +1,7 @@
 use clap::{CommandFactory, Parser};
 use std::process::Command;
 
-use chzzk_load::cli::{Cli, Commands, ConsolidateArgs};
+use chzzk_load::cli::{Cli, Commands, ConsolidateArgs, VodArgs};
 use chzzk_load::config::{ChannelConfig, Settings};
 
 #[test]
@@ -471,6 +471,74 @@ fn test_cli_consolidate_subcommand_parsing() {
     assert!(
         sub_stdout.contains("--config"),
         "Subcommand help must contain --config: {sub_stdout}"
+    );
+}
+
+#[test]
+fn test_cli_vod_subcommand_parsing() {
+    // 1. Basic URL with defaults
+    let cli = Cli::try_parse_from(["chzzk-load", "vod", "https://chzzk.naver.com/video/4531238"])
+        .expect("Parsing basic vod command should succeed");
+    assert_eq!(
+        cli.command,
+        Some(Commands::Vod(VodArgs {
+            target: "https://chzzk.naver.com/video/4531238".to_string(),
+            quality: "best".to_string(),
+            output_dir: None,
+            config: None,
+        }))
+    );
+
+    // 2. Numeric ID with all flags
+    let cli_full = Cli::try_parse_from([
+        "chzzk-load",
+        "vod",
+        "4531238",
+        "-q",
+        "720p",
+        "-o",
+        "/custom/vods",
+        "-c",
+        "custom_settings.toml",
+    ])
+    .expect("Parsing vod command with flags should succeed");
+    assert_eq!(
+        cli_full.command,
+        Some(Commands::Vod(VodArgs {
+            target: "4531238".to_string(),
+            quality: "720p".to_string(),
+            output_dir: Some(std::path::PathBuf::from("/custom/vods")),
+            config: Some(std::path::PathBuf::from("custom_settings.toml")),
+        }))
+    );
+
+    // 3. Binary smoke --help contains vod subcommand
+    let bin_path = env!("CARGO_BIN_EXE_chzzk-load");
+    let output = Command::new(bin_path)
+        .arg("--help")
+        .output()
+        .expect("Failed to execute chzzk-load --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("vod"),
+        "Top-level --help must list vod subcommand: {stdout}"
+    );
+
+    // 4. Binary smoke vod --help
+    let sub_output = Command::new(bin_path)
+        .args(["vod", "--help"])
+        .output()
+        .expect("Failed to execute chzzk-load vod --help");
+    assert!(sub_output.status.success());
+    let sub_stdout = String::from_utf8_lossy(&sub_output.stdout);
+    assert!(
+        sub_stdout.contains("--quality"),
+        "Subcommand help must contain --quality: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--output-dir"),
+        "Subcommand help must contain --output-dir: {sub_stdout}"
     );
 }
 

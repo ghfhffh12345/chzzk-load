@@ -7,7 +7,8 @@ use crate::chzzk::models::{
 };
 use crate::chzzk::models_chat::ChatAccessTokenResponse;
 use crate::chzzk::models_metadata::{CategoryType, StreamAccessTier, StreamMetadataState};
-use crate::chzzk::source::{BoxFuture, LiveStreamSource};
+use crate::chzzk::models_vod::{VodDetail, VodPlaybackInfo};
+use crate::chzzk::source::{BoxFuture, LiveStreamSource, VodSource};
 use crate::config::ChzzkConfig;
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
@@ -516,6 +517,60 @@ impl ChzzkClient {
             .ok_or_else(|| anyhow!("Chat access token response missing content"))?;
         Ok(content.access_token)
     }
+
+    pub async fn get_video_detail(&self, video_no: u64) -> Result<VodDetail> {
+        let url = format!("{}/service/v3/videos/{video_no}", self.base_url);
+        let resp = self.client.get(&url).send().await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+            bail!(
+                "VOD access restricted ({status}) for video {video_no}: authentication required (set nid_aut / nid_ses)"
+            );
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            bail!("VOD {video_no} not found (404 Not Found)");
+        }
+        let resp = resp
+            .error_for_status()
+            .with_context(|| format!("HTTP error fetching VOD detail for {video_no} at {url}"))?;
+        let body: ChzzkResponse<VodDetail> = resp
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse VOD detail JSON for {video_no}"))?;
+        if body.code != 200 {
+            let msg = body.message.unwrap_or_else(|| "Unknown error".to_string());
+            bail!("Chzzk VOD API returned code {}: {}", body.code, msg);
+        }
+        body.content
+            .ok_or_else(|| anyhow!("VOD detail response missing content for video {video_no}"))
+    }
+
+    pub async fn get_playback_info(&self, video_id: &str, in_key: &str) -> Result<VodPlaybackInfo> {
+        let url = format!(
+            "https://apis.naver.com/neonplayer/vodplay/v1/playback/{video_id}?key={in_key}&env=real"
+        );
+        let resp = self.client.get(&url).send().await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+            bail!(
+                "Playback access restricted ({status}) for video {video_id}: invalid key or authentication required"
+            );
+        }
+        let resp = resp
+            .error_for_status()
+            .with_context(|| format!("HTTP error fetching playback info for {video_id}"))?;
+        let info: VodPlaybackInfo = resp
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse playback info JSON for {video_id}"))?;
+        Ok(info)
+    }
+
+    pub async fn fetch_hls_playlist(&self, url: &str) -> Result<String> {
+        let resp = self.client.get(url).send().await?.error_for_status()?;
+        let text = resp.text().await?;
+        Ok(text)
+    }
 }
 
 impl LiveStreamSource for ChzzkClient {
@@ -535,6 +590,28 @@ impl LiveStreamSource for ChzzkClient {
 
     fn chat_ws_url(&self) -> Option<&str> {
         self.chat_ws_url()
+    }
+
+    fn cookie_header(&self) -> Option<&str> {
+        self.cookie_header()
+    }
+}
+
+impl VodSource for ChzzkClient {
+    fn get_video_detail<'a>(&'a self, video_no: u64) -> BoxFuture<'a, anyhow::Result<VodDetail>> {
+        Box::pin(self.get_video_detail(video_no))
+    }
+
+    fn get_playback_info<'a>(
+        &'a self,
+        video_id: &'a str,
+        in_key: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<VodPlaybackInfo>> {
+        Box::pin(self.get_playback_info(video_id, in_key))
+    }
+
+    fn fetch_hls_playlist<'a>(&'a self, url: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
+        Box::pin(self.fetch_hls_playlist(url))
     }
 
     fn cookie_header(&self) -> Option<&str> {
