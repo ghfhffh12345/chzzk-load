@@ -108,3 +108,8 @@ _Avoid_: VOD timestamp, download date, publish time
 The partial-state retention strategy that preserves segmented media files and inspects the last recorded playback offset in `vod_chat.jsonl.part` to resume interrupted VOD downloads without refetching preceding data.
 _Avoid_: Download resume, chunk cache, partial retry
 
+**Dual-Event Boundary Model**:
+The metadata synthesis pattern for archived VOD metadata (`vod_metadata.jsonl`), recording an initial `start` event snapshot at `stream_offset_ms: 0` and a terminal `finish` event snapshot at `stream_offset_ms: duration_ms` to provide consistent lifecycle boundary markers and complete stream classification state.
+_Avoid_: Metadata diff, start-stop tags, bookends, event wrappers
+
+

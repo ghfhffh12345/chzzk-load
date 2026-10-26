@@ -210,4 +210,49 @@ mod tests {
             "[2026-09-30_110000] [Alias_Special_] Streamer _ Name - Is this stream real_ Yes! _3 _ Part 1"
         );
     }
+
+    #[test]
+    fn test_format_broadcast_anchor_timestamp_none_fallback_to_now() {
+        let ts = format_broadcast_anchor_timestamp(None, None);
+        assert_eq!(ts.len(), 17); // YYYY-MM-DD_HHMMSS
+        assert!(ts.contains('_'));
+
+        let ts_empty = format_broadcast_anchor_timestamp(Some("   "), Some(""));
+        assert_eq!(ts_empty.len(), 17);
+    }
+
+    #[test]
+    fn test_parse_broadcast_anchor_timestamp_ms_priority() {
+        // live_open_date takes precedence
+        let ms = parse_broadcast_anchor_timestamp_ms(
+            Some("2026-09-30 11:00:00"),
+            Some("2026-09-30 15:30:00"),
+        );
+        assert!(ms.is_some());
+
+        // publish_date fallback
+        let ms_fallback = parse_broadcast_anchor_timestamp_ms(None, Some("2026-09-30 15:30:00"));
+        assert!(ms_fallback.is_some());
+        assert_ne!(ms, ms_fallback);
+
+        // both absent returns None
+        assert_eq!(parse_broadcast_anchor_timestamp_ms(None, None), None);
+        assert_eq!(
+            parse_broadcast_anchor_timestamp_ms(Some(" "), Some("")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_vod_folder_name_empty_title_and_streamer_edge_cases() {
+        let detail_empty_title =
+            sample_vod_detail(Some("2026-09-30 11:00:00"), None, "   ...  ", "Streamer");
+        let folder = resolve_vod_folder_name(&detail_empty_title, None);
+        assert_eq!(folder, "[2026-09-30_110000] Streamer");
+
+        let detail_empty_streamer =
+            sample_vod_detail(Some("2026-09-30 11:00:00"), None, "My Cool VOD", "   ...  ");
+        let folder_unknown = resolve_vod_folder_name(&detail_empty_streamer, None);
+        assert_eq!(folder_unknown, "[2026-09-30_110000] Unknown - My Cool VOD");
+    }
 }

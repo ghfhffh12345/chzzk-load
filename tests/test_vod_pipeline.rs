@@ -146,6 +146,12 @@ async fn test_vod_archival_e2e_full_url_success() {
     let staged_part = summary.output_dir.join("vod.mp4.part");
     assert!(!staged_part.exists(), "vod.mp4.part must be promoted");
 
+    // Verify vod_metadata.jsonl exists and .part was promoted
+    let finalized_meta = summary.output_dir.join("vod_metadata.jsonl");
+    assert!(finalized_meta.exists(), "vod_metadata.jsonl must exist");
+    assert!(!summary.output_dir.join("vod_metadata.jsonl.part").exists());
+    assert_eq!(summary.metadata_path, finalized_meta);
+
     // Verify staging directory was purged
     let staging_dir = summary.output_dir.join(format!(".vod_staging_{video_id}"));
     assert!(
@@ -432,6 +438,127 @@ async fn test_vod_archival_no_chat_flag_skips_chat() {
 
     // FakeVodSource get_chat_page must not have been invoked
     assert_eq!(source.chat_page_call_count(), 0);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_dual_event_metadata_synthesis_and_promotion() {
+    use chzzk_load::vod::{VodMetadataEvent, VodMetadataEventType};
+
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_meta_e2e_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 8881234;
+    let video_id = "neon_meta_vid";
+    let in_key = "key_meta_secret";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        no_chat: true,
+        config: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("run_vod_archival should succeed");
+
+    // 1. Verify metadata file exists and .part file is unlinked/promoted
+    let final_meta = summary.output_dir.join("vod_metadata.jsonl");
+    assert!(final_meta.exists(), "vod_metadata.jsonl must exist");
+    assert_eq!(summary.metadata_path, final_meta);
+
+    let part_meta = summary.output_dir.join("vod_metadata.jsonl.part");
+    assert!(
+        !part_meta.exists(),
+        "vod_metadata.jsonl.part must be promoted"
+    );
+
+    // 2. Read and verify dual-event JSON Lines format
+    let content = std::fs::read_to_string(&final_meta).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "vod_metadata.jsonl must contain exactly 2 events"
+    );
+
+    // Start event at stream_offset_ms: 0
+    let start_event: VodMetadataEvent = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(start_event.version, 2);
+    assert_eq!(start_event.event, VodMetadataEventType::Start);
+    assert_eq!(start_event.stream_offset_ms, 0);
+    assert_eq!(start_event.state.video_no, video_no);
+    assert_eq!(start_event.state.video_id, video_id);
+    assert_eq!(start_event.state.title, "Chzzk Live Replay");
+    assert_eq!(start_event.state.channel_name, "ProGamer");
+    assert_eq!(start_event.state.channel_id, "chan_gamer_01");
+    assert_eq!(start_event.state.category_type.as_deref(), Some("GAME"));
+    assert_eq!(start_event.state.tags, vec!["game"]);
+
+    // Finish event at stream_offset_ms: duration_ms (7200s -> 7,200,000ms)
+    let finish_event: VodMetadataEvent = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(finish_event.version, 2);
+    assert_eq!(finish_event.event, VodMetadataEventType::Finish);
+    assert_eq!(finish_event.stream_offset_ms, 7_200_000);
+    assert_eq!(finish_event.state.video_no, video_no);
+    assert_eq!(finish_event.state.title, "Chzzk Live Replay");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_failure_cleans_up_staged_metadata() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_meta_fail_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    // video_id containing 'fail' causes mock_aria2c to exit with code 1
+    let video_no = 9991234;
+    let video_id = "fail_video_neon";
+    let in_key = "key_fail";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        no_chat: true,
+        config: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let err = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect_err("Download failure should trigger pipeline error");
+
+    assert!(format!("{err:#}").contains("download failed"));
+
+    // Verify .part metadata file is unlinked and staging directory removed
+    let folder_name = "[2026-09-30_110000] ProGamer - Chzzk Live Replay";
+    let output_dir = temp_dir.join(folder_name);
+    let part_meta = output_dir.join("vod_metadata.jsonl.part");
+    assert!(
+        !part_meta.exists(),
+        "vod_metadata.jsonl.part must be unlinked on failure"
+    );
+
+    let final_meta = output_dir.join("vod_metadata.jsonl");
+    assert!(
+        !final_meta.exists(),
+        "vod_metadata.jsonl must not be created on failure"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
