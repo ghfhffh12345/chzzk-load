@@ -91,3 +91,20 @@ _Avoid_: Metadata diff, delta log, stream telemetry
 **Live Stream Source**:
 The interface seam representing live broadcast stream intake, encapsulating broadcast detail polling, chat session authorization token acquisition, and optional chat WebSocket endpoint configuration, decoupling engine orchestration from HTTP network transport.
 _Avoid_: Poller, stream client, API wrapper, HTTP helper
+
+**VOD Archival Session**:
+An on-demand batch capture lifecycle for an archived broadcast VOD, coordinating parallel segment ingestion, timeline-synchronized chat pagination, and lossless stream-copy remuxing into seekable containers.
+_Avoid_: VOD rip, download job, stream grabber
+
+**VOD Artifact Triad**:
+The canonical three-file output specification (`vod.mp4`, `vod_chat.jsonl`, `vod_metadata.jsonl`) generated during a VOD Archival Session, mirroring live recording structure while maintaining distinct file naming.
+_Avoid_: Download bundle, VOD package, media dump
+
+**Broadcast Start Anchor**:
+The authoritative origin timestamp of a VOD's original live broadcast (`liveOpenDate`, falling back to `publishDate`), utilized to chronologically align session directories and relative chat playback offsets.
+_Avoid_: VOD timestamp, download date, publish time
+
+**Cursor-Resumable Staging**:
+The partial-state retention strategy that preserves segmented media files and inspects the last recorded playback offset in `vod_chat.jsonl.part` to resume interrupted VOD downloads without refetching preceding data.
+_Avoid_: Download resume, chunk cache, partial retry
+
