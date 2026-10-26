@@ -72,6 +72,12 @@ async fn main() -> anyhow::Result<()> {
             summary.segments_downloaded,
             summary.chat_messages
         );
+        if summary.uploaded {
+            println!(
+                "[INFO] Successfully uploaded VOD #{} artifacts to cloud storage",
+                summary.video_no
+            );
+        }
         return Ok(());
     }
 

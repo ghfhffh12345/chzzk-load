@@ -9,9 +9,11 @@ use chzzk_load::chzzk::models_vod::{
 };
 use chzzk_load::chzzk::source::FakeVodSource;
 use chzzk_load::cli::VodArgs;
+use chzzk_load::config::RcloneConfig;
 use chzzk_load::vod::{VodOptions, run_vod_archival, run_vod_archival_with_options};
 use common::mock_aria2c::get_mock_aria2c_bin;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
+use common::mock_rclone::get_mock_rclone_bin;
 
 const SAMPLE_MASTER_M3U8: &str = r#"#EXTM3U
 #EXT-X-VERSION:3
@@ -118,6 +120,8 @@ async fn test_vod_archival_e2e_full_url_success() {
         no_chat: false,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -185,6 +189,8 @@ async fn test_vod_archival_numeric_id_and_quality_selector() {
         no_chat: false,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -220,14 +226,13 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
         no_chat: false,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let options = VodOptions {
         aria2c_bin: Some("/nonexistent/bin/aria2c_missing_binary".to_string()),
-        ffmpeg_bin: None,
-        temp_dir: None,
-        chat_options: None,
-        coordinator: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -264,6 +269,8 @@ async fn test_vod_archival_cooperative_cancellation() {
         no_chat: false,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -371,6 +378,8 @@ async fn test_vod_archival_with_concurrent_chat_integration() {
         no_chat: false,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -427,6 +436,8 @@ async fn test_vod_archival_no_chat_flag_skips_chat() {
         no_chat: true,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -480,6 +491,8 @@ async fn test_vod_archival_dual_event_metadata_synthesis_and_promotion() {
         no_chat: true,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -554,6 +567,8 @@ async fn test_vod_archival_retains_part_files_and_staging_dir_on_failure() {
         no_chat: false,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -668,6 +683,8 @@ async fn test_vod_archival_resumes_partial_download_skipping_existing_segments()
         no_chat: false,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -731,6 +748,8 @@ async fn test_vod_archival_custom_temp_dir() {
         no_chat: true,
         headless: false,
         config: None,
+        upload: false,
+        delete_after_upload: false,
     };
 
     let cancel_token = CancellationToken::new();
@@ -749,6 +768,318 @@ async fn test_vod_archival_custom_temp_dir() {
     assert!(
         !custom_staging.exists(),
         "custom staging dir in temp_dir must be purged upon success"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[tokio::test]
+async fn test_vod_archival_upload_preflight_failure() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_up_preflight_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let video_no = 111222;
+    let source = Arc::new(create_fake_vod_source(
+        video_no,
+        "v_preflight",
+        "key_preflight",
+    ));
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: false,
+        config: None,
+        upload: true,
+        delete_after_upload: false,
+    };
+
+    let options = VodOptions {
+        rclone_config: Some(RcloneConfig {
+            remote_path: "remote:fail_conn_bucket".to_string(),
+            upload_concurrency: 1,
+            rclone_bin: "rclone".to_string(),
+            extra_args: vec![],
+            consolidate_extra_args: vec![],
+            skip_connection_check: false,
+        }),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let err = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect_err("Pre-flight rclone check failure must abort pipeline");
+
+    let err_msg = format!("{err:#}");
+    assert!(
+        err_msg.contains("Pre-flight rclone remote connection validation check failed")
+            || err_msg.contains("rclone connection check failed"),
+        "Error message must report pre-flight connection failure: {err_msg}"
+    );
+
+    // Verify no output subfolder was created
+    let entries: Vec<_> = std::fs::read_dir(&temp_dir).unwrap().collect();
+    assert!(
+        entries.is_empty(),
+        "No subfolders should be created on pre-flight failure"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_upload_default_retention_preserves_local_files() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let temp_root =
+        std::env::temp_dir().join(format!("test_vod_up_retain_{}", rand::random::<u32>()));
+    let local_output = temp_root.join("local_vods");
+    let remote_storage = temp_root.join("cloud_storage");
+    std::fs::create_dir_all(&local_output).unwrap();
+    std::fs::create_dir_all(&remote_storage).unwrap();
+
+    let video_no = 222333;
+    let video_id = "v_upload_retain";
+    let in_key = "key_up_retain";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let remote_path_str = format!("remote:{}", remote_storage.to_string_lossy());
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(local_output.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: false,
+        config: None,
+        upload: true,
+        delete_after_upload: false,
+    };
+
+    let options = VodOptions {
+        rclone_config: Some(RcloneConfig {
+            remote_path: remote_path_str,
+            upload_concurrency: 1,
+            rclone_bin: "rclone".to_string(),
+            extra_args: vec![],
+            consolidate_extra_args: vec![],
+            skip_connection_check: false,
+        }),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect("VOD archival with upload should succeed");
+
+    assert!(summary.uploaded, "summary.uploaded must be true");
+
+    // 1. Verify local files are PRESERVED by default
+    assert!(
+        summary.video_path.exists(),
+        "Local vod.mp4 must remain on disk"
+    );
+    assert!(
+        summary.chat_path.as_ref().unwrap().exists(),
+        "Local vod_chat.jsonl must remain on disk"
+    );
+    assert!(
+        summary.metadata_path.exists(),
+        "Local vod_metadata.jsonl must remain on disk"
+    );
+
+    // 2. Verify remote files exist at promoted destination
+    let folder_name = summary.output_dir.file_name().unwrap();
+    let remote_folder = remote_storage.join(folder_name);
+    let remote_video = remote_folder.join("vod.mp4");
+    let remote_chat = remote_folder.join("vod_chat.jsonl");
+    let remote_metadata = remote_folder.join("vod_metadata.jsonl");
+
+    assert!(remote_video.exists(), "Remote vod.mp4 must exist");
+    assert!(remote_chat.exists(), "Remote vod_chat.jsonl must exist");
+    assert!(
+        remote_metadata.exists(),
+        "Remote vod_metadata.jsonl must exist"
+    );
+
+    // 3. Verify remote .part files were promoted and no longer exist
+    assert!(
+        !remote_folder.join("vod.mp4.part").exists(),
+        "Remote vod.mp4.part must be promoted"
+    );
+    assert!(
+        !remote_folder.join("vod_chat.jsonl.part").exists(),
+        "Remote vod_chat.jsonl.part must be promoted"
+    );
+    assert!(
+        !remote_folder.join("vod_metadata.jsonl.part").exists(),
+        "Remote vod_metadata.jsonl.part must be promoted"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[tokio::test]
+async fn test_vod_archival_upload_delete_after_upload_purges_local_files() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let temp_root = std::env::temp_dir().join(format!("test_vod_up_del_{}", rand::random::<u32>()));
+    let local_output = temp_root.join("local_vods");
+    let remote_storage = temp_root.join("cloud_storage");
+    std::fs::create_dir_all(&local_output).unwrap();
+    std::fs::create_dir_all(&remote_storage).unwrap();
+
+    let video_no = 333444;
+    let video_id = "v_upload_del";
+    let in_key = "key_up_del";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let remote_path_str = format!("remote:{}", remote_storage.to_string_lossy());
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(local_output.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: false,
+        config: None,
+        upload: true,
+        delete_after_upload: true,
+    };
+
+    let options = VodOptions {
+        rclone_config: Some(RcloneConfig {
+            remote_path: remote_path_str,
+            upload_concurrency: 1,
+            rclone_bin: "rclone".to_string(),
+            extra_args: vec![],
+            consolidate_extra_args: vec![],
+            skip_connection_check: false,
+        }),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect("VOD archival with upload and --delete-after-upload should succeed");
+
+    assert!(summary.uploaded, "summary.uploaded must be true");
+
+    // 1. Verify remote files exist
+    let folder_name = summary.output_dir.file_name().unwrap();
+    let remote_folder = remote_storage.join(folder_name);
+    assert!(
+        remote_folder.join("vod.mp4").exists(),
+        "Remote vod.mp4 must exist"
+    );
+    assert!(
+        remote_folder.join("vod_chat.jsonl").exists(),
+        "Remote vod_chat.jsonl must exist"
+    );
+    assert!(
+        remote_folder.join("vod_metadata.jsonl").exists(),
+        "Remote vod_metadata.jsonl must exist"
+    );
+
+    // 2. Verify local files are PURGED post-upload
+    assert!(!summary.video_path.exists(), "Local vod.mp4 must be purged");
+    assert!(
+        !summary.chat_path.as_ref().unwrap().exists(),
+        "Local vod_chat.jsonl must be purged"
+    );
+    assert!(
+        !summary.metadata_path.exists(),
+        "Local vod_metadata.jsonl must be purged"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[tokio::test]
+async fn test_vod_archival_upload_failure_preserves_local_artifacts() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let temp_root = std::env::temp_dir().join(format!("test_vod_up_err_{}", rand::random::<u32>()));
+    let local_output = temp_root.join("local_vods");
+    let remote_storage = temp_root.join("fail_copy_remote");
+    std::fs::create_dir_all(&local_output).unwrap();
+    std::fs::create_dir_all(&remote_storage).unwrap();
+
+    let video_no = 444555;
+    let video_id = "v_upload_test_id";
+    let in_key = "key_up_test";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let remote_path_str = format!("remote:{}", remote_storage.to_string_lossy());
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(local_output.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: false,
+        config: None,
+        upload: true,
+        delete_after_upload: true, // even if delete_after_upload is set, failures MUST preserve local files
+    };
+
+    let options = VodOptions {
+        rclone_config: Some(RcloneConfig {
+            remote_path: remote_path_str,
+            upload_concurrency: 1,
+            rclone_bin: "rclone".to_string(),
+            extra_args: vec![],
+            consolidate_extra_args: vec![],
+            skip_connection_check: false,
+        }),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let err = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect_err("Upload failure must return error");
+
+    let err_msg = format!("{err:#}");
+    assert!(
+        err_msg.contains("cloud upload failed") || err_msg.contains("rclone failed"),
+        "Error message must clearly report upload failure: {err_msg}"
+    );
+
+    // Verify local files are strictly preserved
+    let folder_name = "[2026-09-30_110000] ProGamer - Chzzk Live Replay";
+    let output_dir = local_output.join(folder_name);
+    assert!(
+        output_dir.join("vod.mp4").exists(),
+        "Local vod.mp4 must be preserved on upload failure"
+    );
+    assert!(
+        output_dir.join("vod_chat.jsonl").exists(),
+        "Local vod_chat.jsonl must be preserved on upload failure"
+    );
+    assert!(
+        output_dir.join("vod_metadata.jsonl").exists(),
+        "Local vod_metadata.jsonl must be preserved on upload failure"
     );
 
     let _ = std::fs::remove_dir_all(&temp_root);

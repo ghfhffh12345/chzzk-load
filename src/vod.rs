@@ -6,6 +6,7 @@ pub mod naming;
 pub mod progress;
 pub mod remux;
 pub mod target;
+pub mod upload;
 
 use anyhow::{Context, Result, anyhow, bail};
 use std::io::IsTerminal;
@@ -48,6 +49,7 @@ pub use remux::{
     build_vod_concat_args, generate_vod_concat_script, remux_vod_to_staged, resolve_ffmpeg_bin,
 };
 pub use target::parse_video_target;
+pub use upload::{VodArtifactTriad, upload_vod_artifacts, validate_remote_connection};
 
 /// Summary metrics returned upon successful VOD ingestion and archival.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +63,7 @@ pub struct VodArchivalSummary {
     pub metadata_path: PathBuf,
     pub segments_downloaded: usize,
     pub chat_messages: usize,
+    pub uploaded: bool,
 }
 
 /// Optional execution configuration for VOD archival sessions.
@@ -68,6 +71,8 @@ pub struct VodArchivalSummary {
 pub struct VodOptions {
     pub aria2c_bin: Option<String>,
     pub ffmpeg_bin: Option<String>,
+    pub rclone_bin: Option<String>,
+    pub rclone_config: Option<crate::config::RcloneConfig>,
     pub temp_dir: Option<PathBuf>,
     pub chat_options: Option<VodChatPaginationOptions>,
     pub coordinator: Option<VodProgressCoordinator>,
@@ -117,6 +122,24 @@ pub async fn run_vod_archival_with_options(
     ensure_aria2c_available(&aria2c_bin).await?;
 
     let ffmpeg_bin = resolve_ffmpeg_bin(options.ffmpeg_bin.as_deref());
+
+    // Resolve rclone backend and run pre-flight remote path validation check if --upload is set
+    let rclone_backend = if args.upload {
+        let rclone_config = options
+            .rclone_config
+            .clone()
+            .unwrap_or_else(|| settings.rclone.clone());
+        let rclone_bin = crate::consolidation::manifest::resolve_rclone_bin_with_config(
+            options.rclone_bin.as_deref(),
+            Some(&rclone_config.rclone_bin),
+        );
+        let backend =
+            crate::uploader::rclone::RcloneBackend::new(rclone_config).with_bin(rclone_bin);
+        validate_remote_connection(&backend).await?;
+        Some(backend)
+    } else {
+        None
+    };
 
     if cancel_token.is_cancelled() {
         bail!("VOD archival cancelled before fetching metadata");
@@ -185,7 +208,7 @@ pub async fn run_vod_archival_with_options(
         .and_then(|c| c.alias.clone());
 
     let folder_name = resolve_vod_folder_name(&detail, alias.as_deref());
-    let output_dir = base_dir.join(folder_name);
+    let output_dir = base_dir.join(&folder_name);
 
     tokio::fs::create_dir_all(&output_dir)
         .await
@@ -386,6 +409,24 @@ pub async fn run_vod_archival_with_options(
     // 15. Automatically purge staging directory upon successful remux & promotion
     let _ = remove_dir_all_with_retry(&staging_dir).await;
 
+    // 16. Cloud synchronization if --upload requested
+    if let Some(ref backend) = rclone_backend {
+        let artifacts = VodArtifactTriad {
+            video_path: &finalized_video_path,
+            chat_path: final_chat_path.as_deref(),
+            metadata_path: &finalized_metadata_path,
+        };
+        upload_vod_artifacts(
+            backend,
+            &folder_name,
+            artifacts,
+            args.delete_after_upload,
+            cancel_token.clone(),
+        )
+        .await
+        .context("VOD cloud upload failed")?;
+    }
+
     Ok(VodArchivalSummary {
         video_no,
         title: detail.video_title,
@@ -396,5 +437,6 @@ pub async fn run_vod_archival_with_options(
         metadata_path: finalized_metadata_path,
         segments_downloaded: segments.len(),
         chat_messages,
+        uploaded: rclone_backend.is_some(),
     })
 }

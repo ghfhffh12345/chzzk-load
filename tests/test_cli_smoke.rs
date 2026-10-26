@@ -489,10 +489,12 @@ fn test_cli_vod_subcommand_parsing() {
             no_chat: false,
             headless: false,
             config: None,
+            upload: false,
+            delete_after_upload: false,
         }))
     );
 
-    // 2. Numeric ID with all flags including headless and temp-dir
+    // 2. Numeric ID with all flags including headless, temp-dir, upload, and delete-after-upload
     let cli_full = Cli::try_parse_from([
         "chzzk-load",
         "vod",
@@ -507,6 +509,8 @@ fn test_cli_vod_subcommand_parsing() {
         "--headless",
         "-c",
         "custom_settings.toml",
+        "--upload",
+        "--delete-after-upload",
     ])
     .expect("Parsing vod command with flags should succeed");
     assert_eq!(
@@ -519,6 +523,8 @@ fn test_cli_vod_subcommand_parsing() {
             no_chat: true,
             headless: true,
             config: Some(std::path::PathBuf::from("custom_settings.toml")),
+            upload: true,
+            delete_after_upload: true,
         }))
     );
 
@@ -553,6 +559,14 @@ fn test_cli_vod_subcommand_parsing() {
     assert!(
         sub_stdout.contains("--temp-dir"),
         "Subcommand help must contain --temp-dir: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--upload"),
+        "Subcommand help must contain --upload: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--delete-after-upload"),
+        "Subcommand help must contain --delete-after-upload: {sub_stdout}"
     );
 }
 

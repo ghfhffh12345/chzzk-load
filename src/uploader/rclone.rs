@@ -42,6 +42,26 @@ struct RcloneLogEntry {
     pub stats: Option<RcloneStats>,
 }
 
+fn format_rclone_output_error(
+    operation: &str,
+    target: &str,
+    output: &std::process::Output,
+) -> String {
+    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    let trimmed = stderr_str.trim();
+    if trimmed.is_empty() {
+        format!(
+            "rclone {operation} failed for '{target}' with status {}",
+            output.status
+        )
+    } else {
+        format!(
+            "rclone {operation} failed for '{target}' with status {}: {trimmed}",
+            output.status
+        )
+    }
+}
+
 /// Parses an rclone JSON log line containing transfer statistics.
 /// Returns `None` if the line is not JSON or does not contain `stats`.
 pub fn parse_rclone_log_line(line: &str) -> Option<RcloneStats> {
@@ -135,6 +155,140 @@ impl RcloneBackend {
         }
         cmd
     }
+
+    /// Builds a `tokio::process::Command` configured for `rclone moveto`.
+    pub fn build_move_command(
+        &self,
+        remote_src: &str,
+        remote_dst: &str,
+    ) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(self.resolve_bin());
+        cmd.kill_on_drop(true);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.arg("moveto").arg(remote_src).arg(remote_dst);
+        for arg in &self.config.extra_args {
+            cmd.arg(arg);
+        }
+        cmd
+    }
+
+    /// Builds a `tokio::process::Command` configured for `rclone deletefile`.
+    pub fn build_delete_command(&self, remote_path: &str) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(self.resolve_bin());
+        cmd.kill_on_drop(true);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.arg("deletefile").arg(remote_path);
+        for arg in &self.config.extra_args {
+            cmd.arg(arg);
+        }
+        cmd
+    }
+
+    /// Atomically renames/moves a remote file from `remote_src` to `remote_dst` via `rclone moveto`.
+    pub async fn move_file(&self, remote_src: &str, remote_dst: &str) -> anyhow::Result<()> {
+        let bin = self.resolve_bin();
+        let mut cmd = self.build_move_command(remote_src, remote_dst);
+        let output = cmd
+            .output()
+            .await
+            .with_context(|| format!("failed to execute rclone moveto from '{bin}'"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let target = format!("{remote_src}' -> '{remote_dst}");
+            anyhow::bail!("{}", format_rclone_output_error("moveto", &target, &output));
+        }
+    }
+
+    /// Deletes a remote file via `rclone deletefile`.
+    ///
+    /// Exit code 4 in rclone denotes "directory or object not found", which is treated as success.
+    pub async fn delete_file(&self, remote_path: &str) -> anyhow::Result<()> {
+        let bin = self.resolve_bin();
+        let mut cmd = self.build_delete_command(remote_path);
+        let output = cmd
+            .output()
+            .await
+            .with_context(|| format!("failed to execute rclone deletefile from '{bin}'"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            if output.status.code() == Some(4) {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "{}",
+                format_rclone_output_error("deletefile", remote_path, &output)
+            );
+        }
+    }
+
+    /// Uploads a local file directly to a designated `remote_dest` via `rclone copyto`.
+    pub async fn upload_file_to_dest(
+        &self,
+        local_path: &Path,
+        remote_dest: &str,
+        on_progress: ProgressCallback,
+    ) -> anyhow::Result<u64> {
+        let metadata = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("failed to read local file metadata: {local_path:?}"))?;
+        let file_size = metadata.len();
+
+        let bin = self.resolve_bin();
+        let mut cmd = self.build_copy_command(local_path, remote_dest);
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn rclone copyto from '{bin}'"))?;
+
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture stderr from rclone process"))?;
+
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        let mut last_speed = 0.0;
+        let mut stderr_logs = Vec::new();
+
+        while let Ok(Some(line)) = reader.next_line().await {
+            if let Some(stats) = parse_rclone_log_line(&line) {
+                let total = if stats.total_bytes > 0 {
+                    stats.total_bytes
+                } else {
+                    file_size
+                };
+                let speed_mb_s = stats.speed / 1_048_576.0;
+                last_speed = speed_mb_s;
+                on_progress(stats.bytes, total, speed_mb_s);
+            } else {
+                if stderr_logs.len() >= 30 {
+                    stderr_logs.remove(0);
+                }
+                stderr_logs.push(line);
+            }
+        }
+
+        let status = child
+            .wait()
+            .await
+            .with_context(|| "failed to wait for rclone copyto process")?;
+        if status.success() {
+            on_progress(file_size, file_size, last_speed);
+            Ok(file_size)
+        } else {
+            let err_msg = stderr_logs.join("\n");
+            let trimmed = err_msg.trim();
+            if trimmed.is_empty() {
+                anyhow::bail!("rclone failed with status {status}");
+            } else {
+                anyhow::bail!("rclone failed with status {status}: {trimmed}");
+            }
+        }
+    }
 }
 
 impl UploadBackend for RcloneBackend {
@@ -145,67 +299,13 @@ impl UploadBackend for RcloneBackend {
         on_progress: ProgressCallback,
     ) -> BoxFuture<'a, anyhow::Result<u64>> {
         Box::pin(async move {
-            let metadata = tokio::fs::metadata(local_path)
-                .await
-                .with_context(|| format!("failed to read local file metadata: {local_path:?}"))?;
-            let file_size = metadata.len();
             let file_name = local_path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| anyhow::anyhow!("invalid local file path: {local_path:?}"))?;
             let remote_dest = format_destination(&self.config.remote_path, remote_dir, file_name);
-
-            let bin = self.resolve_bin();
-            let mut cmd = self.build_copy_command(local_path, &remote_dest);
-            let mut child = cmd
-                .spawn()
-                .with_context(|| format!("failed to spawn rclone copyto from '{bin}'"))?;
-
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("failed to capture stderr from rclone process"))?;
-
-            let mut reader = tokio::io::BufReader::new(stderr).lines();
-            let mut last_speed = 0.0;
-            let mut stderr_logs = Vec::new();
-
-            while let Ok(Some(line)) = reader.next_line().await {
-                if let Some(stats) = parse_rclone_log_line(&line) {
-                    let total = if stats.total_bytes > 0 {
-                        stats.total_bytes
-                    } else {
-                        file_size
-                    };
-                    let speed_mb_s = stats.speed / 1_048_576.0;
-                    last_speed = speed_mb_s;
-                    on_progress(stats.bytes, total, speed_mb_s);
-                } else {
-                    if stderr_logs.len() >= 30 {
-                        stderr_logs.remove(0);
-                    }
-                    stderr_logs.push(line);
-                }
-            }
-
-            let status = child
-                .wait()
+            self.upload_file_to_dest(local_path, &remote_dest, on_progress)
                 .await
-                .with_context(|| "failed to wait for rclone copyto process")?;
-            if status.success() {
-                on_progress(file_size, file_size, last_speed);
-                Ok(file_size)
-            } else {
-                let err_msg = stderr_logs.join("\n");
-                let trimmed = err_msg.trim();
-                if trimmed.is_empty() {
-                    Err(anyhow::anyhow!("rclone failed with status {status}"))
-                } else {
-                    Err(anyhow::anyhow!(
-                        "rclone failed with status {status}: {trimmed}"
-                    ))
-                }
-            }
         })
     }
 

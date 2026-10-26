@@ -80,6 +80,19 @@ pub struct VodArgs {
         help = "Path to dedicated settings.toml file"
     )]
     pub config: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Upload completed VOD artifacts to remote cloud storage via rclone"
+    )]
+    pub upload: bool,
+
+    #[arg(
+        long,
+        requires = "upload",
+        help = "Delete local VOD files after successful cloud upload (retained locally by default)"
+    )]
+    pub delete_after_upload: bool,
 }
 
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]

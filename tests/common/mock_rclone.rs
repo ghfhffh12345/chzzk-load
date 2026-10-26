@@ -132,8 +132,18 @@ fn main() {
                     file_size, file_size
                 );
             }
+            if let Some(parent) = std::path::Path::new(&local_dst).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             if let Err(err) = std::fs::copy(&local_src, &local_dst) {
                 eprintln!("mock error: copy {} to {} failed: {}", local_src, local_dst, err);
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
+        "lsf" => {
+            if args.iter().any(|a| a.contains("fail_conn") || a.contains("fail_check")) {
+                eprintln!("mock error: failed to connect to remote target");
                 std::process::exit(1);
             }
             std::process::exit(0);
@@ -148,6 +158,9 @@ fn main() {
             let local_src = resolve_path(src);
             let local_dst = resolve_path(dst);
             let _ = std::fs::remove_file(&local_dst);
+            if let Some(parent) = std::path::Path::new(&local_dst).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             if let Err(err) = std::fs::rename(&local_src, &local_dst) {
                 eprintln!("mock error: rename {} to {} failed: {}", local_src, local_dst, err);
                 std::process::exit(1);
