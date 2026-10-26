@@ -63,10 +63,11 @@ async fn main() -> anyhow::Result<()> {
 
         let summary = chzzk_load::vod::run_vod_archival(vod_args, client, cancel_token).await?;
         println!(
-            "[INFO] Successfully archived VOD #{} to '{}' ({} segments)",
+            "[INFO] Successfully archived VOD #{} to '{}' ({} segments, {} chat messages)",
             summary.video_no,
             summary.video_path.display(),
-            summary.segments_downloaded
+            summary.segments_downloaded,
+            summary.chat_messages
         );
         return Ok(());
     }

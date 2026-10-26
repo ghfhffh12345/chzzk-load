@@ -738,6 +738,7 @@ fn test_recorded_chat_message_serde() {
         user_id_hash: Some("hash123".to_string()),
         content: "Hello world!".to_string(),
         donation_amount: Some(1000),
+        player_message_time: None,
         extras: Some(serde_json::json!({"emojis": {}})),
         raw: serde_json::json!({"cmd": 93101}),
     };

@@ -7,7 +7,7 @@ use crate::chzzk::models::{
 };
 use crate::chzzk::models_chat::ChatAccessTokenResponse;
 use crate::chzzk::models_metadata::{CategoryType, StreamAccessTier, StreamMetadataState};
-use crate::chzzk::models_vod::{VodDetail, VodPlaybackInfo};
+use crate::chzzk::models_vod::{VodChatError, VodChatPage, VodDetail, VodPlaybackInfo};
 use crate::chzzk::source::{BoxFuture, LiveStreamSource, VodSource};
 use crate::config::ChzzkConfig;
 
@@ -571,6 +571,52 @@ impl ChzzkClient {
         let text = resp.text().await?;
         Ok(text)
     }
+
+    pub async fn get_chat_page(
+        &self,
+        video_no: u64,
+        player_message_time: u64,
+    ) -> Result<VodChatPage, VodChatError> {
+        let url = format!(
+            "{}/service/v1/videos/{video_no}/chats?playerMessageTime={player_message_time}",
+            self.base_url
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(VodChatError::RateLimited);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(VodChatError::Unavailable(format!(
+                "Not Found (404) for video {video_no}"
+            )));
+        }
+        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(VodChatError::Unavailable(format!(
+                "Access restricted ({status}) for video {video_no}"
+            )));
+        }
+        let resp = resp
+            .error_for_status()
+            .with_context(|| format!("HTTP error fetching VOD chat for {video_no} at {url}"))?;
+        let body: ChzzkResponse<VodChatPage> = resp
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse VOD chat JSON for {video_no}"))?;
+        if body.code != 200 {
+            let msg = body.message.unwrap_or_else(|| "Unknown error".to_string());
+            return Err(VodChatError::Unavailable(format!(
+                "API error code {}: {}",
+                body.code, msg
+            )));
+        }
+        Ok(body.content.unwrap_or_default())
+    }
 }
 
 impl LiveStreamSource for ChzzkClient {
@@ -612,6 +658,14 @@ impl VodSource for ChzzkClient {
 
     fn fetch_hls_playlist<'a>(&'a self, url: &'a str) -> BoxFuture<'a, anyhow::Result<String>> {
         Box::pin(self.fetch_hls_playlist(url))
+    }
+
+    fn get_chat_page<'a>(
+        &'a self,
+        video_no: u64,
+        player_message_time: u64,
+    ) -> BoxFuture<'a, Result<VodChatPage, VodChatError>> {
+        Box::pin(self.get_chat_page(video_no, player_message_time))
     }
 
     fn cookie_header(&self) -> Option<&str> {

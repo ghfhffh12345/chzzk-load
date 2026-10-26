@@ -80,9 +80,76 @@ pub struct VodEncodingOption {
     pub name: Option<String>,
 }
 
+/// Paginated VOD chat response payload representing a slice of chat history across the timeline.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VodChatPage {
+    #[serde(default, alias = "chats", alias = "videoChats")]
+    pub video_chats: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub next_player_message_time: Option<u64>,
+}
+
+/// Typed error outcomes encountered during VOD chat pagination.
+#[derive(Debug, thiserror::Error)]
+pub enum VodChatError {
+    #[error("Rate limited (HTTP 429 Too Many Requests)")]
+    RateLimited,
+    #[error("VOD chat unavailable or disabled: {0}")]
+    Unavailable(String),
+    #[error("API network or parsing error: {0}")]
+    Transport(#[from] anyhow::Error),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_vod_chat_page_deserialization_with_video_chats() {
+        let json = r#"{
+            "videoChats": [
+                {
+                    "messageTime": 1711234567890,
+                    "playerMessageTime": 12000,
+                    "content": "hello from VOD"
+                }
+            ],
+            "nextPlayerMessageTime": 25000
+        }"#;
+
+        let page: VodChatPage = serde_json::from_str(json).unwrap();
+        assert_eq!(page.video_chats.len(), 1);
+        assert_eq!(page.next_player_message_time, Some(25000));
+        assert_eq!(page.video_chats[0]["playerMessageTime"], 12000);
+        assert_eq!(page.video_chats[0]["content"], "hello from VOD");
+    }
+
+    #[test]
+    fn test_vod_chat_page_deserialization_with_chats_alias() {
+        let json = r#"{
+            "chats": [
+                {
+                    "messageTime": 1711234570000,
+                    "playerMessageTime": 30000,
+                    "msg": "another chat"
+                }
+            ]
+        }"#;
+
+        let page: VodChatPage = serde_json::from_str(json).unwrap();
+        assert_eq!(page.video_chats.len(), 1);
+        assert_eq!(page.next_player_message_time, None);
+        assert_eq!(page.video_chats[0]["msg"], "another chat");
+    }
+
+    #[test]
+    fn test_vod_chat_page_empty_deserialization() {
+        let json = r#"{}"#;
+        let page: VodChatPage = serde_json::from_str(json).unwrap();
+        assert!(page.video_chats.is_empty());
+        assert_eq!(page.next_player_message_time, None);
+    }
 
     #[test]
     fn test_vod_detail_deserialization() {

@@ -56,6 +56,9 @@ pub struct VodArgs {
     )]
     pub output_dir: Option<PathBuf>,
 
+    #[arg(long, help = "Skip chat history pagination and archiving entirely")]
+    pub no_chat: bool,
+
     #[arg(
         short,
         long,

@@ -1,4 +1,5 @@
 pub mod aria2c;
+pub mod chat;
 pub mod manifest;
 pub mod naming;
 pub mod remux;
@@ -19,10 +20,17 @@ pub use aria2c::{
     download_segments_with_aria2c, ensure_aria2c_available, generate_aria2c_input_file,
     resolve_aria2c_bin,
 };
+pub use chat::{
+    VodChatArchivalSummary, VodChatPaginationOptions, VodChatStagedSummary, VodChatTarget,
+    normalize_vod_chat_message, paginate_vod_chat, paginate_vod_chat_to_staged,
+    probe_last_chat_player_time, promote_vod_chat,
+};
 pub use manifest::{
     HlsVariant, VodSegment, parse_master_playlist, parse_variant_playlist, select_variant,
 };
-pub use naming::{format_broadcast_anchor_timestamp, resolve_vod_folder_name};
+pub use naming::{
+    format_broadcast_anchor_timestamp, parse_broadcast_anchor_timestamp_ms, resolve_vod_folder_name,
+};
 pub use remux::{
     build_vod_concat_args, generate_vod_concat_script, remux_vod_to_staged, resolve_ffmpeg_bin,
 };
@@ -36,7 +44,9 @@ pub struct VodArchivalSummary {
     pub streamer: String,
     pub output_dir: PathBuf,
     pub video_path: PathBuf,
+    pub chat_path: Option<PathBuf>,
     pub segments_downloaded: usize,
+    pub chat_messages: usize,
 }
 
 /// Optional execution configuration for VOD archival sessions.
@@ -44,6 +54,7 @@ pub struct VodArchivalSummary {
 pub struct VodOptions {
     pub aria2c_bin: Option<String>,
     pub ffmpeg_bin: Option<String>,
+    pub chat_options: Option<VodChatPaginationOptions>,
 }
 
 /// Coordinates the end-to-end VOD ingestion pipeline:
@@ -163,7 +174,31 @@ pub async fn run_vod_archival_with_options(
             )
         })?;
 
-    // 6. Staging directory: .vod_staging_<video_id>/ inside output folder
+    // 6. Concurrently paginate VOD chat history if not opted out via --no-chat
+    let chat_task = if !args.no_chat {
+        let chat_source = Arc::clone(&source);
+        let chat_cancel = cancel_token.clone();
+        let chat_options = options.chat_options.clone().unwrap_or_default();
+        let duration_ms = detail.duration.map(|d| d * 1000).unwrap_or(u64::MAX);
+        let anchor_time_ms = parse_broadcast_anchor_timestamp_ms(
+            detail.live_open_date.as_deref(),
+            detail.publish_date.as_deref(),
+        );
+        let chat_target = VodChatTarget {
+            video_no,
+            duration_ms,
+            anchor_time_ms,
+            output_dir: output_dir.clone(),
+        };
+
+        Some(tokio::spawn(async move {
+            paginate_vod_chat_to_staged(chat_source, chat_target, chat_options, chat_cancel).await
+        }))
+    } else {
+        None
+    };
+
+    // 7. Staging directory: .vod_staging_<video_id>/ inside output folder
     let staging_dir = output_dir.join(format!(".vod_staging_{}", detail.video_id));
     tokio::fs::create_dir_all(&staging_dir)
         .await
@@ -174,7 +209,7 @@ pub async fn run_vod_archival_with_options(
             )
         })?;
 
-    // 7. Write aria2c input batch file
+    // 8. Write aria2c input batch file
     let input_file = staging_dir.join("input_segments.txt");
     let batch_content = generate_aria2c_input_file(&segments);
     tokio::fs::write(&input_file, batch_content.as_bytes())
@@ -186,17 +221,20 @@ pub async fn run_vod_archival_with_options(
             )
         })?;
 
-    // 8. Download video segments via aria2c
+    // 9. Download video segments via aria2c
     let download_res =
         download_segments_with_aria2c(&aria2c_bin, &staging_dir, &input_file, cancel_token.clone())
             .await;
 
     if let Err(err) = download_res {
+        if let Some(ref task) = chat_task {
+            task.abort();
+        }
         let _ = remove_dir_all_with_retry(&staging_dir).await;
         return Err(err);
     }
 
-    // 9. Remux via FFmpeg Concat Demuxer to staged vod.mp4.part
+    // 10. Remux via FFmpeg Concat Demuxer to staged vod.mp4.part
     let staged_path = match remux_vod_to_staged(
         &ffmpeg_bin,
         &staging_dir,
@@ -208,22 +246,62 @@ pub async fn run_vod_archival_with_options(
     {
         Ok(path) => path,
         Err(err) => {
+            if let Some(ref task) = chat_task {
+                task.abort();
+            }
             let _ = remove_dir_all_with_retry(&staging_dir).await;
             return Err(err);
         }
     };
 
-    // 10. Two-Stage Atomic Promotion at orchestrator seam: rename vod.mp4.part -> vod.mp4
+    // 11. Await concurrent chat pagination completion prior to any file promotion
+    let chat_summary = if let Some(task) = chat_task {
+        match task.await {
+            Ok(Ok(summary)) => Some(summary),
+            Ok(Err(err)) => {
+                let _ = crate::uploader::unlink_local_file_with_retry(&staged_path).await;
+                let _ = remove_dir_all_with_retry(&staging_dir).await;
+                return Err(err).context("VOD chat pagination failed");
+            }
+            Err(join_err) => {
+                let _ = crate::uploader::unlink_local_file_with_retry(&staged_path).await;
+                let _ = remove_dir_all_with_retry(&staging_dir).await;
+                return Err(anyhow!("VOD chat pagination task panicked: {join_err}"));
+            }
+        }
+    } else {
+        None
+    };
+
+    // 12. Two-Stage Atomic Promotion at orchestrator seam:
+    // Only promote staged files after all concurrent futures succeed with zero-exit status
     let finalized_video_path = output_dir.join("vod.mp4");
     if let Err(err) =
         crate::uploader::rename_local_file_with_retry(&staged_path, &finalized_video_path).await
     {
         let _ = crate::uploader::unlink_local_file_with_retry(&staged_path).await;
+        if let Some(ref chat) = chat_summary {
+            let _ = crate::uploader::unlink_local_file_with_retry(&chat.part_path).await;
+        }
         let _ = remove_dir_all_with_retry(&staging_dir).await;
-        return Err(err).context("Failed to promote staged VOD to final destination");
+        return Err(err).context("Failed to promote staged VOD video to final destination");
     }
 
-    // 11. Automatically purge staging directory upon successful remux & promotion
+    let (final_chat_path, chat_messages) = if let Some(chat) = chat_summary {
+        if chat.part_path != chat.final_path {
+            if let Err(err) = promote_vod_chat(&chat.part_path, &chat.final_path).await {
+                let _ = crate::uploader::unlink_local_file_with_retry(&finalized_video_path).await;
+                let _ = crate::uploader::unlink_local_file_with_retry(&chat.part_path).await;
+                let _ = remove_dir_all_with_retry(&staging_dir).await;
+                return Err(err).context("Failed to promote staged VOD chat to final destination");
+            }
+        }
+        (Some(chat.final_path), chat.message_count)
+    } else {
+        (None, 0)
+    };
+
+    // 13. Automatically purge staging directory upon successful remux & promotion
     let _ = remove_dir_all_with_retry(&staging_dir).await;
 
     Ok(VodArchivalSummary {
@@ -232,6 +310,8 @@ pub async fn run_vod_archival_with_options(
         streamer: detail.channel.channel_name,
         output_dir,
         video_path: finalized_video_path,
+        chat_path: final_chat_path,
         segments_downloaded: segments.len(),
+        chat_messages,
     })
 }

@@ -485,6 +485,7 @@ fn test_cli_vod_subcommand_parsing() {
             target: "https://chzzk.naver.com/video/4531238".to_string(),
             quality: "best".to_string(),
             output_dir: None,
+            no_chat: false,
             config: None,
         }))
     );
@@ -498,6 +499,7 @@ fn test_cli_vod_subcommand_parsing() {
         "720p",
         "-o",
         "/custom/vods",
+        "--no-chat",
         "-c",
         "custom_settings.toml",
     ])
@@ -508,6 +510,7 @@ fn test_cli_vod_subcommand_parsing() {
             target: "4531238".to_string(),
             quality: "720p".to_string(),
             output_dir: Some(std::path::PathBuf::from("/custom/vods")),
+            no_chat: true,
             config: Some(std::path::PathBuf::from("custom_settings.toml")),
         }))
     );

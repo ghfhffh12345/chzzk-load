@@ -114,6 +114,7 @@ async fn test_vod_archival_e2e_full_url_success() {
         target: format!("https://chzzk.naver.com/video/{video_no}?extra=true"),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        no_chat: false,
         config: None,
     };
 
@@ -172,6 +173,7 @@ async fn test_vod_archival_numeric_id_and_quality_selector() {
         target: video_no.to_string(),
         quality: "720p".to_string(),
         output_dir: Some(temp_dir.clone()),
+        no_chat: false,
         config: None,
     };
 
@@ -204,12 +206,14 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
         target: video_no.to_string(),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        no_chat: false,
         config: None,
     };
 
     let options = VodOptions {
         aria2c_bin: Some("/nonexistent/bin/aria2c_missing_binary".to_string()),
         ffmpeg_bin: None,
+        chat_options: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -242,6 +246,7 @@ async fn test_vod_archival_cooperative_cancellation() {
         target: video_no.to_string(),
         quality: "best".to_string(),
         output_dir: Some(temp_dir.clone()),
+        no_chat: false,
         config: None,
     };
 
@@ -256,6 +261,177 @@ async fn test_vod_archival_cooperative_cancellation() {
         format!("{err:#}").contains("cancelled"),
         "Error should indicate cancellation: {err:#}"
     );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_fake_vod_source_chat_paging_and_queues() {
+    use chzzk_load::chzzk::models_vod::{VodChatError, VodChatPage};
+    use chzzk_load::chzzk::source::VodSource;
+
+    let source = FakeVodSource::new();
+    let video_no = 12345;
+
+    // Enqueue a 429 error followed by a successful page
+    source.enqueue_chat_page_response(video_no, 0, Err(VodChatError::RateLimited));
+    source.enqueue_chat_page_response(
+        video_no,
+        0,
+        Ok(VodChatPage {
+            video_chats: vec![serde_json::json!({
+                "playerMessageTime": 5000,
+                "content": "message after retry"
+            })],
+            next_player_message_time: Some(10000),
+        }),
+    );
+
+    // First call returns 429 error
+    let err = source
+        .get_chat_page(video_no, 0)
+        .await
+        .expect_err("Expected 429 error");
+    assert!(matches!(err, VodChatError::RateLimited));
+
+    // Second call returns successful page
+    let page = source
+        .get_chat_page(video_no, 0)
+        .await
+        .expect("Expected successful page");
+    assert_eq!(page.video_chats.len(), 1);
+    assert_eq!(page.next_player_message_time, Some(10000));
+    assert_eq!(source.chat_page_call_count(), 2);
+}
+
+#[tokio::test]
+async fn test_vod_archival_with_concurrent_chat_integration() {
+    use chzzk_load::chzzk::models_chat::RecordedChatMessage;
+    use chzzk_load::chzzk::models_vod::VodChatPage;
+
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_chat_int_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 55512;
+    let source = create_fake_vod_source(video_no, "v_chat_int", "in_chat");
+
+    // Configure chat pages
+    source.set_chat_page(
+        video_no,
+        0,
+        VodChatPage {
+            video_chats: vec![
+                serde_json::json!({
+                    "playerMessageTime": 1000,
+                    "messageTime": 1727694001000_u64,
+                    "nickname": "Audience1",
+                    "content": "Live stream replay test",
+                    "msgTypeCode": 1
+                }),
+                serde_json::json!({
+                    "playerMessageTime": 2500,
+                    "messageTime": 1727694002500_u64,
+                    "nickname": "Donor1",
+                    "content": "Nice play!",
+                    "payAmount": 10000,
+                    "msgTypeCode": 10
+                }),
+            ],
+            next_player_message_time: None,
+        },
+    );
+
+    let source = Arc::new(source);
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        no_chat: false,
+        config: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("run_vod_archival with concurrent chat should succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 3);
+    assert_eq!(summary.chat_messages, 2);
+
+    let finalized_video = summary.output_dir.join("vod.mp4");
+    assert!(finalized_video.exists(), "vod.mp4 must exist");
+
+    let finalized_chat = summary.output_dir.join("vod_chat.jsonl");
+    assert!(finalized_chat.exists(), "vod_chat.jsonl must exist");
+    assert_eq!(summary.chat_path, Some(finalized_chat.clone()));
+
+    // Verify chat contents deserializable as canonical RecordedChatMessage
+    let content = std::fs::read_to_string(&finalized_chat).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    assert_eq!(lines.len(), 2);
+
+    let msg1: RecordedChatMessage = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(msg1.player_message_time, Some(1000));
+    assert_eq!(msg1.nickname, "Audience1");
+    assert_eq!(msg1.content, "Live stream replay test");
+
+    let msg2: RecordedChatMessage = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(msg2.player_message_time, Some(2500));
+    assert_eq!(msg2.nickname, "Donor1");
+    assert_eq!(msg2.donation_amount, Some(10000));
+    assert_eq!(msg2.msg_type, "DONATION");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_no_chat_flag_skips_chat() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!("test_vod_no_chat_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 66612;
+    let source = Arc::new(create_fake_vod_source(video_no, "v_no_chat", "in_no_chat"));
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        no_chat: true,
+        config: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source.clone(), cancel_token)
+        .await
+        .expect("run_vod_archival with --no-chat should succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 3);
+    assert_eq!(summary.chat_messages, 0);
+    assert_eq!(summary.chat_path, None);
+
+    let finalized_video = summary.output_dir.join("vod.mp4");
+    assert!(finalized_video.exists(), "vod.mp4 must exist");
+
+    // vod_chat.jsonl must NOT exist
+    let chat_file = summary.output_dir.join("vod_chat.jsonl");
+    assert!(
+        !chat_file.exists(),
+        "vod_chat.jsonl must not be created when --no-chat is specified"
+    );
+    assert!(!summary.output_dir.join("vod_chat.jsonl.part").exists());
+
+    // FakeVodSource get_chat_page must not have been invoked
+    assert_eq!(source.chat_page_call_count(), 0);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

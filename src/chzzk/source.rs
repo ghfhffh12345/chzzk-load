@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::chzzk::models::LiveDetail;
-use crate::chzzk::models_vod::{VodDetail, VodPlaybackInfo};
+use crate::chzzk::models_vod::{VodChatError, VodChatPage, VodDetail, VodPlaybackInfo};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -335,6 +335,13 @@ pub trait VodSource: Send + Sync {
     /// Fetches the text content of an HLS playlist (.m3u8).
     fn fetch_hls_playlist<'a>(&'a self, url: &'a str) -> BoxFuture<'a, anyhow::Result<String>>;
 
+    /// Fetches a page of VOD chat replay messages starting from the given player message timestamp (ms).
+    fn get_chat_page<'a>(
+        &'a self,
+        video_no: u64,
+        player_message_time: u64,
+    ) -> BoxFuture<'a, Result<VodChatPage, VodChatError>>;
+
     /// Returns an optional cookie header value for authenticated VOD playback.
     fn cookie_header(&self) -> Option<&str> {
         None
@@ -344,6 +351,9 @@ pub trait VodSource: Send + Sync {
 type VodDetailMap = Arc<Mutex<HashMap<u64, Result<VodDetail, String>>>>;
 type VodPlaybackMap = Arc<Mutex<HashMap<(String, String), Result<VodPlaybackInfo, String>>>>;
 type PlaylistMap = Arc<Mutex<HashMap<String, Result<String, String>>>>;
+type ChatPageMap = Arc<Mutex<HashMap<(u64, u64), Result<VodChatPage, VodChatError>>>>;
+type ChatPageQueueMap =
+    Arc<Mutex<HashMap<(u64, u64), VecDeque<Result<VodChatPage, VodChatError>>>>>;
 
 /// In-memory fake implementation of [`VodSource`] for deterministic testing without network I/O.
 #[derive(Clone, Default)]
@@ -351,6 +361,9 @@ pub struct FakeVodSource {
     details: VodDetailMap,
     playbacks: VodPlaybackMap,
     playlists: PlaylistMap,
+    chat_pages: ChatPageMap,
+    chat_queues: ChatPageQueueMap,
+    chat_calls: Arc<Mutex<Vec<(u64, u64)>>>,
     cookie_header: Option<String>,
 }
 
@@ -423,6 +436,46 @@ impl FakeVodSource {
         let mut map = self.playlists.lock().unwrap();
         map.insert(url.into(), Err(error.into()));
     }
+
+    pub fn with_chat_page(
+        self,
+        video_no: u64,
+        player_message_time: u64,
+        page: VodChatPage,
+    ) -> Self {
+        self.set_chat_page(video_no, player_message_time, page);
+        self
+    }
+
+    pub fn set_chat_page(&self, video_no: u64, player_message_time: u64, page: VodChatPage) {
+        let mut map = self.chat_pages.lock().unwrap();
+        map.insert((video_no, player_message_time), Ok(page));
+    }
+
+    pub fn set_chat_error(&self, video_no: u64, player_message_time: u64, error: VodChatError) {
+        let mut map = self.chat_pages.lock().unwrap();
+        map.insert((video_no, player_message_time), Err(error));
+    }
+
+    pub fn enqueue_chat_page_response(
+        &self,
+        video_no: u64,
+        player_message_time: u64,
+        response: Result<VodChatPage, VodChatError>,
+    ) {
+        let mut map = self.chat_queues.lock().unwrap();
+        map.entry((video_no, player_message_time))
+            .or_default()
+            .push_back(response);
+    }
+
+    pub fn chat_page_calls(&self) -> Vec<(u64, u64)> {
+        self.chat_calls.lock().unwrap().clone()
+    }
+
+    pub fn chat_page_call_count(&self) -> usize {
+        self.chat_calls.lock().unwrap().len()
+    }
 }
 
 impl VodSource for FakeVodSource {
@@ -466,6 +519,40 @@ impl VodSource for FakeVodSource {
                 Some(Ok(content)) => Ok(content.clone()),
                 Some(Err(err)) => anyhow::bail!("{err}"),
                 None => anyhow::bail!("FakeVodSource: no playlist configured for {url}"),
+            }
+        })
+    }
+
+    fn get_chat_page<'a>(
+        &'a self,
+        video_no: u64,
+        player_message_time: u64,
+    ) -> BoxFuture<'a, Result<VodChatPage, VodChatError>> {
+        Box::pin(async move {
+            self.chat_calls
+                .lock()
+                .unwrap()
+                .push((video_no, player_message_time));
+
+            let mut queues = self.chat_queues.lock().unwrap();
+            if let Some(queue) = queues.get_mut(&(video_no, player_message_time)) {
+                if let Some(resp) = queue.pop_front() {
+                    return resp;
+                }
+            }
+            drop(queues);
+
+            let map = self.chat_pages.lock().unwrap();
+            match map.get(&(video_no, player_message_time)) {
+                Some(Ok(page)) => Ok(page.clone()),
+                Some(Err(VodChatError::RateLimited)) => Err(VodChatError::RateLimited),
+                Some(Err(VodChatError::Unavailable(s))) => {
+                    Err(VodChatError::Unavailable(s.clone()))
+                }
+                Some(Err(VodChatError::Transport(e))) => {
+                    Err(VodChatError::Transport(anyhow::anyhow!("{e}")))
+                }
+                None => Ok(VodChatPage::default()),
             }
         })
     }

@@ -31,6 +31,7 @@ fn make_chat_line(time_ms: u64, user: &str, content: &str) -> String {
         user_id_hash: Some(user.to_string()),
         content: content.to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     })

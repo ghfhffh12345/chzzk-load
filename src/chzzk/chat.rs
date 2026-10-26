@@ -155,6 +155,8 @@ pub fn parse_chat_packet_owned(mut json: serde_json::Value) -> Vec<RecordedChatM
             .unwrap_or("")
             .to_string();
 
+        let player_message_time = item.get("playerMessageTime").and_then(|v| v.as_u64());
+
         results.push(RecordedChatMessage {
             time_ms,
             datetime,
@@ -163,6 +165,7 @@ pub fn parse_chat_packet_owned(mut json: serde_json::Value) -> Vec<RecordedChatM
             user_id_hash,
             content,
             donation_amount,
+            player_message_time,
             extras,
             raw: item,
         });

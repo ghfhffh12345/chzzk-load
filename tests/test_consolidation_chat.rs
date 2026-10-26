@@ -22,6 +22,7 @@ fn make_msg(time_ms: u64, user_id_hash: Option<&str>, content: &str) -> Recorded
         user_id_hash: user_id_hash.map(|s| s.to_string()),
         content: content.to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: json!({}),
     }

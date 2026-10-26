@@ -20,6 +20,7 @@ async fn test_chat_writer_batches_and_flushes_on_capacity() {
             user_id_hash: None,
             content: format!("Message {i}"),
             donation_amount: None,
+            player_message_time: None,
             extras: None,
             raw: serde_json::json!({}),
         };
@@ -45,6 +46,7 @@ async fn test_chat_writer_batches_and_flushes_on_capacity() {
         user_id_hash: None,
         content: "Message 3".to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };
@@ -77,6 +79,7 @@ async fn test_chat_writer_flushes_on_interval_and_termination() {
         user_id_hash: None,
         content: "Single message".to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };
@@ -114,6 +117,7 @@ async fn test_chat_writer_flushes_on_byte_threshold() {
         user_id_hash: None,
         content: large_content.clone(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };
@@ -134,6 +138,7 @@ async fn test_chat_writer_flushes_on_byte_threshold() {
         user_id_hash: None,
         content: large_content,
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };
@@ -175,6 +180,7 @@ async fn test_chat_writer_rotates_on_interval() {
         user_id_hash: None,
         content: "Message 1".to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };
@@ -206,6 +212,7 @@ async fn test_chat_writer_rotates_on_interval() {
         user_id_hash: None,
         content: "Message 2".to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };
@@ -240,6 +247,7 @@ async fn test_chat_writer_skips_empty_interval() {
         user_id_hash: None,
         content: "First chunk".to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };
@@ -270,6 +278,7 @@ async fn test_chat_writer_skips_empty_interval() {
         user_id_hash: None,
         content: "Chunk 2 after skip".to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };
@@ -318,6 +327,7 @@ async fn test_chat_writer_flush_and_close_with_lingering_messages() {
         user_id_hash: None,
         content: "Closing message".to_string(),
         donation_amount: None,
+        player_message_time: None,
         extras: None,
         raw: serde_json::json!({}),
     };

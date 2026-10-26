@@ -47,6 +47,28 @@ pub fn format_broadcast_anchor_timestamp(
     chrono::Local::now().format("%Y-%m-%d_%H%M%S").to_string()
 }
 
+/// Parses the broadcast start anchor date into UTC epoch timestamp milliseconds.
+pub fn parse_broadcast_anchor_timestamp_ms(
+    live_open_date: Option<&str>,
+    publish_date: Option<&str>,
+) -> Option<u64> {
+    let raw = live_open_date
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| publish_date.filter(|s| !s.trim().is_empty()))?;
+
+    let trimmed = raw.trim();
+    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Some(dt.and_utc().timestamp_millis().max(0) as u64);
+    }
+    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M") {
+        return Some(dt.and_utc().timestamp_millis().max(0) as u64);
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.timestamp_millis().max(0) as u64);
+    }
+    None
+}
+
 /// Generates the canonical VOD archive folder name:
 /// `[{timestamp}] [{alias}] {channel} - {title}` (omitting `[{alias}]` if None).
 ///
