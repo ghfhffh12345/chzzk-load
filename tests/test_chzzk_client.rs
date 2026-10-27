@@ -1368,3 +1368,372 @@ async fn test_get_playback_info_restricted_http_403_and_codes() {
         "Playback error should diagnose 403 and mention credentials: {err2_msg}"
     );
 }
+
+#[test]
+fn test_vod_find_progressive_mp4_quality_best_and_worst() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp4",
+                        "representation": [
+                            {
+                                "id": "PD_1080P",
+                                "width": 1920,
+                                "height": 1080,
+                                "bandwidth": 8000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/1080p.mp4?token=123" }
+                                ]
+                            },
+                            {
+                                "id": "PD_720P",
+                                "width": 1280,
+                                "height": 720,
+                                "bandwidth": 4000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/720p.mp4?token=123" }
+                                ]
+                            },
+                            {
+                                "id": "PD_480P",
+                                "width": 854,
+                                "height": 480,
+                                "bandwidth": 2000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/480p.mp4?token=123" }
+                                ]
+                            },
+                            {
+                                "id": "PD_360P",
+                                "width": 640,
+                                "height": 360,
+                                "bandwidth": 1000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/360p.mp4?token=123" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("best"),
+        Some("https://cdn.example.com/vod/1080p.mp4?token=123")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("worst"),
+        Some("https://cdn.example.com/vod/360p.mp4?token=123")
+    );
+    // Legacy helper delegates to best
+    assert_eq!(
+        info.find_progressive_mp4_url(),
+        Some("https://cdn.example.com/vod/1080p.mp4?token=123")
+    );
+}
+
+#[test]
+fn test_vod_find_progressive_mp4_exact_and_closest_match() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp4",
+                        "representation": [
+                            {
+                                "id": "PD_1080P",
+                                "width": 1920,
+                                "height": 1080,
+                                "bandwidth": 8000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/1080p.mp4?token=123" }
+                                ]
+                            },
+                            {
+                                "id": "PD_720P",
+                                "width": 1280,
+                                "height": 720,
+                                "bandwidth": 4000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/720p.mp4?token=123" }
+                                ]
+                            },
+                            {
+                                "id": "PD_480P",
+                                "width": 854,
+                                "height": 480,
+                                "bandwidth": 2000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/480p.mp4?token=123" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+
+    // Exact matches
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("1080p"),
+        Some("https://cdn.example.com/vod/1080p.mp4?token=123")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("720p"),
+        Some("https://cdn.example.com/vod/720p.mp4?token=123")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("720"),
+        Some("https://cdn.example.com/vod/720p.mp4?token=123")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("480p"),
+        Some("https://cdn.example.com/vod/480p.mp4?token=123")
+    );
+
+    // Closest match <= target
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("900p"),
+        Some("https://cdn.example.com/vod/720p.mp4?token=123")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("600p"),
+        Some("https://cdn.example.com/vod/480p.mp4?token=123")
+    );
+
+    // Unreachable lower resolution target returns None
+    assert_eq!(info.find_progressive_mp4_url_with_quality("360p"), None);
+    assert_eq!(info.find_progressive_mp4_url_with_quality("240p"), None);
+
+    // Unrecognized quality returns None
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("unrecognized_quality"),
+        None
+    );
+}
+
+#[test]
+fn test_vod_find_progressive_mp4_highest_bandwidth_tiebreaker() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp4",
+                        "representation": [
+                            {
+                                "id": "PD_1080P_30FPS",
+                                "width": 1920,
+                                "height": 1080,
+                                "bandwidth": 5000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/1080p30.mp4" }
+                                ]
+                            },
+                            {
+                                "id": "PD_1080P_60FPS",
+                                "width": 1920,
+                                "height": 1080,
+                                "bandwidth": 9000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/1080p60.mp4" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("1080p"),
+        Some("https://cdn.example.com/vod/1080p60.mp4")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("best"),
+        Some("https://cdn.example.com/vod/1080p60.mp4")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("worst"),
+        Some("https://cdn.example.com/vod/1080p30.mp4")
+    );
+}
+
+#[test]
+fn test_vod_find_progressive_mp4_adaptation_set_dimensions_inheritance() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp4",
+                        "width": 1280,
+                        "height": 720,
+                        "bandwidth": 3500000,
+                        "representation": [
+                            {
+                                "id": "rep_inherited_720",
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/inherited_720p.mp4" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("720p"),
+        Some("https://cdn.example.com/vod/inherited_720p.mp4")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("best"),
+        Some("https://cdn.example.com/vod/inherited_720p.mp4")
+    );
+}
+
+#[test]
+fn test_vod_find_progressive_mp4_segregated_audio_returns_none() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    // Period contains both a video/mp4 adaptation set and an audio/mp4 adaptation set
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp4",
+                        "representation": [
+                            {
+                                "id": "PD_1080P",
+                                "width": 1920,
+                                "height": 1080,
+                                "bandwidth": 8000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/video_only_1080p.mp4" }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "mimeType": "audio/mp4",
+                        "representation": [
+                            {
+                                "id": "audio_track_1",
+                                "bandwidth": 192000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/audio.m4a" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+    // Segregated audio streams require multi-track demuxing; progressive single-file discovery returns None
+    assert_eq!(info.find_progressive_mp4_url_with_quality("best"), None);
+    assert_eq!(info.find_progressive_mp4_url_with_quality("1080p"), None);
+    assert_eq!(info.find_progressive_mp4_url(), None);
+}
+
+#[test]
+fn test_vod_find_progressive_mp4_segregated_audio_in_representation_returns_none() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp4",
+                        "representation": [
+                            {
+                                "id": "video_1080p",
+                                "width": 1920,
+                                "height": 1080,
+                                "bandwidth": 8000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/video_1080p.mp4" }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "representation": [
+                            {
+                                "id": "audio_rep",
+                                "mimeType": "audio/aac",
+                                "bandwidth": 128000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/audio.aac" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+    assert_eq!(info.find_progressive_mp4_url_with_quality("best"), None);
+}
+
+#[test]
+fn test_vod_find_progressive_mp4_missing_or_hls_only_returns_none() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp2t",
+                        "otherAttributes": {
+                            "m3u": "https://cdn.example.com/vod/master.m3u8"
+                        },
+                        "representation": [
+                            {
+                                "id": "rep_1080",
+                                "width": 1920,
+                                "height": 1080,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/1080p.m3u8" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+    assert_eq!(info.find_progressive_mp4_url_with_quality("best"), None);
+    assert_eq!(info.find_progressive_mp4_url_with_quality("1080p"), None);
+}
