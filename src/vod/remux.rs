@@ -167,6 +167,121 @@ pub async fn remux_vod_to_staged(
     Ok(staged_path)
 }
 
+/// Constructs FFmpeg CLI arguments for lossless stream-copy repair and faststart reorganization
+/// of a downloaded progressive MP4 container.
+pub fn build_mp4_repair_args(input_path: &Path, output_path: &Path) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "warning".to_string(),
+        "-y".to_string(),
+        "-fflags".to_string(),
+        "+discardcorrupt".to_string(),
+        "-i".to_string(),
+        input_path.to_string_lossy().to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+        "-avoid_negative_ts".to_string(),
+        "make_zero".to_string(),
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+        "-f".to_string(),
+        "mp4".to_string(),
+        output_path.to_string_lossy().to_string(),
+    ]
+}
+
+/// Invokes FFmpeg to perform lossless stream-copy repair and faststart reorganization on `input`,
+/// writing the seekable output file to `output`.
+///
+/// If `output` already exists, it is unlinked prior to FFmpeg execution.
+/// Aborts and cleans up on cancellation or failure.
+pub async fn repair_mp4_faststart(
+    input: &Path,
+    output: &Path,
+    ffmpeg_bin: Option<&str>,
+    cancel_token: &CancellationToken,
+) -> Result<()> {
+    if cancel_token.is_cancelled() {
+        bail!("VOD MP4 repair cancelled by token before execution");
+    }
+
+    if let Some(parent) = output.parent() {
+        tokio::fs::create_dir_all(parent).await.with_context(|| {
+            format!(
+                "Failed to create parent directory for '{}'",
+                output.display()
+            )
+        })?;
+    }
+
+    // Clean up any lingering output part file
+    let _ = unlink_local_file_with_retry(output).await;
+
+    let bin = resolve_ffmpeg_bin(ffmpeg_bin);
+
+    let mut cmd = Command::new(&bin);
+    cmd.kill_on_drop(true);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::piped());
+    cmd.args(build_mp4_repair_args(input, output));
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to spawn FFmpeg binary: '{bin}'"))?;
+
+    let stderr = child.stderr.take();
+    let stderr_handle = tokio::spawn(async move {
+        if let Some(mut err_pipe) = stderr {
+            let mut buf = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut err_pipe, &mut buf).await;
+            String::from_utf8_lossy(&buf).to_string()
+        } else {
+            String::new()
+        }
+    });
+
+    let repair_res: Result<()> = async {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                let _ = child.kill().await;
+                stderr_handle.abort();
+                let _ = unlink_local_file_with_retry(output).await;
+                bail!("VOD MP4 repair cancelled by token");
+            }
+            res = child.wait() => {
+                let status = res.with_context(|| "Failed waiting on FFmpeg process")?;
+                let stderr_logs = stderr_handle.await.unwrap_or_default();
+                if !status.success() {
+                    let _ = unlink_local_file_with_retry(output).await;
+                    bail!(
+                        "FFmpeg MP4 repair exited with status {status}: {}",
+                        stderr_logs.trim()
+                    );
+                }
+
+                if !output.exists() {
+                    bail!(
+                        "FFmpeg reported success but repaired output file was not created at '{}'",
+                        output.display()
+                    );
+                }
+
+                Ok(())
+            }
+        }
+    }
+    .await;
+
+    if let Err(err) = repair_res {
+        let _ = unlink_local_file_with_retry(output).await;
+        return Err(err);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +299,19 @@ mod tests {
         assert!(args.contains(&"-avoid_negative_ts".to_string()));
         assert!(args.contains(&"make_zero".to_string()));
         assert!(args.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn test_build_mp4_repair_args() {
+        let input = Path::new("staging/vod.mp4.part");
+        let output = Path::new("recordings/vod.mp4.part");
+        let args = build_mp4_repair_args(input, output);
+
+        assert!(args.contains(&"-c".to_string()));
+        assert!(args.contains(&"copy".to_string()));
+        assert!(args.contains(&"-avoid_negative_ts".to_string()));
+        assert!(args.contains(&"make_zero".to_string()));
+        assert!(args.contains(&"+faststart".to_string()));
+        assert_eq!(args.last().unwrap(), &output.to_string_lossy().to_string());
     }
 }

@@ -89,18 +89,47 @@ fn main() {
     let dummy_ts = [0x47u8; 188];
 
     if let Some(out_name) = out_file {
-        // Valid 56-byte faststart MP4 container
-        let mock_mp4: &[u8] = &[
-            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p',
-            b'i', b's', b'o', b'm', 0x00, 0x00, 0x02, 0x00,
-            b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
-            0x00, 0x00, 0x00, 0x10, b'm', b'o', b'o', b'v',
-            b'm', b'v', b'h', b'd', 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x10, b'm', b'd', b'a', b't',
-            b'm', b'o', b'c', b'k', b'd', b'a', b't', b'a',
-        ];
+        let is_non_faststart = args.iter().any(|a| a.contains("non_faststart"));
+        let is_corrupted = args.iter().any(|a| a.contains("corrupted_mp4") || a.contains("trailing_garbage"));
+
+        let bytes: &[u8] = if is_corrupted {
+            // Valid MP4 boxes followed by trailing unindexed bytes that fail container validation
+            &[
+                0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p',
+                b'i', b's', b'o', b'm', 0x00, 0x00, 0x02, 0x00,
+                b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+                0x00, 0x00, 0x00, 0x10, b'm', b'o', b'o', b'v',
+                b'm', b'v', b'h', b'd', 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x10, b'm', b'd', b'a', b't',
+                b'm', b'o', b'c', b'k', b'd', b'a', b't', b'a',
+                0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            ]
+        } else if is_non_faststart {
+            // Non-faststart MP4: ftyp (24 bytes), mdat (16 bytes), moov (16 bytes)
+            &[
+                0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p',
+                b'i', b's', b'o', b'm', 0x00, 0x00, 0x02, 0x00,
+                b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+                0x00, 0x00, 0x00, 0x10, b'm', b'd', b'a', b't',
+                b'm', b'o', b'c', b'k', b'd', b'a', b't', b'a',
+                0x00, 0x00, 0x00, 0x10, b'm', b'o', b'o', b'v',
+                b'm', b'v', b'h', b'd', 0x00, 0x00, 0x00, 0x00,
+            ]
+        } else {
+            // Valid 56-byte faststart MP4 container
+            &[
+                0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p',
+                b'i', b's', b'o', b'm', 0x00, 0x00, 0x02, 0x00,
+                b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+                0x00, 0x00, 0x00, 0x10, b'm', b'o', b'o', b'v',
+                b'm', b'v', b'h', b'd', 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x10, b'm', b'd', b'a', b't',
+                b'm', b'o', b'c', b'k', b'd', b'a', b't', b'a',
+            ]
+        };
+
         let out_path = dir.join(&out_name);
-        let _ = std::fs::write(&out_path, mock_mp4);
+        let _ = std::fs::write(&out_path, bytes);
 
         // Remove .aria2 control file upon download completion
         let aria2_path = dir.join(format!("{out_name}.aria2"));

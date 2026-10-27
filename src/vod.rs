@@ -18,10 +18,10 @@ use crate::app_path::resolve_path;
 use crate::chzzk::source::VodSource;
 pub use crate::cli::VodArgs;
 use crate::config::Settings;
-use crate::consolidation::staging::remove_dir_all_with_retry;
+use crate::consolidation::staging::{remove_dir_all_with_retry, validate_mp4_container_integrity};
 
 pub use aria2c::{
-    build_aria2c_segment_args, download_segments_with_aria2c,
+    build_aria2c_segment_args, download_progressive_mp4_with_aria2c, download_segments_with_aria2c,
     download_segments_with_aria2c_and_progress, ensure_aria2c_available, filter_missing_segments,
     generate_aria2c_input_file, resolve_aria2c_bin, resolve_vod_staging_dir,
     scan_completed_segments,
@@ -47,7 +47,8 @@ pub use progress::{
     VodProgressSession, VodSpeedTracker, VodVideoProgressSnapshot, VodVideoProgressUpdate,
 };
 pub use remux::{
-    build_vod_concat_args, generate_vod_concat_script, remux_vod_to_staged, resolve_ffmpeg_bin,
+    build_mp4_repair_args, build_vod_concat_args, generate_vod_concat_script, remux_vod_to_staged,
+    repair_mp4_faststart, resolve_ffmpeg_bin,
 };
 pub use target::parse_video_target;
 pub use upload::{VodArtifactTriad, upload_vod_artifacts, validate_remote_connection};
@@ -165,40 +166,53 @@ pub async fn run_vod_archival_with_options(
             )
         })?;
 
-    let master_url = playback_info
-        .find_hls_master_url()
-        .ok_or_else(|| anyhow!("No HLS media descriptor found in playback response"))?;
+    // Check for matching progressive MP4 stream representation
+    let progressive_url = playback_info
+        .find_progressive_mp4_url_with_quality(&args.quality)
+        .map(|u| u.to_string());
 
-    // 4. Fetch and parse HLS playlists
-    let playlist_content = source
-        .fetch_hls_playlist(master_url)
-        .await
-        .with_context(|| format!("Failed to fetch HLS master playlist from '{master_url}'"))?;
+    // 4. If progressive MP4 is absent or segregated, fall back to HLS playlist parsing
+    let hls_segments = if progressive_url.is_none() {
+        let master_url = playback_info
+            .find_hls_master_url()
+            .ok_or_else(|| anyhow!("No HLS media descriptor found in playback response"))?;
 
-    let mut segments = if playlist_content.contains("#EXT-X-STREAM-INF:") {
-        let variants = parse_master_playlist(&playlist_content, master_url)
-            .context("Failed to parse master HLS playlist variants")?;
-        let selected = select_variant(&variants, &args.quality)
-            .with_context(|| format!("Failed to resolve requested quality '{}'", args.quality))?;
-        let variant_content = source
-            .fetch_hls_playlist(&selected.url)
+        let playlist_content = source
+            .fetch_hls_playlist(master_url)
             .await
-            .with_context(|| format!("Failed to fetch variant playlist from '{}'", selected.url))?;
-        parse_variant_playlist(&variant_content, &selected.url)
-            .context("Failed to parse variant playlist segments")?
+            .with_context(|| format!("Failed to fetch HLS master playlist from '{master_url}'"))?;
+
+        let mut segments = if playlist_content.contains("#EXT-X-STREAM-INF:") {
+            let variants = parse_master_playlist(&playlist_content, master_url)
+                .context("Failed to parse master HLS playlist variants")?;
+            let selected = select_variant(&variants, &args.quality).with_context(|| {
+                format!("Failed to resolve requested quality '{}'", args.quality)
+            })?;
+            let variant_content = source
+                .fetch_hls_playlist(&selected.url)
+                .await
+                .with_context(|| {
+                    format!("Failed to fetch variant playlist from '{}'", selected.url)
+                })?;
+            parse_variant_playlist(&variant_content, &selected.url)
+                .context("Failed to parse variant playlist segments")?
+        } else {
+            // Direct variant playlist
+            parse_variant_playlist(&playlist_content, master_url)
+                .context("Failed to parse direct variant playlist segments")?
+        };
+
+        if let Some(max) = args.max_segments {
+            segments.truncate(max);
+        }
+
+        if segments.is_empty() {
+            bail!("Discovered 0 video segments for VOD #{video_no}");
+        }
+        Some(segments)
     } else {
-        // Direct variant playlist
-        parse_variant_playlist(&playlist_content, master_url)
-            .context("Failed to parse direct variant playlist segments")?
+        None
     };
-
-    if let Some(max) = args.max_segments {
-        segments.truncate(max);
-    }
-
-    if segments.is_empty() {
-        bail!("Discovered 0 video segments for VOD #{video_no}");
-    }
 
     // 5. Resolve canonical output directory
     let base_recordings_dir = args
@@ -224,9 +238,29 @@ pub async fn run_vod_archival_with_options(
             )
         })?;
 
-    // 6. Synthesize staged VOD metadata (vod_metadata.jsonl.part)
+    // 6. Staging directory: resolve custom temp-dir or default to .vod_staging_<video_id>/ inside output folder
+    let temp_dir_override = options.temp_dir.as_ref().or(args.temp_dir.as_ref());
+    let staging_dir = resolve_vod_staging_dir(
+        &output_dir,
+        &detail.video_id,
+        temp_dir_override.map(|p| p.as_path()),
+    );
+    tokio::fs::create_dir_all(&staging_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to create staging directory '{}'",
+                staging_dir.display()
+            )
+        })?;
+
+    // 7. Synthesize staged VOD metadata (vod_metadata.jsonl.part)
     let duration_ms = detail.duration.map(|d| d * 1000).unwrap_or_else(|| {
-        (segments.iter().map(|s| s.duration).sum::<f64>() * 1000.0).round() as u64
+        if let Some(ref segs) = hls_segments {
+            (segs.iter().map(|s| s.duration).sum::<f64>() * 1000.0).round() as u64
+        } else {
+            0
+        }
     });
     let metadata_target = synthesize_vod_metadata_to_staged(&output_dir, &detail, duration_ms)
         .await
@@ -234,15 +268,19 @@ pub async fn run_vod_archival_with_options(
 
     // Initialize progress session if coordinator is provided
     let has_chat = !args.no_chat;
-    let mut progress_session = options
-        .coordinator
-        .as_ref()
-        .map(|coord| coord.start_session(segments.len(), duration_ms, true, has_chat));
+    let mut progress_session = options.coordinator.as_ref().map(|coord| {
+        if progressive_url.is_some() {
+            coord.start_progressive_session(None, duration_ms, true, has_chat)
+        } else {
+            let seg_count = hls_segments.as_ref().map(|s| s.len()).unwrap_or(0);
+            coord.start_session(seg_count, duration_ms, true, has_chat)
+        }
+    });
 
     let video_tx = progress_session.as_ref().and_then(|s| s.video_sender());
     let chat_tx = progress_session.as_ref().and_then(|s| s.chat_sender());
 
-    // 7. Concurrently paginate VOD chat history if not opted out via --no-chat
+    // 8. Concurrently paginate VOD chat history if not opted out via --no-chat
     let chat_task = if !args.no_chat {
         let chat_source = Arc::clone(&source);
         let chat_cancel = cancel_token.clone();
@@ -268,88 +306,170 @@ pub async fn run_vod_archival_with_options(
         None
     };
 
-    // 8. Staging directory: resolve custom temp-dir or default to .vod_staging_<video_id>/ inside output folder
-    let temp_dir_override = options.temp_dir.as_ref().or(args.temp_dir.as_ref());
-    let staging_dir = resolve_vod_staging_dir(
-        &output_dir,
-        &detail.video_id,
-        temp_dir_override.map(|p| p.as_path()),
-    );
-    tokio::fs::create_dir_all(&staging_dir)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to create staging directory '{}'",
-                staging_dir.display()
-            )
-        })?;
+    // 9. Video Ingestion: dispatch to Progressive Stream Ingestion or Segmented Stream Fallback
+    let (staged_path, segments_downloaded) = if let Some(prog_url) = progressive_url {
+        let cookie_header = source.cookie_header();
+        let staged_part_res = download_progressive_mp4_with_aria2c(
+            &aria2c_bin,
+            &staging_dir,
+            &prog_url,
+            video_tx,
+            cookie_header,
+            cancel_token.clone(),
+        )
+        .await;
 
-    // 9. Filter already downloaded segments and write aria2c input batch file
-    let missing_segments = filter_missing_segments(&staging_dir, &segments).await;
-    let input_file = staging_dir.join("input_segments.txt");
-    let batch_content = generate_aria2c_input_file(&missing_segments);
-    tokio::fs::write(&input_file, batch_content.as_bytes())
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to write aria2c input file to '{}'",
-                input_file.display()
-            )
-        })?;
+        let staged_part = match staged_part_res {
+            Ok(p) => p,
+            Err(err) => {
+                if let Some(ref task) = chat_task {
+                    task.abort();
+                }
+                if let Some(mut s) = progress_session {
+                    s.finish(false).await;
+                }
+                return Err(err);
+            }
+        };
 
-    // 10. Download video segments via aria2c with live progress reporting
-    let cookie_header = source.cookie_header();
-    let download_res = download_segments_with_aria2c_and_progress(
-        &aria2c_bin,
-        &staging_dir,
-        &input_file,
-        &segments,
-        video_tx,
-        cookie_header,
-        cancel_token.clone(),
-    )
-    .await;
+        // Container Integrity Verification & Faststart Normalization
+        let staged = match validate_mp4_container_integrity(&staged_part) {
+            Ok(info) if info.is_faststart => staged_part,
+            Ok(_info) => {
+                if let Some(ref mut s) = progress_session {
+                    s.transition_to_mux();
+                }
+                let repaired_part = output_dir.join("vod.mp4.part");
+                if let Err(err) = repair_mp4_faststart(
+                    &staged_part,
+                    &repaired_part,
+                    Some(&ffmpeg_bin),
+                    &cancel_token,
+                )
+                .await
+                {
+                    if let Some(ref task) = chat_task {
+                        task.abort();
+                    }
+                    if let Some(mut s) = progress_session {
+                        s.finish(false).await;
+                    }
+                    return Err(err).context("FFmpeg faststart reorganization failed");
+                }
+                if let Err(err) = validate_mp4_container_integrity(&repaired_part) {
+                    if let Some(ref task) = chat_task {
+                        task.abort();
+                    }
+                    if let Some(mut s) = progress_session {
+                        s.finish(false).await;
+                    }
+                    return Err(err)
+                        .context("Reorganized MP4 failed container integrity validation");
+                }
+                repaired_part
+            }
+            Err(_err) => {
+                if let Some(ref mut s) = progress_session {
+                    s.transition_to_mux();
+                }
+                let repaired_part = output_dir.join("vod.mp4.part");
+                if let Err(err) = repair_mp4_faststart(
+                    &staged_part,
+                    &repaired_part,
+                    Some(&ffmpeg_bin),
+                    &cancel_token,
+                )
+                .await
+                {
+                    if let Some(ref task) = chat_task {
+                        task.abort();
+                    }
+                    if let Some(mut s) = progress_session {
+                        s.finish(false).await;
+                    }
+                    return Err(err).context("FFmpeg repair stream copy failed");
+                }
+                if let Err(err) = validate_mp4_container_integrity(&repaired_part) {
+                    if let Some(ref task) = chat_task {
+                        task.abort();
+                    }
+                    if let Some(mut s) = progress_session {
+                        s.finish(false).await;
+                    }
+                    return Err(err).context("Repaired MP4 failed container integrity validation");
+                }
+                repaired_part
+            }
+        };
 
-    if let Err(err) = download_res {
-        if let Some(ref task) = chat_task {
-            task.abort();
-        }
-        if let Some(mut s) = progress_session {
-            s.finish(false).await;
-        }
-        // Retain unfinished .part files and staging folder upon failure for manual resume
-        return Err(err);
-    }
+        (staged, 1)
+    } else {
+        let segments = hls_segments.expect("Segments must be present for HLS fallback");
+        let segments_count = segments.len();
 
-    // Transition progress coordinator to MUX phase
-    if let Some(ref mut s) = progress_session {
-        s.transition_to_mux();
-    }
+        let missing_segments = filter_missing_segments(&staging_dir, &segments).await;
+        let input_file = staging_dir.join("input_segments.txt");
+        let batch_content = generate_aria2c_input_file(&missing_segments);
+        tokio::fs::write(&input_file, batch_content.as_bytes())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to write aria2c input file to '{}'",
+                    input_file.display()
+                )
+            })?;
 
-    // 11. Remux via FFmpeg Concat Demuxer to staged vod.mp4.part
-    let staged_path = match remux_vod_to_staged(
-        &ffmpeg_bin,
-        &staging_dir,
-        &output_dir,
-        &segments,
-        cancel_token.clone(),
-    )
-    .await
-    {
-        Ok(path) => path,
-        Err(err) => {
+        let cookie_header = source.cookie_header();
+        let download_res = download_segments_with_aria2c_and_progress(
+            &aria2c_bin,
+            &staging_dir,
+            &input_file,
+            &segments,
+            video_tx,
+            cookie_header,
+            cancel_token.clone(),
+        )
+        .await;
+
+        if let Err(err) = download_res {
             if let Some(ref task) = chat_task {
                 task.abort();
             }
             if let Some(mut s) = progress_session {
                 s.finish(false).await;
             }
-            // Retain unfinished .part files and staging folder upon failure for manual resume
             return Err(err);
         }
+
+        if let Some(ref mut s) = progress_session {
+            s.transition_to_mux();
+        }
+
+        let staged = match remux_vod_to_staged(
+            &ffmpeg_bin,
+            &staging_dir,
+            &output_dir,
+            &segments,
+            cancel_token.clone(),
+        )
+        .await
+        {
+            Ok(path) => path,
+            Err(err) => {
+                if let Some(ref task) = chat_task {
+                    task.abort();
+                }
+                if let Some(mut s) = progress_session {
+                    s.finish(false).await;
+                }
+                return Err(err);
+            }
+        };
+
+        (staged, segments_count)
     };
 
-    // 12. Await concurrent chat pagination completion prior to any file promotion
+    // 10. Await concurrent chat pagination completion prior to any file promotion
     let chat_summary = if let Some(task) = chat_task {
         match task.await {
             Ok(Ok(summary)) => Some(summary),
@@ -372,7 +492,7 @@ pub async fn run_vod_archival_with_options(
         None
     };
 
-    // 13. Two-Stage Atomic Promotion at orchestrator seam:
+    // 11. Two-Stage Atomic Promotion at orchestrator seam:
     // Only promote staged files after all concurrent futures succeed with zero-exit status
     let finalized_video_path = output_dir.join("vod.mp4");
     if let Err(err) =
@@ -408,15 +528,15 @@ pub async fn run_vod_archival_with_options(
         return Err(err).context("Failed to promote staged VOD metadata to final destination");
     }
 
-    // 14. Finalize progress session on orchestrator success
+    // 12. Finalize progress session on orchestrator success
     if let Some(mut s) = progress_session {
         s.finish(true).await;
     }
 
-    // 15. Automatically purge staging directory upon successful remux & promotion
+    // 13. Automatically purge staging directory upon successful remux & promotion
     let _ = remove_dir_all_with_retry(&staging_dir).await;
 
-    // 16. Cloud synchronization if --upload requested
+    // 14. Cloud synchronization if --upload requested
     if let Some(ref backend) = rclone_backend {
         let artifacts = VodArtifactTriad {
             video_path: &finalized_video_path,
@@ -442,7 +562,7 @@ pub async fn run_vod_archival_with_options(
         video_path: finalized_video_path,
         chat_path: final_chat_path,
         metadata_path: finalized_metadata_path,
-        segments_downloaded: segments.len(),
+        segments_downloaded,
         chat_messages,
         uploaded: rclone_backend.is_some(),
     })

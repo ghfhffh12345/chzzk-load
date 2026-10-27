@@ -11,7 +11,7 @@ use chzzk_load::chzzk::models_vod::{
 use chzzk_load::chzzk::source::FakeVodSource;
 use chzzk_load::cli::VodArgs;
 use chzzk_load::config::RcloneConfig;
-use chzzk_load::consolidation::staging::probe_moov_atom;
+use chzzk_load::consolidation::staging::{probe_moov_atom, validate_mp4_container_integrity};
 use chzzk_load::vod::aria2c::download_progressive_mp4_with_aria2c;
 use chzzk_load::vod::{VodOptions, run_vod_archival, run_vod_archival_with_options};
 use common::mock_aria2c::get_mock_aria2c_bin;
@@ -1659,6 +1659,427 @@ async fn test_download_progressive_mp4_with_aria2c_resumes_with_aria2_control_fi
         probe_moov_atom(&staged_file),
         "Must have valid MP4 container"
     );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+fn create_fake_vod_source_with_progressive(
+    video_no: u64,
+    video_id: &str,
+    in_key: &str,
+    progressive_url: &str,
+) -> FakeVodSource {
+    let source = create_fake_vod_source(video_no, video_id, in_key);
+    let playback_info = VodPlaybackInfo {
+        media: vec![
+            VodPlaybackMedia {
+                media_id: Some("HLS".to_string()),
+                protocol: Some("HLS".to_string()),
+                path: "https://cdn.example.com/vod/master.m3u8".to_string(),
+                encoding_option: Some(VodEncodingOption {
+                    width: Some(1920),
+                    height: Some(1080),
+                    bitrate: Some(8000000),
+                    name: Some("1080p".to_string()),
+                }),
+            },
+            VodPlaybackMedia {
+                media_id: Some("PROG_1080".to_string()),
+                protocol: Some("mp4".to_string()),
+                path: progressive_url.to_string(),
+                encoding_option: Some(VodEncodingOption {
+                    width: Some(1920),
+                    height: Some(1080),
+                    bitrate: Some(8000000),
+                    name: Some("1080p".to_string()),
+                }),
+            },
+        ],
+        ..Default::default()
+    };
+    source.set_playback_info(video_id, in_key, playback_info);
+    source
+}
+
+#[tokio::test]
+async fn test_vod_archival_progressive_zero_transcode_promotion() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_prog_zero_transcode_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 7891234;
+    let video_id = "neon_prog_001";
+    let in_key = "key_prog_001";
+    let progressive_url = "https://cdn.example.com/vod/monolithic_1080p.mp4";
+    let source = Arc::new(create_fake_vod_source_with_progressive(
+        video_no,
+        video_id,
+        in_key,
+        progressive_url,
+    ));
+
+    let args = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no}"),
+        quality: "1080p".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    // Explicitly pass an invalid FFmpeg binary path to PROVE that FFmpeg is never invoked!
+    let options = VodOptions {
+        ffmpeg_bin: Some("invalid_ffmpeg_bin_that_fails_if_invoked".to_string()),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect("run_vod_archival should succeed with zero-transcode promotion");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 1);
+    assert!(summary.video_path.exists());
+    assert_eq!(
+        summary.video_path.file_name().unwrap().to_string_lossy(),
+        "vod.mp4"
+    );
+
+    // Verify container integrity: must have valid faststart MP4 container
+    let container_info = validate_mp4_container_integrity(&summary.video_path)
+        .expect("Container integrity validation should pass");
+    assert!(container_info.is_faststart);
+
+    // Verify staging directory was purged
+    let staging_dir = summary.output_dir.join(format!(".vod_staging_{video_id}"));
+    assert!(!staging_dir.exists(), "Staging folder must be cleaned up");
+
+    // Verify metadata and chat artifacts exist
+    assert!(summary.metadata_path.exists());
+    if let Some(chat_path) = summary.chat_path {
+        assert!(chat_path.exists());
+    }
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_progressive_repairs_when_container_not_faststart() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_prog_repair_faststart_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 7891235;
+    let video_id = "neon_prog_002";
+    let in_key = "key_prog_002";
+    // Passing ?non_faststart=1 instructs mock_aria2c to write an MP4 with mdat before moov
+    let progressive_url = "https://cdn.example.com/vod/monolithic_1080p.mp4?non_faststart=1";
+    let source = Arc::new(create_fake_vod_source_with_progressive(
+        video_no,
+        video_id,
+        in_key,
+        progressive_url,
+    ));
+
+    let args = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no}"),
+        quality: "1080p".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("run_vod_archival should succeed with FFmpeg faststart reorganization");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 1);
+    assert!(summary.video_path.exists());
+
+    // FFmpeg repair produced a valid faststart container
+    let container_info = validate_mp4_container_integrity(&summary.video_path)
+        .expect("Container integrity validation should pass after repair");
+    assert!(container_info.is_faststart);
+
+    // Staging directory must be cleaned up
+    let staging_dir = summary.output_dir.join(format!(".vod_staging_{video_id}"));
+    assert!(!staging_dir.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_progressive_repairs_when_container_corrupted() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_prog_repair_corrupt_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 7891236;
+    let video_id = "neon_prog_003";
+    let in_key = "key_prog_003";
+    // Passing ?corrupted_mp4=1 instructs mock_aria2c to write invalid non-MP4 bytes
+    let progressive_url = "https://cdn.example.com/vod/monolithic_1080p.mp4?corrupted_mp4=1";
+    let source = Arc::new(create_fake_vod_source_with_progressive(
+        video_no,
+        video_id,
+        in_key,
+        progressive_url,
+    ));
+
+    let args = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no}"),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("run_vod_archival should succeed with FFmpeg repair stream copy");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 1);
+    assert!(summary.video_path.exists());
+
+    let container_info = validate_mp4_container_integrity(&summary.video_path)
+        .expect("Container integrity validation should pass after FFmpeg repair");
+    assert!(container_info.is_faststart);
+
+    let staging_dir = summary.output_dir.join(format!(".vod_staging_{video_id}"));
+    assert!(!staging_dir.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_fallback_to_hls_when_progressive_absent_or_segregated() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_fallback_hls_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    // Case 1: Progressive MP4 is absent entirely (only HLS media in PlaybackInfo)
+    let video_no_1 = 7891237;
+    let video_id_1 = "neon_hls_only";
+    let in_key_1 = "key_hls_only";
+    let source_1 = Arc::new(create_fake_vod_source(video_no_1, video_id_1, in_key_1));
+
+    let args_1 = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no_1}"),
+        quality: "1080p".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let summary_1 = run_vod_archival(args_1, source_1, CancellationToken::new())
+        .await
+        .expect("Must fall back cleanly to HLS when progressive MP4 absent");
+    assert_eq!(
+        summary_1.segments_downloaded, 3,
+        "HLS fallback must download all 3 HLS segments"
+    );
+    assert!(summary_1.video_path.exists());
+
+    // Case 2: Segregated DASH streams (has video/mp4 and audio/mp4 adaptation sets)
+    let video_no_2 = 7891238;
+    let video_id_2 = "neon_segregated_dash";
+    let in_key_2 = "key_segregated_dash";
+    let source_2 = Arc::new(create_fake_vod_source(video_no_2, video_id_2, in_key_2));
+
+    // Construct playback info with segregated audio and video adaptation sets
+    let segregated_playback = VodPlaybackInfo {
+        media: vec![VodPlaybackMedia {
+            media_id: Some("HLS".to_string()),
+            protocol: Some("HLS".to_string()),
+            path: "https://cdn.example.com/vod/master.m3u8".to_string(),
+            encoding_option: Some(VodEncodingOption {
+                width: Some(1920),
+                height: Some(1080),
+                bitrate: Some(8000000),
+                name: Some("1080p".to_string()),
+            }),
+        }],
+        period: vec![VodPeriod {
+            id: Some("p1".to_string()),
+            adaptation_set: vec![
+                VodAdaptationSet {
+                    id: Some("video_set".to_string()),
+                    mime_type: Some("video/mp4".to_string()),
+                    representation: vec![VodRepresentation {
+                        id: Some("1080p".to_string()),
+                        mime_type: Some("video/mp4".to_string()),
+                        width: Some(1920),
+                        height: Some(1080),
+                        bandwidth: Some(8000000),
+                        base_url: vec![chzzk_load::chzzk::models_vod::VodBaseUrl {
+                            value: "https://cdn.example.com/vod/video_only_1080p.mp4".to_string(),
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                VodAdaptationSet {
+                    id: Some("audio_set".to_string()),
+                    mime_type: Some("audio/mp4".to_string()),
+                    representation: vec![VodRepresentation {
+                        id: Some("audio_track".to_string()),
+                        mime_type: Some("audio/mp4".to_string()),
+                        width: None,
+                        height: None,
+                        bandwidth: Some(128000),
+                        base_url: vec![chzzk_load::chzzk::models_vod::VodBaseUrl {
+                            value: "https://cdn.example.com/vod/audio_only.mp4".to_string(),
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+    };
+    source_2.set_playback_info(video_id_2, in_key_2, segregated_playback);
+
+    let args_2 = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no_2}"),
+        quality: "1080p".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let summary_2 = run_vod_archival(args_2, source_2, CancellationToken::new())
+        .await
+        .expect("Must detect segregated audio/video and seamlessly fall back to HLS");
+    assert_eq!(
+        summary_2.segments_downloaded, 3,
+        "Segregated fallback must download all 3 HLS segments"
+    );
+    assert!(summary_2.video_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_progressive_artifact_triad_and_upload() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_prog_triad_upload_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 7891239;
+    let video_id = "neon_prog_triad";
+    let in_key = "key_prog_triad";
+    let progressive_url = "https://cdn.example.com/vod/monolithic_1080p.mp4";
+    let source = Arc::new(create_fake_vod_source_with_progressive(
+        video_no,
+        video_id,
+        in_key,
+        progressive_url,
+    ));
+
+    let args = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no}"),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: true,
+        config: None,
+        upload: true,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let remote_storage = temp_dir.join("remote_storage");
+    let remote_path_str = format!("remote:{}", remote_storage.to_string_lossy());
+
+    let options = VodOptions {
+        rclone_config: Some(RcloneConfig {
+            remote_path: remote_path_str,
+            rclone_bin: "rclone".to_string(),
+            extra_args: Vec::new(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect("run_vod_archival should succeed with upload");
+
+    assert!(summary.uploaded);
+    assert_eq!(summary.segments_downloaded, 1);
+    assert!(summary.video_path.exists());
+    assert!(summary.chat_path.as_ref().unwrap().exists());
+    assert!(summary.metadata_path.exists());
+
+    // Staging directory must be cleaned up
+    let staging_dir = summary.output_dir.join(format!(".vod_staging_{video_id}"));
+    assert!(!staging_dir.exists());
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
