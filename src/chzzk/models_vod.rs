@@ -89,23 +89,179 @@ impl VodPlaybackInfo {
         self.media.first().map(|m| m.path.as_str())
     }
 
-    /// Discovers progressive MP4 URLs from either MPD period adaptationSets or media descriptors.
-    pub fn find_progressive_mp4_url(&self) -> Option<&str> {
+    /// Discovers progressive MP4 URLs matching requested quality criteria.
+    ///
+    /// Mirrors `select_variant` rules (`best`, `worst`, exact resolution `1080p`/`720p`, closest match).
+    /// Returns `None` if:
+    /// 1. Progressive streams are missing.
+    /// 2. Audio and video tracks are segregated (requiring multi-track DASH demuxing).
+    /// 3. The requested quality cannot be satisfied.
+    pub fn find_progressive_mp4_url_with_quality(&self, requested_quality: &str) -> Option<&str> {
+        // Segregated audio check: if any period contains an adaptationSet or representation
+        // with audio mimeType (e.g. "audio/mp4", "audio/aac"), then audio and video tracks
+        // are segregated, so monolithic single-file download cannot be used without multi-track demuxing.
+        let has_segregated_audio = self.period.iter().any(|period| {
+            period.adaptation_set.iter().any(|set| {
+                set.mime_type
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("audio/"))
+                    || set.representation.iter().any(|r| {
+                        r.mime_type
+                            .as_deref()
+                            .is_some_and(|m| m.starts_with("audio/"))
+                    })
+            })
+        });
+        if has_segregated_audio {
+            return None;
+        }
+
+        let mut candidates = Vec::new();
+
         for period in &self.period {
             for set in &period.adaptation_set {
                 for rep in &set.representation {
-                    if let Some(base) = rep.base_url.first()
-                        && (base.value.contains(".mp4")
-                            || rep.mime_type.as_deref() == Some("video/mp4")
-                            || set.mime_type.as_deref() == Some("video/mp4"))
-                    {
-                        return Some(base.value.as_str());
+                    if let Some(base) = rep.base_url.first() {
+                        let url = base.value.as_str();
+                        if url.contains(".m3u8") {
+                            continue;
+                        }
+                        let is_mp4 = url.contains(".mp4")
+                            || rep.mime_type.as_deref().is_some_and(|m| m.contains("mp4"))
+                            || set.mime_type.as_deref().is_some_and(|m| m.contains("mp4"));
+
+                        if is_mp4 {
+                            let height = rep.height.or(set.height);
+                            let bandwidth = rep.bandwidth.or(set.bandwidth).unwrap_or(0);
+                            let id = rep.id.as_deref().or(set.id.as_deref());
+
+                            candidates.push(ProgressiveCandidate {
+                                url,
+                                height,
+                                bandwidth,
+                                id,
+                            });
+                        }
                     }
                 }
             }
         }
+
+        if candidates.is_empty() {
+            for m in &self.media {
+                let is_hls = m
+                    .protocol
+                    .as_deref()
+                    .is_some_and(|p| p.eq_ignore_ascii_case("hls"))
+                    || m.path.contains(".m3u8");
+                if is_hls {
+                    continue;
+                }
+                let is_mp4 = m.protocol.as_deref().is_some_and(|p| {
+                    p.eq_ignore_ascii_case("mp4") || p.eq_ignore_ascii_case("progressive")
+                }) || m.path.contains(".mp4");
+                if is_mp4 {
+                    let height = m.encoding_option.as_ref().and_then(|e| e.height);
+                    let bandwidth = m
+                        .encoding_option
+                        .as_ref()
+                        .and_then(|e| e.bitrate)
+                        .unwrap_or(0);
+                    let id = m
+                        .encoding_option
+                        .as_ref()
+                        .and_then(|e| e.name.as_deref())
+                        .or(m.media_id.as_deref());
+                    candidates.push(ProgressiveCandidate {
+                        url: m.path.as_str(),
+                        height,
+                        bandwidth,
+                        id,
+                    });
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let quality = requested_quality.trim().to_ascii_lowercase();
+
+        if quality == "worst" {
+            candidates.sort_by_key(|c| (c.height.unwrap_or(0), c.bandwidth));
+            return candidates.first().map(|c| c.url);
+        }
+
+        if quality == "best" {
+            candidates.sort_by_key(|c| (c.height.unwrap_or(0), c.bandwidth));
+            return candidates.last().map(|c| c.url);
+        }
+
+        // Parse target resolution (e.g. "1080p" -> 1080, "720" -> 720)
+        let target_height: Option<u32> = quality
+            .strip_suffix('p')
+            .unwrap_or(&quality)
+            .parse::<u32>()
+            .ok();
+
+        if let Some(target_h) = target_height {
+            // 1. Exact height match (highest bandwidth if multiple)
+            let mut exact_height: Vec<&ProgressiveCandidate> = candidates
+                .iter()
+                .filter(|c| c.height == Some(target_h))
+                .collect();
+            if !exact_height.is_empty() {
+                exact_height.sort_by_key(|c| c.bandwidth);
+                return exact_height.last().map(|c| c.url);
+            }
+
+            // 2. Exact ID / name match
+            let quality_p = format!("{target_h}p");
+            let mut exact_id: Vec<&ProgressiveCandidate> = candidates
+                .iter()
+                .filter(|c| {
+                    c.id.is_some_and(|id| {
+                        id.eq_ignore_ascii_case(&quality)
+                            || id.eq_ignore_ascii_case(&quality_p)
+                            || id.to_ascii_lowercase().ends_with(&quality_p)
+                    })
+                })
+                .collect();
+            if !exact_id.is_empty() {
+                exact_id.sort_by_key(|c| (c.height.unwrap_or(0), c.bandwidth));
+                return exact_id.last().map(|c| c.url);
+            }
+
+            // 3. Closest resolution <= target_height (highest bandwidth among highest <= target_h)
+            let mut matching: Vec<&ProgressiveCandidate> = candidates
+                .iter()
+                .filter(|c| c.height.is_some_and(|h| h <= target_h))
+                .collect();
+
+            if !matching.is_empty() {
+                matching.sort_by_key(|c| (c.height.unwrap_or(0), c.bandwidth));
+                return matching.last().map(|c| c.url);
+            }
+
+            return None;
+        }
+
         None
     }
+
+    /// Discovers progressive MP4 URLs from either MPD period adaptationSets or media descriptors.
+    pub fn find_progressive_mp4_url(&self) -> Option<&str> {
+        self.find_progressive_mp4_url_with_quality("best")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProgressiveCandidate<'a> {
+    url: &'a str,
+    height: Option<u32>,
+    bandwidth: u64,
+    id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
@@ -128,6 +284,12 @@ pub struct VodAdaptationSet {
     pub id: Option<String>,
     #[serde(default)]
     pub mime_type: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub bandwidth: Option<u64>,
     #[serde(default)]
     pub other_attributes: VodOtherAttributes,
     #[serde(default)]
