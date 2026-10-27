@@ -5,7 +5,8 @@ use tokio_util::sync::CancellationToken;
 
 use chzzk_load::chzzk::models::ChannelInfo;
 use chzzk_load::chzzk::models_vod::{
-    VodDetail, VodEncodingOption, VodPlaybackInfo, VodPlaybackMedia,
+    VodAdaptationSet, VodDetail, VodEncodingOption, VodOtherAttributes, VodPeriod, VodPlaybackInfo,
+    VodPlaybackMedia, VodRepresentation,
 };
 use chzzk_load::chzzk::source::FakeVodSource;
 use chzzk_load::cli::VodArgs;
@@ -80,6 +81,7 @@ fn create_fake_vod_source(video_no: u64, video_id: &str, in_key: &str) -> FakeVo
                 name: Some("1080p".to_string()),
             }),
         }],
+        ..Default::default()
     };
 
     FakeVodSource::new()
@@ -166,6 +168,120 @@ async fn test_vod_archival_e2e_full_url_success() {
         !staging_dir.exists(),
         "staging dir must be purged upon success"
     );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_with_neonplayer_mpd_and_query_token() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_mpd_token_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 8881234;
+    let video_id = "neon_mpd_token_vid";
+    let in_key = "key_mpd";
+
+    let detail = VodDetail {
+        video_no,
+        video_id: video_id.to_string(),
+        video_title: "MPD VOD with Query Token".to_string(),
+        in_key: Some(in_key.to_string()),
+        live_open_date: Some("2026-10-01 10:00:00".to_string()),
+        publish_date: Some("2026-10-01 12:00:00".to_string()),
+        duration: Some(3600),
+        channel: ChannelInfo {
+            channel_id: "chan_token_01".to_string(),
+            channel_name: "TokenStreamer".to_string(),
+            channel_image_url: None,
+            verified_mark: None,
+        },
+        category_type: Some("GAME".to_string()),
+        video_category: None,
+        video_category_value: None,
+        tags: vec![],
+        paid_promotion: None,
+        adult: None,
+    };
+
+    let playback_info = VodPlaybackInfo {
+        period: vec![VodPeriod {
+            adaptation_set: vec![VodAdaptationSet {
+                mime_type: Some("video/mp2t".to_string()),
+                other_attributes: VodOtherAttributes {
+                    m3u: Some(
+                        "https://cdn.example.com/vod/master.m3u8?__gda__=secret_token_123"
+                            .to_string(),
+                    ),
+                    ..Default::default()
+                },
+                representation: vec![VodRepresentation {
+                    id: Some("rep_1080".to_string()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    bandwidth: Some(8000000),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let master_content = r#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,NAME="1080p"
+1080p/playlist.m3u8
+"#;
+
+    let variant_content = r#"#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:6
+#EXTINF:6.000,
+chunk_00.ts
+#EXT-X-ENDLIST
+"#;
+
+    let source = Arc::new(
+        FakeVodSource::new()
+            .with_video_detail(video_no, detail)
+            .with_playback_info(video_id, in_key, playback_info)
+            .with_hls_playlist(
+                "https://cdn.example.com/vod/master.m3u8?__gda__=secret_token_123",
+                master_content,
+            )
+            .with_hls_playlist(
+                "https://cdn.example.com/vod/1080p/playlist.m3u8?__gda__=secret_token_123",
+                variant_content,
+            ),
+    );
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("VOD archival with NeonPlayer MPD and query tokens should succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 1);
+    assert!(summary.output_dir.join("vod.mp4").exists());
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

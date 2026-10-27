@@ -19,31 +19,46 @@ pub struct VodSegment {
     pub duration: f64,
 }
 
-/// Resolves a relative URL against a base URL.
+/// Resolves a relative URL against a base URL, preserving query parameters
+/// from the base URL if the relative URL does not provide its own.
 pub fn resolve_url(base: &str, relative: &str) -> String {
     let rel = relative.trim();
     if rel.starts_with("http://") || rel.starts_with("https://") {
         return rel.to_string();
     }
 
-    if rel.starts_with('/') {
-        // Root-relative path
-        if let Some(scheme_end) = base.find("://") {
-            let host_part = &base[scheme_end + 3..];
-            if let Some(path_start) = host_part.find('/') {
-                let host_root = &base[..scheme_end + 3 + path_start];
-                return format!("{host_root}{rel}");
-            }
-            return format!("{base}{rel}");
-        }
-    }
+    let (base_no_query, base_query) = match base.split_once('?') {
+        Some((path, q)) => (path, Some(q)),
+        None => (base, None),
+    };
 
-    if let Some(idx) = base.rfind('/') {
-        let base_dir = &base[..=idx];
+    let resolved_path = if rel.starts_with('/') {
+        // Root-relative path
+        if let Some(scheme_end) = base_no_query.find("://") {
+            let host_part = &base_no_query[scheme_end + 3..];
+            if let Some(path_start) = host_part.find('/') {
+                let host_root = &base_no_query[..scheme_end + 3 + path_start];
+                format!("{host_root}{rel}")
+            } else {
+                format!("{base_no_query}{rel}")
+            }
+        } else {
+            rel.to_string()
+        }
+    } else if let Some(idx) = base_no_query.rfind('/') {
+        let base_dir = &base_no_query[..=idx];
         format!("{base_dir}{rel}")
     } else {
         rel.to_string()
+    };
+
+    if let Some(query) = base_query {
+        if !rel.contains('?') && !resolved_path.contains('?') {
+            return format!("{resolved_path}?{query}");
+        }
     }
+
+    resolved_path
 }
 
 /// Parses an HLS master playlist (`#EXT-X-STREAM-INF`) and extracts all available variants.
@@ -299,5 +314,53 @@ chunk_0002.ts?token=abc
         assert_eq!(segments[0].duration, 6.0);
         assert_eq!(segments[2].filename, "segment_00002.ts");
         assert_eq!(segments[2].duration, 4.5);
+    }
+
+    #[test]
+    fn test_resolve_url_query_inheritance() {
+        // Query param inherited on relative path without query
+        assert_eq!(
+            resolve_url(
+                "https://cdn.example.com/hls/master.m3u8?token=123&env=real",
+                "variant_1080.m3u8"
+            ),
+            "https://cdn.example.com/hls/variant_1080.m3u8?token=123&env=real"
+        );
+
+        // Segment URL inheriting token from variant URL
+        assert_eq!(
+            resolve_url(
+                "https://cdn.example.com/hls/variant_1080.m3u8?token=123",
+                "segment_00000.ts"
+            ),
+            "https://cdn.example.com/hls/segment_00000.ts?token=123"
+        );
+
+        // Relative path with its own query param does not get clobbered
+        assert_eq!(
+            resolve_url(
+                "https://cdn.example.com/hls/master.m3u8?token=123",
+                "variant.m3u8?custom_token=456"
+            ),
+            "https://cdn.example.com/hls/variant.m3u8?custom_token=456"
+        );
+
+        // Absolute URL remains unchanged
+        assert_eq!(
+            resolve_url(
+                "https://cdn.example.com/hls/master.m3u8?token=123",
+                "https://othercdn.example.com/seg.ts"
+            ),
+            "https://othercdn.example.com/seg.ts"
+        );
+
+        // Base without query param behaves normally
+        assert_eq!(
+            resolve_url(
+                "https://cdn.example.com/hls/master.m3u8",
+                "variant_720.m3u8"
+            ),
+            "https://cdn.example.com/hls/variant_720.m3u8"
+        );
     }
 }

@@ -600,7 +600,7 @@ impl ChzzkClient {
             if let Some(err_msg) = check_api_restriction_message(code, "Playback", video_id) {
                 bail!("{err_msg}");
             }
-            if code != 200 && json_val.get("media").is_none() {
+            if code != 200 && json_val.get("media").is_none() && json_val.get("period").is_none() {
                 let msg = json_val
                     .get("message")
                     .and_then(|m| m.as_str())

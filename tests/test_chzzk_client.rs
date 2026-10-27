@@ -1151,6 +1151,56 @@ async fn test_chzzk_client_passes_cookie_to_neonplayer_playback() {
 }
 
 #[tokio::test]
+async fn test_get_playback_info_neonplayer_mpd_period_structure() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "period": [
+                    {
+                        "adaptationSet": [
+                            {
+                                "mimeType": "video/mp2t",
+                                "otherAttributes": {
+                                    "m3u": "https://cdn.example.com/vod/master.m3u8?token=xyz"
+                                },
+                                "representation": [
+                                    {
+                                        "id": "rep_1080",
+                                        "width": 1920,
+                                        "height": 1080
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client =
+        ChzzkClient::new(&config).with_playback_base_url(format!("http://127.0.0.1:{port}"));
+
+    let playback = client
+        .get_playback_info("neon_vid_dash", "key_dash")
+        .await
+        .expect("Playback info with MPD structure should succeed");
+    assert_eq!(
+        playback.find_hls_master_url(),
+        Some("https://cdn.example.com/vod/master.m3u8?token=xyz")
+    );
+}
+
+#[tokio::test]
 async fn test_get_video_detail_adult_4001_diagnostic_error() {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let port = server.server_addr().to_ip().unwrap().port();
