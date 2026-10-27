@@ -51,6 +51,7 @@ fn main() {
 
     let mut dir = PathBuf::from(".");
     let mut input_file: Option<PathBuf> = None;
+    let mut out_file: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -70,6 +71,14 @@ fn main() {
             }
         } else if args[i].starts_with("--input-file=") {
             input_file = Some(PathBuf::from(&args[i]["--input-file=".len()..]));
+        } else if args[i] == "--out" || args[i] == "-o" {
+            if i + 1 < args.len() {
+                out_file = Some(args[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        } else if args[i].starts_with("--out=") {
+            out_file = Some(args[i]["--out=".len()..].to_string());
         }
         i += 1;
     }
@@ -79,7 +88,32 @@ fn main() {
     // Dummy MPEG-TS sync byte 0x47 payload
     let dummy_ts = [0x47u8; 188];
 
-    if let Some(input_path) = input_file {
+    if let Some(out_name) = out_file {
+        // Valid 56-byte faststart MP4 container
+        let mock_mp4: &[u8] = &[
+            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p',
+            b'i', b's', b'o', b'm', 0x00, 0x00, 0x02, 0x00,
+            b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+            0x00, 0x00, 0x00, 0x10, b'm', b'o', b'o', b'v',
+            b'm', b'v', b'h', b'd', 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10, b'm', b'd', b'a', b't',
+            b'm', b'o', b'c', b'k', b'd', b'a', b't', b'a',
+        ];
+        let out_path = dir.join(&out_name);
+        let _ = std::fs::write(&out_path, mock_mp4);
+
+        // Remove .aria2 control file upon download completion
+        let aria2_path = dir.join(format!("{out_name}.aria2"));
+        let _ = std::fs::remove_file(&aria2_path);
+
+        if args.iter().any(|a| a.contains("multi_progress")) {
+            println!("[#2089b0 28B/56B(50%) CN:16 DL:5.0MiB/s ETA:1s]");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            println!("[#2089b0 56B/56B(100%) CN:16 DL:10.0MiB/s ETA:0s]");
+        } else {
+            println!("[#2089b0 56B/56B(100%) CN:16 DL:10.0MiB/s ETA:0s]");
+        }
+    } else if let Some(input_path) = input_file {
         if let Ok(content) = std::fs::read_to_string(&input_path) {
             for line in content.lines() {
                 let trimmed = line.trim();

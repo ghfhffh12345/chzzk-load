@@ -229,6 +229,175 @@ pub fn build_aria2c_segment_args(
     args
 }
 
+/// Constructs argument list for executing aria2c to download a single monolithic progressive MP4 stream.
+///
+/// Injects browser emulation headers (`User-Agent`, `Referer`, `Origin`),
+/// `-k1M` for 1 MiB minimum chunk splitting, `-x16` (16 connections per server),
+/// `-s16` (16 split parts), and resumable continuous download flag `-c`.
+pub fn build_aria2c_progressive_args(
+    staging_dir: &Path,
+    url: &str,
+    out_filename: &str,
+    cookie_header: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "-x16".to_string(),
+        "-s16".to_string(),
+        "-k1M".to_string(),
+        "-c".to_string(),
+        "--allow-overwrite=true".to_string(),
+        "--auto-file-renaming=false".to_string(),
+        "--summary-interval=1".to_string(),
+        format!("--header=User-Agent: {DEFAULT_USER_AGENT}"),
+        "--header=Referer: https://chzzk.naver.com/".to_string(),
+        "--header=Origin: https://chzzk.naver.com".to_string(),
+    ];
+
+    if let Some(cookie) = cookie_header {
+        let trimmed = cookie.trim();
+        if !trimmed.is_empty() {
+            args.push(format!("--header=Cookie: {trimmed}"));
+        }
+    }
+
+    args.push(format!("--dir={}", staging_dir.display()));
+    args.push(format!("--out={out_filename}"));
+    args.push(url.to_string());
+
+    args
+}
+
+/// Executes aria2c to download a single progressive MP4 video stream into `staging_dir`.
+///
+/// Implements:
+/// - Single-file progressive streaming via multi-connection range requests (`-x16 -s16 -k1M -c`).
+/// - Line-by-line asynchronous stdout parsing for progress without any filesystem `read_dir` scanning.
+/// - Cursor-resumable staging: if `vod.mp4.part` already exists without `.aria2` and passes container
+///   integrity, skips aria2c execution; if `.aria2` exists, resumes from previous cursor.
+/// - Cooperative cancellation: immediately terminates and unlinks/kills child process when cancelled.
+pub async fn download_progressive_mp4_with_aria2c(
+    aria2c_bin: &str,
+    staging_dir: &Path,
+    url: &str,
+    progress_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::vod::progress::VodVideoProgressUpdate>,
+    >,
+    cookie_header: Option<&str>,
+    cancel_token: CancellationToken,
+) -> Result<PathBuf> {
+    if cancel_token.is_cancelled() {
+        bail!("VOD download cancelled by token before aria2c execution");
+    }
+
+    tokio::fs::create_dir_all(staging_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to create staging directory '{}'",
+                staging_dir.display()
+            )
+        })?;
+
+    let out_filename = "vod.mp4.part";
+    let staged_file_path = staging_dir.join(out_filename);
+    let control_file_path = staging_dir.join(format!("{out_filename}.aria2"));
+
+    // Check if file is already completed (e.g. from prior interrupted session)
+    if staged_file_path.exists() && !control_file_path.exists() {
+        if let Ok(meta) = tokio::fs::metadata(&staged_file_path).await {
+            if meta.len() > 0 && crate::consolidation::staging::probe_moov_atom(&staged_file_path) {
+                if let Some(ref tx) = progress_tx {
+                    let _ = tx.send(
+                        crate::vod::progress::VodVideoProgressUpdate::ProgressiveProgress {
+                            bytes: meta.len(),
+                            total_bytes: Some(meta.len()),
+                            speed: None,
+                            eta: None,
+                        },
+                    );
+                }
+                return Ok(staged_file_path);
+            }
+        }
+    }
+
+    let mut cmd = Command::new(aria2c_bin);
+    cmd.kill_on_drop(true);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let args = build_aria2c_progressive_args(staging_dir, url, out_filename, cookie_header);
+    cmd.args(&args);
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to spawn aria2c binary: '{aria2c_bin}'"))?;
+
+    let stdout = child.stdout.take();
+    let stdout_tx = progress_tx.clone();
+    let stdout_handle = tokio::spawn(async move {
+        if let Some(pipe) = stdout {
+            let mut lines = tokio::io::BufReader::new(pipe).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(ref tx) = stdout_tx {
+                    if let Some(prog) =
+                        crate::vod::progress::parse_aria2c_single_file_progress(&line)
+                    {
+                        let _ = tx.send(prog);
+                    }
+                }
+            }
+        }
+    });
+
+    let stderr = child.stderr.take();
+    let stderr_handle = tokio::spawn(async move {
+        if let Some(mut err_pipe) = stderr {
+            let mut buf = Vec::new();
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut err_pipe, &mut buf).await;
+            String::from_utf8_lossy(&buf).to_string()
+        } else {
+            String::new()
+        }
+    });
+
+    tokio::select! {
+        _ = cancel_token.cancelled() => {
+            let _ = child.kill().await;
+            stdout_handle.abort();
+            stderr_handle.abort();
+            bail!("VOD download cancelled by token during aria2c execution");
+        }
+        res = child.wait() => {
+            stdout_handle.abort();
+            let status = res.with_context(|| "Failed waiting on aria2c process")?;
+            let stderr_logs = stderr_handle.await.unwrap_or_default();
+            if !status.success() {
+                bail!(
+                    "aria2c failed with exit status {status}: {}",
+                    stderr_logs.trim()
+                );
+            }
+
+            if let Some(ref tx) = progress_tx {
+                if let Ok(meta) = tokio::fs::metadata(&staged_file_path).await {
+                    let _ = tx.send(
+                        crate::vod::progress::VodVideoProgressUpdate::ProgressiveProgress {
+                            bytes: meta.len(),
+                            total_bytes: Some(meta.len()),
+                            speed: None,
+                            eta: None,
+                        },
+                    );
+                }
+            }
+
+            Ok(staged_file_path)
+        }
+    }
+}
+
 /// Scans `staging_dir` for completed `.ts` segments, using `completed_cache`
 /// to eliminate redundant filesystem `stat` calls on previously completed files.
 ///
