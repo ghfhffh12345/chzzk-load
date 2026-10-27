@@ -293,12 +293,14 @@ pub async fn run_vod_archival_with_options(
         })?;
 
     // 10. Download video segments via aria2c with live progress reporting
+    let cookie_header = source.cookie_header();
     let download_res = download_segments_with_aria2c_and_progress(
         &aria2c_bin,
         &staging_dir,
         &input_file,
         &segments,
         video_tx,
+        cookie_header,
         cancel_token.clone(),
     )
     .await;

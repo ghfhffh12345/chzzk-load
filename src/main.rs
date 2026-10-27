@@ -51,9 +51,16 @@ async fn main() -> anyhow::Result<()> {
         if args.headless {
             vod_args.headless = true;
         }
+        if vod_args.nid_aut.is_none() {
+            vod_args.nid_aut = args.nid_aut;
+        }
+        if vod_args.nid_ses.is_none() {
+            vod_args.nid_ses = args.nid_ses;
+        }
         let config_path = vod_args.config.as_deref();
         let settings = Settings::resolve_for_consolidation(config_path)?;
-        let client = Arc::new(ChzzkClient::new(&settings.chzzk));
+        let auth = settings.resolve_auth(vod_args.nid_aut.as_deref(), vod_args.nid_ses.as_deref());
+        let client = Arc::new(ChzzkClient::new_with_auth(&auth));
         let cancel_token = CancellationToken::new();
 
         let cancel_token_clone = cancel_token.clone();
@@ -190,7 +197,8 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let chzzk: Arc<dyn LiveStreamSource> = Arc::new(ChzzkClient::new(&settings.chzzk));
+    let auth = settings.resolve_auth(args.nid_aut.as_deref(), args.nid_ses.as_deref());
+    let chzzk: Arc<dyn LiveStreamSource> = Arc::new(ChzzkClient::new_with_auth(&auth));
     let orchestrator = Arc::new(EngineOrchestrator::with_cancel_token(
         settings.clone(),
         chzzk,

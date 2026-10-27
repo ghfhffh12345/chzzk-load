@@ -1026,3 +1026,295 @@ async fn test_get_live_detail_lean_metadata_mapping_and_omits_telemetry() {
         other => panic!("Expected LiveDetail::Open, got {other:?}"),
     }
 }
+
+#[test]
+fn test_chzzk_client_formats_auth_config_cookies() {
+    use chzzk_load::config::AuthConfig;
+
+    let auth = AuthConfig::new("aut_token_123", "ses_token_456");
+    let client = ChzzkClient::new_with_auth(&auth);
+    assert_eq!(
+        client.cookie_header(),
+        Some("NID_AUT=aut_token_123; NID_SES=ses_token_456")
+    );
+}
+
+#[tokio::test]
+async fn test_chzzk_client_passes_cookie_to_chzzk_vod_detail() {
+    use chzzk_load::config::AuthConfig;
+    use std::sync::mpsc;
+
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let cookie_header = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Cookie"))
+                .map(|h| h.value.as_str().to_string());
+            let _ = tx.send(cookie_header);
+
+            let mock_body = r#"{
+                "code": 200,
+                "message": null,
+                "content": {
+                    "videoNo": 4531238,
+                    "videoId": "neon_vid_999",
+                    "videoTitle": "Authenticated VOD",
+                    "channel": {
+                        "channelId": "chan_01",
+                        "channelName": "Streamer01"
+                    }
+                }
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let auth = AuthConfig::new("sample_nid_aut", "sample_nid_ses");
+    let client =
+        ChzzkClient::new_with_auth(&auth).with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let detail = client
+        .get_video_detail(4531238)
+        .await
+        .expect("VOD detail should succeed");
+    assert_eq!(detail.video_no, 4531238);
+
+    let received_cookie = rx.recv().expect("Mock server should have received request");
+    assert_eq!(
+        received_cookie.as_deref(),
+        Some("NID_AUT=sample_nid_aut; NID_SES=sample_nid_ses")
+    );
+}
+
+#[tokio::test]
+async fn test_chzzk_client_passes_cookie_to_neonplayer_playback() {
+    use chzzk_load::config::AuthConfig;
+    use std::sync::mpsc;
+
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let cookie_header = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Cookie"))
+                .map(|h| h.value.as_str().to_string());
+            let _ = tx.send(cookie_header);
+
+            let mock_body = r#"{
+                "media": [
+                    {
+                        "mediaId": "HLS",
+                        "protocol": "HLS",
+                        "path": "https://cdn.example.com/vod/master.m3u8"
+                    }
+                ]
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let auth = AuthConfig::new("neon_aut_123", "neon_ses_456");
+    let client = ChzzkClient::new_with_auth(&auth)
+        .with_playback_base_url(format!("http://127.0.0.1:{port}"));
+
+    let playback = client
+        .get_playback_info("neon_vid_999", "secret_key_888")
+        .await
+        .expect("Playback info should succeed");
+    assert_eq!(
+        playback.find_hls_master_url(),
+        Some("https://cdn.example.com/vod/master.m3u8")
+    );
+
+    let received_cookie = rx.recv().expect("Mock server should have received request");
+    assert_eq!(
+        received_cookie.as_deref(),
+        Some("NID_AUT=neon_aut_123; NID_SES=neon_ses_456")
+    );
+}
+
+#[tokio::test]
+async fn test_get_video_detail_adult_4001_diagnostic_error() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 4001,
+                "message": "Adult certification is required",
+                "content": null
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = ChzzkClient::new(&config).with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let err = client
+        .get_video_detail(99901)
+        .await
+        .expect_err("Adult 4001 video must return error");
+    let err_msg = format!("{err:#}");
+    assert!(
+        err_msg.contains("4001") && err_msg.contains("19+ age-restricted"),
+        "Error message must specify code 4001 and age restriction: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("nid_aut") && err_msg.contains("nid_ses"),
+        "Error message must guide user to provide nid_aut and nid_ses: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_video_detail_subscriber_4003_diagnostic_error() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 4003,
+                "message": "Channel subscription required",
+                "content": null
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body).with_header(
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
+            );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = ChzzkClient::new(&config).with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let err = client
+        .get_video_detail(99902)
+        .await
+        .expect_err("Subscriber 4003 video must return error");
+    let err_msg = format!("{err:#}");
+    assert!(
+        err_msg.contains("4003") && err_msg.contains("subscriber-only"),
+        "Error message must specify code 4003 and subscription restriction: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("nid_aut") && err_msg.contains("nid_ses"),
+        "Error message must guide user to provide credentials: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_video_detail_http_403_with_4001_envelope() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{
+                "code": 4001,
+                "message": "Adult verification required",
+                "content": null
+            }"#;
+            let response = tiny_http::Response::from_string(mock_body)
+                .with_status_code(403)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                );
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client = ChzzkClient::new(&config).with_base_url(format!("http://127.0.0.1:{port}"));
+
+    let err = client
+        .get_video_detail(99903)
+        .await
+        .expect_err("HTTP 403 with code 4001 must return error");
+    let err_msg = format!("{err:#}");
+    assert!(
+        err_msg.contains("4001") && err_msg.contains("19+ age-restricted"),
+        "Error message should identify 4001 age restriction: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("nid_aut") && err_msg.contains("nid_ses"),
+        "Error message should instruct user on credentials: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_playback_info_restricted_http_403_and_codes() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let port = server.server_addr().to_ip().unwrap().port();
+
+    std::thread::spawn(move || {
+        // Request 1: 403 with code 4001
+        if let Ok(request) = server.recv() {
+            let mock_body = r#"{"code": 4001, "message": "Restricted"}"#;
+            let response = tiny_http::Response::from_string(mock_body)
+                .with_status_code(403)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .unwrap(),
+                );
+            let _ = request.respond(response);
+        }
+        // Request 2: 403 plain without json
+        if let Ok(request) = server.recv() {
+            let response = tiny_http::Response::from_string("Access Denied").with_status_code(403);
+            let _ = request.respond(response);
+        }
+    });
+
+    let config = chzzk_load::config::ChzzkConfig::default();
+    let client =
+        ChzzkClient::new(&config).with_playback_base_url(format!("http://127.0.0.1:{port}"));
+
+    let err1 = client
+        .get_playback_info("neon_vid_1", "key1")
+        .await
+        .expect_err("Playback 403 with code 4001 should fail");
+    let err1_msg = format!("{err1:#}");
+    assert!(
+        err1_msg.contains("4001") && err1_msg.contains("19+ age-restricted"),
+        "Playback error should diagnose 4001: {err1_msg}"
+    );
+    assert!(
+        err1_msg.contains("nid_aut") && err1_msg.contains("nid_ses"),
+        "Playback error should mention credentials: {err1_msg}"
+    );
+
+    let err2 = client
+        .get_playback_info("neon_vid_2", "key2")
+        .await
+        .expect_err("Playback 403 plain should fail");
+    let err2_msg = format!("{err2:#}");
+    assert!(
+        err2_msg.contains("403") && err2_msg.contains("nid_aut"),
+        "Playback error should diagnose 403 and mention credentials: {err2_msg}"
+    );
+}

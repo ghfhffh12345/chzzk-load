@@ -99,12 +99,84 @@ impl Default for RcloneConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AuthConfig {
+    #[serde(default)]
+    pub nid_aut: String,
+    #[serde(default)]
+    pub nid_ses: String,
+}
+
+impl AuthConfig {
+    pub fn new(nid_aut: impl Into<String>, nid_ses: impl Into<String>) -> Self {
+        Self {
+            nid_aut: nid_aut.into(),
+            nid_ses: nid_ses.into(),
+        }
+    }
+
+    /// Formats the session credentials into a standard Cookie header string.
+    /// Returns None if both credentials are empty or whitespace-only.
+    pub fn to_cookie_header(&self) -> Option<String> {
+        let aut = self.nid_aut.trim();
+        let ses = self.nid_ses.trim();
+        let has_aut = !aut.is_empty();
+        let has_ses = !ses.is_empty();
+
+        if has_aut && has_ses {
+            Some(format!("NID_AUT={aut}; NID_SES={ses}"))
+        } else if has_aut {
+            Some(format!("NID_AUT={aut}"))
+        } else if has_ses {
+            Some(format!("NID_SES={ses}"))
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ChzzkConfig {
     #[serde(default)]
     pub nid_aut: String,
     #[serde(default)]
     pub nid_ses: String,
+}
+
+impl From<AuthConfig> for ChzzkConfig {
+    fn from(auth: AuthConfig) -> Self {
+        Self {
+            nid_aut: auth.nid_aut,
+            nid_ses: auth.nid_ses,
+        }
+    }
+}
+
+impl From<&AuthConfig> for ChzzkConfig {
+    fn from(auth: &AuthConfig) -> Self {
+        Self {
+            nid_aut: auth.nid_aut.clone(),
+            nid_ses: auth.nid_ses.clone(),
+        }
+    }
+}
+
+impl From<ChzzkConfig> for AuthConfig {
+    fn from(chzzk: ChzzkConfig) -> Self {
+        Self {
+            nid_aut: chzzk.nid_aut,
+            nid_ses: chzzk.nid_ses,
+        }
+    }
+}
+
+impl From<&ChzzkConfig> for AuthConfig {
+    fn from(chzzk: &ChzzkConfig) -> Self {
+        Self {
+            nid_aut: chzzk.nid_aut.clone(),
+            nid_ses: chzzk.nid_ses.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -157,8 +229,13 @@ extra_args = []
 # Additional arguments passed specifically during consolidation cloud uploads
 consolidate_extra_args = []
 
+[auth]
+# Optional Naver session cookies for age-restricted (19+) or subscriber streams / VODs
+nid_aut = ""
+nid_ses = ""
+
 [chzzk]
-# Optional Naver session cookies for age-restricted (19+) or subscriber streams
+# Optional Naver session cookies (legacy alias for [auth])
 nid_aut = ""
 nid_ses = ""
 
@@ -237,6 +314,8 @@ pub struct Settings {
     #[serde(default)]
     pub chzzk: ChzzkConfig,
     #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
     pub aria2c: Aria2cConfig,
     #[serde(default = "default_channels")]
     pub channels: Vec<ChannelConfig>,
@@ -255,6 +334,7 @@ impl Default for Settings {
             general: GeneralConfig::default(),
             rclone: RcloneConfig::default(),
             chzzk: ChzzkConfig::default(),
+            auth: AuthConfig::default(),
             aria2c: Aria2cConfig::default(),
             channels: default_channels(),
         }
@@ -262,6 +342,35 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Resolves authentication credentials with optional CLI overrides.
+    /// Priority: CLI flags > [auth] > [chzzk]
+    pub fn resolve_auth(&self, cli_nid_aut: Option<&str>, cli_nid_ses: Option<&str>) -> AuthConfig {
+        let nid_aut = match cli_nid_aut {
+            Some(val) => val.trim().to_string(),
+            None => {
+                let s = self.auth.nid_aut.trim();
+                if !s.is_empty() {
+                    s.to_string()
+                } else {
+                    self.chzzk.nid_aut.trim().to_string()
+                }
+            }
+        };
+
+        let nid_ses = match cli_nid_ses {
+            Some(val) => val.trim().to_string(),
+            None => {
+                let s = self.auth.nid_ses.trim();
+                if !s.is_empty() {
+                    s.to_string()
+                } else {
+                    self.chzzk.nid_ses.trim().to_string()
+                }
+            }
+        };
+
+        AuthConfig { nid_aut, nid_ses }
+    }
     /// Loads and parses settings from a TOML file path without creating files if missing.
     pub fn load_from_path(path: &Path) -> anyhow::Result<Self> {
         let content = fs::read_to_string(path)

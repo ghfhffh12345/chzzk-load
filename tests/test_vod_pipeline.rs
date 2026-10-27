@@ -122,6 +122,8 @@ async fn test_vod_archival_e2e_full_url_success() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -191,6 +193,8 @@ async fn test_vod_archival_numeric_id_and_quality_selector() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -228,6 +232,8 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let options = VodOptions {
@@ -271,6 +277,8 @@ async fn test_vod_archival_cooperative_cancellation() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -380,6 +388,8 @@ async fn test_vod_archival_with_concurrent_chat_integration() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -438,6 +448,8 @@ async fn test_vod_archival_no_chat_flag_skips_chat() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -493,6 +505,8 @@ async fn test_vod_archival_dual_event_metadata_synthesis_and_promotion() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -569,6 +583,8 @@ async fn test_vod_archival_retains_part_files_and_staging_dir_on_failure() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -685,6 +701,8 @@ async fn test_vod_archival_resumes_partial_download_skipping_existing_segments()
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -750,6 +768,8 @@ async fn test_vod_archival_custom_temp_dir() {
         config: None,
         upload: false,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -800,6 +820,8 @@ async fn test_vod_archival_upload_preflight_failure() {
         config: None,
         upload: true,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let options = VodOptions {
@@ -866,6 +888,8 @@ async fn test_vod_archival_upload_default_retention_preserves_local_files() {
         config: None,
         upload: true,
         delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let options = VodOptions {
@@ -961,6 +985,8 @@ async fn test_vod_archival_upload_delete_after_upload_purges_local_files() {
         config: None,
         upload: true,
         delete_after_upload: true,
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let options = VodOptions {
@@ -1041,6 +1067,8 @@ async fn test_vod_archival_upload_failure_preserves_local_artifacts() {
         config: None,
         upload: true,
         delete_after_upload: true, // even if delete_after_upload is set, failures MUST preserve local files
+        nid_aut: None,
+        nid_ses: None,
     };
 
     let options = VodOptions {
@@ -1083,4 +1111,185 @@ async fn test_vod_archival_upload_failure_preserves_local_artifacts() {
     );
 
     let _ = std::fs::remove_dir_all(&temp_root);
+}
+
+#[tokio::test]
+async fn test_vod_archival_unauthenticated_fails_with_actionable_guidance() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!("test_vod_unauth_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 88001122;
+    let video_id = "neon_restricted_vid";
+    let in_key = "key_restricted";
+
+    // FakeVodSource requires valid Naver cookies
+    let source = Arc::new(
+        create_fake_vod_source(video_no, video_id, in_key)
+            .with_auth_required("NID_AUT=valid_aut; NID_SES=valid_ses"),
+    );
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let err = run_vod_archival(args, source.clone(), cancel_token)
+        .await
+        .expect_err("Unauthenticated request to restricted VOD must fail");
+
+    let err_msg = format!("{err:#}");
+    assert!(
+        err_msg.contains("restricted") && err_msg.contains("authentication required"),
+        "Error message must clearly identify authentication restriction: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("nid_aut") && err_msg.contains("nid_ses"),
+        "Error message must provide actionable guidance mentioning nid_aut and nid_ses: {err_msg}"
+    );
+
+    // Verify cookie was checked during API detail request
+    assert_eq!(
+        source.cookie_header_call_count(),
+        1,
+        "Cookie header must be checked upon initial detail query"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_authenticated_propagates_cookies_and_succeeds() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!("test_vod_auth_ok_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 88003344;
+    let video_id = "neon_auth_vid";
+    let in_key = "key_auth_secret";
+
+    let expected_cookie = "NID_AUT=valid_aut; NID_SES=valid_ses";
+    let source = Arc::new(
+        create_fake_vod_source(video_no, video_id, in_key)
+            .with_auth_required(expected_cookie)
+            .with_cookie_header(expected_cookie),
+    );
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: Some("valid_aut".to_string()),
+        nid_ses: Some("valid_ses".to_string()),
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(
+        args,
+        Arc::clone(&source) as Arc<dyn chzzk_load::chzzk::source::VodSource>,
+        cancel_token,
+    )
+    .await
+    .expect("Authenticated request to restricted VOD must succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert!(summary.output_dir.join("vod.mp4").exists());
+    assert!(summary.output_dir.join("vod_metadata.jsonl").exists());
+
+    // Verify cookie_header was queried during archival (both API calls and aria2c execution)
+    assert!(
+        source.cookie_header_call_count() >= 3,
+        "Cookie header must be propagated and queried during detail, playback, and segment download"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_diagnostics_on_adult_4001_and_subscriber_4003_errors() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_diagnostics_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    // 1. Adult 4001 restriction error
+    let source_4001 = Arc::new(create_fake_vod_source(9001, "vid_4001", "key"));
+    source_4001.set_video_error(
+        9001,
+        "VOD access restricted (code 4001: 19+ age-restricted) for video 9001: authentication required (provide valid nid_aut and nid_ses via settings.toml [auth] or --nid-aut/--nid-ses)",
+    );
+
+    let args_4001 = VodArgs {
+        target: "9001".to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+    };
+
+    let err_4001 = run_vod_archival(args_4001, source_4001, CancellationToken::new())
+        .await
+        .expect_err("Adult 4001 VOD must fail with diagnostic error");
+    let err_4001_msg = format!("{err_4001:#}");
+    assert!(
+        err_4001_msg.contains("4001") && err_4001_msg.contains("19+ age-restricted"),
+        "Diagnostic message must indicate code 4001 age restriction: {err_4001_msg}"
+    );
+
+    // 2. Subscriber 4003 restriction error
+    let source_4003 = Arc::new(create_fake_vod_source(9003, "vid_4003", "key"));
+    source_4003.set_video_error(
+        9003,
+        "VOD access restricted (code 4003: subscriber-only) for video 9003: authentication required (provide valid nid_aut and nid_ses with an active channel subscription)",
+    );
+
+    let args_4003 = VodArgs {
+        target: "9003".to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+    };
+
+    let err_4003 = run_vod_archival(args_4003, source_4003, CancellationToken::new())
+        .await
+        .expect_err("Subscriber 4003 VOD must fail with diagnostic error");
+    let err_4003_msg = format!("{err_4003:#}");
+    assert!(
+        err_4003_msg.contains("4003") && err_4003_msg.contains("subscriber-only"),
+        "Diagnostic message must indicate code 4003 subscription restriction: {err_4003_msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }

@@ -183,6 +183,7 @@ pub async fn download_segments_with_aria2c(
         input_file,
         &[],
         None,
+        None,
         cancel_token,
     )
     .await
@@ -197,6 +198,7 @@ pub async fn download_segments_with_aria2c_and_progress(
     progress_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::vod::progress::VodVideoProgressUpdate>,
     >,
+    cookie_header: Option<&str>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
     if cancel_token.is_cancelled() {
@@ -232,6 +234,13 @@ pub async fn download_segments_with_aria2c_and_progress(
     cmd.arg(staging_dir);
     cmd.arg("--input-file");
     cmd.arg(input_file);
+
+    if let Some(cookie) = cookie_header {
+        let trimmed = cookie.trim();
+        if !trimmed.is_empty() {
+            cmd.arg(format!("--header=Cookie: {trimmed}"));
+        }
+    }
 
     let mut child = cmd
         .spawn()

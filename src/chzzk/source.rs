@@ -365,6 +365,8 @@ pub struct FakeVodSource {
     chat_queues: ChatPageQueueMap,
     chat_calls: Arc<Mutex<Vec<(u64, u64)>>>,
     cookie_header: Option<String>,
+    required_cookie: Arc<Mutex<Option<String>>>,
+    cookie_calls: Arc<AtomicUsize>,
 }
 
 impl FakeVodSource {
@@ -469,6 +471,20 @@ impl FakeVodSource {
             .push_back(response);
     }
 
+    pub fn with_auth_required(self, required_cookie: impl Into<String>) -> Self {
+        self.set_auth_required(Some(required_cookie.into()));
+        self
+    }
+
+    pub fn set_auth_required(&self, required_cookie: Option<String>) {
+        let mut req = self.required_cookie.lock().unwrap();
+        *req = required_cookie;
+    }
+
+    pub fn cookie_header_call_count(&self) -> usize {
+        self.cookie_calls.load(Ordering::SeqCst)
+    }
+
     pub fn chat_page_calls(&self) -> Vec<(u64, u64)> {
         self.chat_calls.lock().unwrap().clone()
     }
@@ -481,6 +497,16 @@ impl FakeVodSource {
 impl VodSource for FakeVodSource {
     fn get_video_detail<'a>(&'a self, video_no: u64) -> BoxFuture<'a, anyhow::Result<VodDetail>> {
         Box::pin(async move {
+            let required = self.required_cookie.lock().unwrap().clone();
+            if let Some(req_cookie) = required {
+                let actual = self.cookie_header();
+                if actual != Some(&req_cookie) {
+                    anyhow::bail!(
+                        "VOD access restricted (HTTP 403 Forbidden) for video {video_no}: authentication required (provide valid nid_aut and nid_ses via settings.toml [auth] or --nid-aut/--nid-ses)"
+                    );
+                }
+            }
+
             let map = self.details.lock().unwrap();
             match map.get(&video_no) {
                 Some(Ok(detail)) => Ok(detail.clone()),
@@ -500,6 +526,16 @@ impl VodSource for FakeVodSource {
         in_key: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<VodPlaybackInfo>> {
         Box::pin(async move {
+            let required = self.required_cookie.lock().unwrap().clone();
+            if let Some(req_cookie) = required {
+                let actual = self.cookie_header();
+                if actual != Some(&req_cookie) {
+                    anyhow::bail!(
+                        "Playback access restricted (HTTP 403 Forbidden) for video {video_id}: authentication required (provide valid nid_aut and nid_ses via settings.toml [auth] or --nid-aut/--nid-ses)"
+                    );
+                }
+            }
+
             let map = self.playbacks.lock().unwrap();
             let key = (video_id.to_string(), in_key.to_string());
             match map.get(&key) {
@@ -558,6 +594,7 @@ impl VodSource for FakeVodSource {
     }
 
     fn cookie_header(&self) -> Option<&str> {
+        self.cookie_calls.fetch_add(1, Ordering::SeqCst);
         self.cookie_header.as_deref()
     }
 }

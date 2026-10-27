@@ -279,21 +279,27 @@ pub fn extract_hls_key_uri(content: &str) -> Option<String> {
 pub struct ChzzkClient {
     client: reqwest::Client,
     base_url: String,
+    playback_base_url: String,
     game_base_url: String,
     chat_ws_url: Option<String>,
     cookie_header: Option<String>,
 }
 
+fn check_api_restriction_message(code: i64, context: &str, target_id: &str) -> Option<String> {
+    match code {
+        4001 => Some(format!(
+            "{context} access restricted (code 4001: 19+ age-restricted) for video {target_id}: authentication required (provide valid nid_aut and nid_ses via settings.toml [auth] or --nid-aut/--nid-ses)"
+        )),
+        4003 => Some(format!(
+            "{context} access restricted (code 4003: subscriber-only) for video {target_id}: authentication required (provide valid nid_aut and nid_ses with an active channel subscription)"
+        )),
+        _ => None,
+    }
+}
+
 impl ChzzkClient {
     pub fn new(config: &ChzzkConfig) -> Self {
-        let cookie_str = if !config.nid_aut.is_empty() && !config.nid_ses.is_empty() {
-            Some(format!(
-                "NID_AUT={}; NID_SES={}",
-                config.nid_aut, config.nid_ses
-            ))
-        } else {
-            None
-        };
+        let cookie_str = crate::config::AuthConfig::from(config).to_cookie_header();
 
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(DEFAULT_USER_AGENT));
@@ -313,14 +319,24 @@ impl ChzzkClient {
         Self {
             client,
             base_url: "https://api.chzzk.naver.com".to_string(),
+            playback_base_url: "https://apis.naver.com".to_string(),
             game_base_url: "https://comm-api.game.naver.com/nng_main".to_string(),
             chat_ws_url: None,
             cookie_header: cookie_str,
         }
     }
 
+    pub fn new_with_auth(auth: &crate::config::AuthConfig) -> Self {
+        Self::new(&crate::config::ChzzkConfig::from(auth))
+    }
+
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
+        self
+    }
+
+    pub fn with_playback_base_url(mut self, playback_base_url: impl Into<String>) -> Self {
+        self.playback_base_url = playback_base_url.into();
         self
     }
 
@@ -522,13 +538,20 @@ impl ChzzkClient {
         let url = format!("{}/service/v3/videos/{video_no}", self.base_url);
         let resp = self.client.get(&url).send().await?;
         let status = resp.status();
-        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
-            bail!(
-                "VOD access restricted ({status}) for video {video_no}: authentication required (set nid_aut / nid_ses)"
-            );
-        }
+        let target_id = video_no.to_string();
         if status == reqwest::StatusCode::NOT_FOUND {
             bail!("VOD {video_no} not found (404 Not Found)");
+        }
+        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+            if let Ok(body) = resp.json::<serde_json::Value>().await
+                && let Some(code) = body.get("code").and_then(|c| c.as_i64())
+                && let Some(err_msg) = check_api_restriction_message(code, "VOD", &target_id)
+            {
+                bail!("{err_msg}");
+            }
+            bail!(
+                "VOD access restricted ({status}) for video {video_no}: authentication required (provide valid nid_aut and nid_ses via settings.toml [auth] or --nid-aut/--nid-ses)"
+            );
         }
         let resp = resp
             .error_for_status()
@@ -537,6 +560,9 @@ impl ChzzkClient {
             .json()
             .await
             .with_context(|| format!("Failed to parse VOD detail JSON for {video_no}"))?;
+        if let Some(err_msg) = check_api_restriction_message(body.code as i64, "VOD", &target_id) {
+            bail!("{err_msg}");
+        }
         if body.code != 200 {
             let msg = body.message.unwrap_or_else(|| "Unknown error".to_string());
             bail!("Chzzk VOD API returned code {}: {}", body.code, msg);
@@ -547,22 +573,43 @@ impl ChzzkClient {
 
     pub async fn get_playback_info(&self, video_id: &str, in_key: &str) -> Result<VodPlaybackInfo> {
         let url = format!(
-            "https://apis.naver.com/neonplayer/vodplay/v1/playback/{video_id}?key={in_key}&env=real"
+            "{}/neonplayer/vodplay/v1/playback/{video_id}?key={in_key}&env=real",
+            self.playback_base_url
         );
         let resp = self.client.get(&url).send().await?;
         let status = resp.status();
         if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+            if let Ok(body) = resp.json::<serde_json::Value>().await
+                && let Some(code) = body.get("code").and_then(|c| c.as_i64())
+                && let Some(err_msg) = check_api_restriction_message(code, "Playback", video_id)
+            {
+                bail!("{err_msg}");
+            }
             bail!(
-                "Playback access restricted ({status}) for video {video_id}: invalid key or authentication required"
+                "Playback access restricted ({status}) for video {video_id}: authentication required (provide valid nid_aut and nid_ses via settings.toml [auth] or --nid-aut/--nid-ses)"
             );
         }
         let resp = resp
             .error_for_status()
             .with_context(|| format!("HTTP error fetching playback info for {video_id}"))?;
-        let info: VodPlaybackInfo = resp
+        let json_val: serde_json::Value = resp
             .json()
             .await
             .with_context(|| format!("Failed to parse playback info JSON for {video_id}"))?;
+        if let Some(code) = json_val.get("code").and_then(|c| c.as_i64()) {
+            if let Some(err_msg) = check_api_restriction_message(code, "Playback", video_id) {
+                bail!("{err_msg}");
+            }
+            if code != 200 && json_val.get("media").is_none() {
+                let msg = json_val
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error");
+                bail!("NeonPlayer playback returned code {code}: {msg}");
+            }
+        }
+        let info: VodPlaybackInfo = serde_json::from_value(json_val)
+            .with_context(|| format!("Failed to parse playback info structure for {video_id}"))?;
         Ok(info)
     }
 
@@ -588,6 +635,7 @@ impl ChzzkClient {
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         let status = resp.status();
+        let target_id = video_no.to_string();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(VodChatError::RateLimited);
         }
@@ -597,8 +645,14 @@ impl ChzzkClient {
             )));
         }
         if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
+            if let Ok(body) = resp.json::<serde_json::Value>().await
+                && let Some(code) = body.get("code").and_then(|c| c.as_i64())
+                && let Some(err_msg) = check_api_restriction_message(code, "Access", &target_id)
+            {
+                return Err(VodChatError::Unavailable(err_msg));
+            }
             return Err(VodChatError::Unavailable(format!(
-                "Access restricted ({status}) for video {video_no}"
+                "Access restricted ({status}) for video {video_no}: authentication required (provide valid nid_aut and nid_ses via settings.toml [auth] or --nid-aut/--nid-ses)"
             )));
         }
         let resp = resp
@@ -608,6 +662,10 @@ impl ChzzkClient {
             .json()
             .await
             .with_context(|| format!("Failed to parse VOD chat JSON for {video_no}"))?;
+        if let Some(err_msg) = check_api_restriction_message(body.code as i64, "Access", &target_id)
+        {
+            return Err(VodChatError::Unavailable(err_msg));
+        }
         if body.code != 200 {
             let msg = body.message.unwrap_or_else(|| "Unknown error".to_string());
             return Err(VodChatError::Unavailable(format!(

@@ -491,6 +491,8 @@ fn test_cli_vod_subcommand_parsing() {
             config: None,
             upload: false,
             delete_after_upload: false,
+            nid_aut: None,
+            nid_ses: None,
         }))
     );
 
@@ -525,6 +527,8 @@ fn test_cli_vod_subcommand_parsing() {
             config: Some(std::path::PathBuf::from("custom_settings.toml")),
             upload: true,
             delete_after_upload: true,
+            nid_aut: None,
+            nid_ses: None,
         }))
     );
 
@@ -692,4 +696,113 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
             config: None,
         }))
     );
+}
+
+#[test]
+fn test_settings_reads_auth_section() {
+    let toml_str = r#"
+[auth]
+nid_aut = "auth_section_aut"
+nid_ses = "auth_section_ses"
+"#;
+    let settings: Settings = toml::from_str(toml_str).expect("Should parse TOML with [auth] table");
+    assert_eq!(settings.auth.nid_aut, "auth_section_aut");
+    assert_eq!(settings.auth.nid_ses, "auth_section_ses");
+
+    let resolved = settings.resolve_auth(None, None);
+    assert_eq!(resolved.nid_aut, "auth_section_aut");
+    assert_eq!(resolved.nid_ses, "auth_section_ses");
+    assert_eq!(
+        resolved.to_cookie_header(),
+        Some("NID_AUT=auth_section_aut; NID_SES=auth_section_ses".to_string())
+    );
+}
+
+#[test]
+fn test_settings_resolve_auth_priority() {
+    // 1. Both [auth] and [chzzk] present: [auth] wins over [chzzk]
+    let toml_both = r#"
+[auth]
+nid_aut = "auth_aut"
+nid_ses = "auth_ses"
+
+[chzzk]
+nid_aut = "chzzk_aut"
+nid_ses = "chzzk_ses"
+"#;
+    let settings_both: Settings = toml::from_str(toml_both).unwrap();
+    let resolved_config = settings_both.resolve_auth(None, None);
+    assert_eq!(resolved_config.nid_aut, "auth_aut");
+    assert_eq!(resolved_config.nid_ses, "auth_ses");
+
+    // 2. CLI flags override [auth]
+    let resolved_cli_override =
+        settings_both.resolve_auth(Some("cli_override_aut"), Some("cli_override_ses"));
+    assert_eq!(resolved_cli_override.nid_aut, "cli_override_aut");
+    assert_eq!(resolved_cli_override.nid_ses, "cli_override_ses");
+
+    // 3. Partial CLI override (override nid_aut, leave nid_ses to config)
+    let partial_cli_override = settings_both.resolve_auth(Some("cli_aut_only"), None);
+    assert_eq!(partial_cli_override.nid_aut, "cli_aut_only");
+    assert_eq!(partial_cli_override.nid_ses, "auth_ses");
+
+    // 4. Fallback to [chzzk] when [auth] is empty/absent
+    let toml_chzzk_only = r#"
+[chzzk]
+nid_aut = "legacy_aut"
+nid_ses = "legacy_ses"
+"#;
+    let settings_chzzk: Settings = toml::from_str(toml_chzzk_only).unwrap();
+    let resolved_fallback = settings_chzzk.resolve_auth(None, None);
+    assert_eq!(resolved_fallback.nid_aut, "legacy_aut");
+    assert_eq!(resolved_fallback.nid_ses, "legacy_ses");
+
+    // 5. Default when neither is provided
+    let settings_default = Settings::default();
+    let resolved_default = settings_default.resolve_auth(None, None);
+    assert_eq!(resolved_default.nid_aut, "");
+    assert_eq!(resolved_default.nid_ses, "");
+    assert_eq!(resolved_default.to_cookie_header(), None);
+
+    // 6. Explicit empty string on CLI overrides and clears config values
+    let explicit_empty_cli = settings_both.resolve_auth(Some(""), Some(""));
+    assert_eq!(explicit_empty_cli.nid_aut, "");
+    assert_eq!(explicit_empty_cli.nid_ses, "");
+    assert_eq!(explicit_empty_cli.to_cookie_header(), None);
+}
+
+#[test]
+fn test_cli_vod_accepts_nid_aut_and_nid_ses() {
+    let cli = Cli::try_parse_from([
+        "chzzk-load",
+        "vod",
+        "123456",
+        "--nid-aut",
+        "cli_aut_val",
+        "--nid-ses",
+        "cli_ses_val",
+    ])
+    .expect("Parsing vod with --nid-aut and --nid-ses should succeed");
+
+    if let Some(Commands::Vod(args)) = cli.command {
+        assert_eq!(args.nid_aut.as_deref(), Some("cli_aut_val"));
+        assert_eq!(args.nid_ses.as_deref(), Some("cli_ses_val"));
+    } else {
+        panic!("Expected Commands::Vod");
+    }
+}
+
+#[test]
+fn test_cli_root_accepts_nid_aut_and_nid_ses() {
+    let cli = Cli::try_parse_from([
+        "chzzk-load",
+        "--nid-aut",
+        "root_aut",
+        "--nid-ses",
+        "root_ses",
+    ])
+    .expect("Parsing root CLI with --nid-aut and --nid-ses should succeed");
+
+    assert_eq!(cli.nid_aut.as_deref(), Some("root_aut"));
+    assert_eq!(cli.nid_ses.as_deref(), Some("root_ses"));
 }

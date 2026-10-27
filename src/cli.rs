@@ -21,6 +21,18 @@ pub struct Cli {
         help = "Run in headless console mode without TUI dashboard (alias: --no-tui, auto-enabled when stdout is not a TTY)"
     )]
     pub headless: bool,
+    #[arg(
+        long,
+        value_name = "STR",
+        help = "Naver session cookie NID_AUT for age-restricted or subscriber streams/VODs"
+    )]
+    pub nid_aut: Option<String>,
+    #[arg(
+        long,
+        value_name = "STR",
+        help = "Naver session cookie NID_SES for age-restricted or subscriber streams/VODs"
+    )]
+    pub nid_ses: Option<String>,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -93,6 +105,20 @@ pub struct VodArgs {
         help = "Delete local VOD files after successful cloud upload (retained locally by default)"
     )]
     pub delete_after_upload: bool,
+
+    #[arg(
+        long,
+        value_name = "STR",
+        help = "Naver session cookie NID_AUT override for age-restricted or subscriber VODs"
+    )]
+    pub nid_aut: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "STR",
+        help = "Naver session cookie NID_SES override for age-restricted or subscriber VODs"
+    )]
+    pub nid_ses: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
