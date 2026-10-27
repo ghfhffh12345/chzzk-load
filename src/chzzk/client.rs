@@ -11,7 +11,7 @@ use crate::chzzk::models_vod::{VodChatError, VodChatPage, VodDetail, VodPlayback
 use crate::chzzk::source::{BoxFuture, LiveStreamSource, VodSource};
 use crate::config::ChzzkConfig;
 
-const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};

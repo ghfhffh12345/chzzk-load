@@ -1,11 +1,15 @@
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use chzzk_load::chzzk::DEFAULT_USER_AGENT;
 use chzzk_load::consolidation::progress::{
     COLOR_BLUE, COLOR_CYAN, CoordinatorOutput, STYLE_DIM, STYLE_RESET, format_interactive_bar,
 };
+use chzzk_load::uploader::unlink_local_file_with_retry;
+use chzzk_load::vod::aria2c::{build_aria2c_segment_args, scan_completed_segments};
 use chzzk_load::vod::progress::{
     COLOR_MAGENTA, VodChatProgressSnapshot, VodChatProgressUpdate, VodMilestoneTracker,
-    VodMuxProgressSnapshot, VodProgressCoordinator, VodVideoProgressSnapshot,
+    VodMuxProgressSnapshot, VodProgressCoordinator, VodSpeedTracker, VodVideoProgressSnapshot,
     VodVideoProgressUpdate, format_time_hms, parse_aria2c_speed,
 };
 
@@ -500,4 +504,160 @@ async fn test_dynamic_terminal_resize_simulation() {
         vis <= 59,
         "After terminal resize to 60 columns, row width ({vis}) must not exceed 59: {last_vid:?}"
     );
+}
+
+#[test]
+fn test_vod_rolling_speed_tracker_window_and_dynamic_rates() {
+    let t0 = Instant::now();
+    let mut tracker = VodSpeedTracker::new(t0);
+
+    // Initial state: no speed calculated before window elapsed
+    assert_eq!(tracker.current_speed(), None);
+
+    // Sub-window update (500ms): elapsed < 1000ms, no speed computed
+    let t_500ms = t0 + Duration::from_millis(500);
+    assert_eq!(tracker.update_at(5_000_000, t_500ms), None);
+
+    // 1.0s boundary reached with 10 MiB (10,485,760 bytes)
+    let t_1000ms = t0 + Duration::from_millis(1000);
+    assert_eq!(tracker.update_at(10_485_760, t_1000ms), Some("10.0 MB/s"));
+    assert_eq!(tracker.current_speed(), Some("10.0 MB/s"));
+
+    // Sub-window again (1500ms): retains previous speed
+    let t_1500ms = t0 + Duration::from_millis(1500);
+    assert_eq!(tracker.update_at(20_000_000, t_1500ms), Some("10.0 MB/s"));
+
+    // 2.0s boundary reached: delta = 47,185,920 bytes (45 MiB in 1.0s) -> 45.0 MB/s
+    let t_2000ms = t0 + Duration::from_millis(2000);
+    assert_eq!(
+        tracker.update_at(10_485_760 + 47_185_920, t_2000ms),
+        Some("45.0 MB/s")
+    );
+
+    // Fractional delta calculation: 1.25s elapsed (at 3250ms), 15 MiB transferred -> 12.0 MB/s
+    let t_3250ms = t0 + Duration::from_millis(3250);
+    let bytes_3250 = 10_485_760 + 47_185_920 + 15_728_640;
+    assert_eq!(tracker.update_at(bytes_3250, t_3250ms), Some("12.0 MB/s"));
+
+    // Stalling: no new bytes at 4250ms (idle < 3s timeout) -> retains previous speed
+    let t_4250ms = t0 + Duration::from_millis(4250);
+    assert_eq!(tracker.update_at(bytes_3250, t_4250ms), Some("12.0 MB/s"));
+
+    // Stalling timeout breached: 3s without progress at 6250ms -> decays to 0 B/s
+    let t_6250ms = t0 + Duration::from_millis(6250);
+    assert_eq!(tracker.update_at(bytes_3250, t_6250ms), Some("0 B/s"));
+
+    // Resumption: 25 MiB downloaded over next 1.0s at 7250ms -> 25.0 MB/s
+    let t_7250ms = t0 + Duration::from_millis(7250);
+    let bytes_7250 = bytes_3250 + 26_214_400;
+    assert_eq!(tracker.update_at(bytes_7250, t_7250ms), Some("25.0 MB/s"));
+}
+
+#[test]
+fn test_aria2c_command_construction_browser_headers_and_k1m() {
+    let staging_dir = Path::new("/test/staging");
+    let input_file = Path::new("/test/staging/segments.txt");
+    let cookie = Some("NID_AUT=test_aut_token; NID_SES=test_ses_token");
+
+    let args = build_aria2c_segment_args(staging_dir, input_file, cookie);
+
+    // Verify browser headers matching DEFAULT_USER_AGENT, Referer, and Origin
+    assert!(
+        args.contains(&format!("--header=User-Agent: {DEFAULT_USER_AGENT}")),
+        "args must contain browser User-Agent header matching DEFAULT_USER_AGENT"
+    );
+    assert!(
+        args.contains(&"--header=Referer: https://chzzk.naver.com/".to_string()),
+        "args must contain Referer: https://chzzk.naver.com/ header"
+    );
+    assert!(
+        args.contains(&"--header=Origin: https://chzzk.naver.com".to_string()),
+        "args must contain Origin: https://chzzk.naver.com header"
+    );
+
+    // Verify -k1M minimum split size
+    assert!(
+        args.iter()
+            .any(|a| a == "-k1M" || a == "-k 1M" || a == "--min-split-size=1M"),
+        "args must contain -k1M to allow multi-connection chunking on smaller files"
+    );
+
+    // Verify cookie propagation
+    assert!(
+        args.contains(
+            &"--header=Cookie: NID_AUT=test_aut_token; NID_SES=test_ses_token".to_string()
+        ),
+        "args must propagate cookie header"
+    );
+
+    // Verify standard aria2c operational flags
+    assert!(args.contains(&"-j16".to_string()));
+    assert!(args.contains(&"-x16".to_string()));
+    assert!(args.contains(&"-s16".to_string()));
+    assert!(args.contains(&"--summary-interval=1".to_string()));
+    assert!(args.contains(&"--dir".to_string()));
+    assert!(args.contains(&staging_dir.to_string_lossy().to_string()));
+    assert!(args.contains(&"--input-file".to_string()));
+    assert!(args.contains(&input_file.to_string_lossy().to_string()));
+}
+
+#[tokio::test]
+async fn test_aria2c_scan_completed_segments_memoization() {
+    let temp_dir = std::env::temp_dir().join(format!("test_aria2_memo_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    // segment_00000.ts: completed (exists, size 1000, no .aria2)
+    tokio::fs::write(temp_dir.join("segment_00000.ts"), vec![0x47; 1000])
+        .await
+        .unwrap();
+
+    // segment_00001.ts: downloading (exists, but .aria2 control file exists)
+    tokio::fs::write(temp_dir.join("segment_00001.ts"), vec![0x47; 500])
+        .await
+        .unwrap();
+    tokio::fs::write(temp_dir.join("segment_00001.ts.aria2"), b"control")
+        .await
+        .unwrap();
+
+    // segment_00002.ts: empty (0 bytes)
+    tokio::fs::write(temp_dir.join("segment_00002.ts"), b"")
+        .await
+        .unwrap();
+
+    let mut cache = std::collections::HashSet::new();
+    let mut cached_bytes = 0u64;
+
+    // First scan: should find only segment_00000.ts
+    let (completed, bytes) =
+        scan_completed_segments(&temp_dir, &mut cache, &mut cached_bytes).await;
+    assert_eq!(completed, 1);
+    assert_eq!(bytes, 1000);
+    assert!(cache.contains("segment_00000.ts"));
+
+    // Now remove segment_00000.ts from disk to prove cache memoization prevents stat calls
+    unlink_local_file_with_retry(&temp_dir.join("segment_00000.ts"))
+        .await
+        .unwrap();
+
+    // Second scan: cache keeps segment_00000.ts without touching disk
+    let (completed2, bytes2) =
+        scan_completed_segments(&temp_dir, &mut cache, &mut cached_bytes).await;
+    assert_eq!(completed2, 1);
+    assert_eq!(bytes2, 1000);
+
+    // Now complete segment_00001.ts by removing its .aria2 file and resizing to 1000 bytes
+    unlink_local_file_with_retry(&temp_dir.join("segment_00001.ts.aria2"))
+        .await
+        .unwrap();
+    tokio::fs::write(temp_dir.join("segment_00001.ts"), vec![0x47; 1000])
+        .await
+        .unwrap();
+
+    let (completed3, bytes3) =
+        scan_completed_segments(&temp_dir, &mut cache, &mut cached_bytes).await;
+    assert_eq!(completed3, 2);
+    assert_eq!(bytes3, 2000);
+    assert!(cache.contains("segment_00001.ts"));
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
