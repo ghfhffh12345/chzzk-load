@@ -93,8 +93,16 @@ The interface seam representing live broadcast stream intake, encapsulating broa
 _Avoid_: Poller, stream client, API wrapper, HTTP helper
 
 **VOD Archival Session**:
-An on-demand batch capture lifecycle for an archived broadcast VOD, coordinating parallel segment ingestion, timeline-synchronized chat pagination, and lossless stream-copy remuxing into seekable containers.
+An on-demand batch capture lifecycle for an archived broadcast VOD, coordinating multi-connection progressive stream or parallel segment ingestion, timeline-synchronized chat pagination, and container finalization into seekable media.
 _Avoid_: VOD rip, download job, stream grabber
+
+**Progressive Stream Ingestion**:
+The high-throughput download strategy for VODs that streams a monolithic progressive MP4 directly using multi-socket byte-range chunking, bypassing segment-level remuxing while maintaining two-stage atomic staging.
+_Avoid_: Direct download, single-file rip, fast download
+
+**Segmented Stream Fallback**:
+The secondary ingestion strategy for VODs lacking progressive streams, downloading individual HLS `.ts` segments via parallel workers and remuxing them through the FFmpeg concat demuxer.
+_Avoid_: Chunk fallback, HLS rip, legacy segmenter
 
 **VOD Artifact Triad**:
 The canonical three-file output specification (`vod.mp4`, `vod_chat.jsonl`, `vod_metadata.jsonl`) generated during a VOD Archival Session, mirroring live recording structure while maintaining distinct file naming.
@@ -105,7 +113,7 @@ The authoritative origin timestamp of a VOD's original live broadcast (`liveOpen
 _Avoid_: VOD timestamp, download date, publish time
 
 **Cursor-Resumable Staging**:
-The partial-state retention strategy that preserves segmented media files and inspects the last recorded playback offset in `vod_chat.jsonl.part` to resume interrupted VOD downloads without refetching preceding data.
+The partial-state retention strategy that preserves in-flight download progress (via `.aria2` byte-range control files or completed media segments) and inspects the last recorded playback offset in `vod_chat.jsonl.part` to resume interrupted VOD downloads without refetching preceding data.
 _Avoid_: Download resume, chunk cache, partial retry
 
 **Dual-Event Boundary Model**:
