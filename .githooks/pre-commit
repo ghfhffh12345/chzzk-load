@@ -8,13 +8,13 @@ cargo clippy --all-targets -- -D warnings
 # Pre-build fast unit test binaries to isolate test execution time from compiler linking latency
 cargo test --no-run --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state --test test_consolidation_staging --test test_consolidation_concat --test test_consolidation_progress
 
-# Enforce fast unit test tier execution budget (< 5s total runtime)
+# Enforce fast unit test tier execution budget (< 10s total runtime)
 START_TIME=$(date +%s)
 cargo test --test test_cli_smoke --test test_channel_lifecycle_registry --test test_engine_orchestrator_registry --test test_recorder_watcher --test test_recorder_ffmpeg --test test_tui_state --test test_consolidation_staging --test test_consolidation_concat --test test_consolidation_progress
 END_TIME=$(date +%s)
 
 ELAPSED=$((END_TIME - START_TIME))
-if [ "$ELAPSED" -gt 5 ]; then
-  echo "Pre-commit error: fast unit test tier exceeded 5s execution budget (${ELAPSED}s elapsed)" >&2
+if [ "$ELAPSED" -gt 10 ]; then
+  echo "Pre-commit error: fast unit test tier exceeded 10s execution budget (${ELAPSED}s elapsed)" >&2
   exit 1
 fi

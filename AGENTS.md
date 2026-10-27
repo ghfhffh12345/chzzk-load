@@ -107,6 +107,7 @@ cargo build --release
 - **Unique Anchor Targeting**: In `edit_file`, always anchor `Target` blocks with enclosing function signatures, unique comments, or outer scope tokens to prevent multi-site replacement collisions when editing common statements or assertions.
 - **Native Tools over Shell Utilities**: Prioritize native agent tools (e.g., `view_file`) for file inspection. Use `git grep -n <query>` via `run_command` for repository-wide audits when searching for symbols or strings across multiple files. Avoid ad-hoc shell navigation commands (`cat`, `ls`).
 - **Scratch Space for Prototyping**: Do not run brittle, multi-line PowerShell scripts inside a single `run_command` string. Instead, create temporary scripts inside the artifact scratch space (`<appDataDir>\brain\<conversation-id>/scratch/`) using `write_to_file`, then execute them.
+- **Live Network Probes**: When inspecting live endpoints via shell commands, always invoke `curl.exe` (not `curl`), provide a browser User-Agent (`-A "Mozilla/5.0 ..."`), and set a hard timeout (`--max-time 10`) to prevent background tasks from hanging indefinitely on dropped connections.
 - **Conditional Instructions**: Always read conditional documents (like `GLOSSARY.md` or ADRs) when a skill explicitly instructs you to check them.
 
 ---

@@ -174,7 +174,7 @@ pub async fn run_vod_archival_with_options(
         .await
         .with_context(|| format!("Failed to fetch HLS master playlist from '{master_url}'"))?;
 
-    let segments = if playlist_content.contains("#EXT-X-STREAM-INF:") {
+    let mut segments = if playlist_content.contains("#EXT-X-STREAM-INF:") {
         let variants = parse_master_playlist(&playlist_content, master_url)
             .context("Failed to parse master HLS playlist variants")?;
         let selected = select_variant(&variants, &args.quality)
@@ -190,6 +190,10 @@ pub async fn run_vod_archival_with_options(
         parse_variant_playlist(&playlist_content, master_url)
             .context("Failed to parse direct variant playlist segments")?
     };
+
+    if let Some(max) = args.max_segments {
+        segments.truncate(max);
+    }
 
     if segments.is_empty() {
         bail!("Discovered 0 video segments for VOD #{video_no}");

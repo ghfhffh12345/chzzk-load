@@ -493,6 +493,7 @@ fn test_cli_vod_subcommand_parsing() {
             delete_after_upload: false,
             nid_aut: None,
             nid_ses: None,
+            max_segments: None,
         }))
     );
 
@@ -513,6 +514,8 @@ fn test_cli_vod_subcommand_parsing() {
         "custom_settings.toml",
         "--upload",
         "--delete-after-upload",
+        "--max-segments",
+        "5",
     ])
     .expect("Parsing vod command with flags should succeed");
     assert_eq!(
@@ -529,6 +532,7 @@ fn test_cli_vod_subcommand_parsing() {
             delete_after_upload: true,
             nid_aut: None,
             nid_ses: None,
+            max_segments: Some(5),
         }))
     );
 

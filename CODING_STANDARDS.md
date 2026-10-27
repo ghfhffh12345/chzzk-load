@@ -73,6 +73,9 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Contract Phase Canonicalization**: When completing the contract or purge phase of a schema refactoring, internal engine, recorder, and client modules must directly consume canonical type names (`StreamMetadataState`, `MetadataEvent`).
   - *Code Smell (Middle Man / Speculative Generality)*: Retaining transitional version aliases (`*V2`, `*Old`) across internal callers after legacy models have been purged.
   - *Resolution*: Migrate internal imports and usages directly to canonical types; preserve aliases only when required for external library consumers.
+- **External API Acronym Aliasing in Deserialization**: When deserializing third-party JSON schemas with uppercase acronyms (e.g. `baseURL`, `mediaId`, `videoId`, `hlsUrl`), never rely solely on `#[serde(rename_all = "camelCase")]`. Serde's `camelCase` converts `base_url` to `baseUrl` rather than `baseURL`, causing silent field omissions.
+  - *Hard Violation*: Relying solely on `#[serde(rename_all = "camelCase")]` for fields containing acronyms when parsing external API payloads.
+  - *Resolution*: Explicitly declare aliases for both camelCase and acronym casing (e.g. `#[serde(default, alias = "baseURL", alias = "baseUrl")]`) to ensure resilient deserialization across upstream API updates.
 
 ---
 

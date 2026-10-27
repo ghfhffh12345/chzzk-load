@@ -126,6 +126,7 @@ async fn test_vod_archival_e2e_full_url_success() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -272,6 +273,7 @@ chunk_00.ts
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -282,6 +284,50 @@ chunk_00.ts
     assert_eq!(summary.video_no, video_no);
     assert_eq!(summary.segments_downloaded, 1);
     assert!(summary.output_dir.join("vod.mp4").exists());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_vod_archival_max_segments_truncates_download() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_max_segs_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 5551234;
+    let video_id = "neon_max_segs_vid";
+    let in_key = "key_max_segs";
+    // Fake source has 3 segments in 1080p variant
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: Some(1), // Limit download to 1 segment instead of 3
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("run_vod_archival with max_segments should succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 1);
+
+    let finalized_video = summary.output_dir.join("vod.mp4");
+    assert!(finalized_video.exists(), "vod.mp4 must exist");
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -311,6 +357,7 @@ async fn test_vod_archival_numeric_id_and_quality_selector() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -350,6 +397,7 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let options = VodOptions {
@@ -395,6 +443,7 @@ async fn test_vod_archival_cooperative_cancellation() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -506,6 +555,7 @@ async fn test_vod_archival_with_concurrent_chat_integration() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -566,6 +616,7 @@ async fn test_vod_archival_no_chat_flag_skips_chat() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -623,6 +674,7 @@ async fn test_vod_archival_dual_event_metadata_synthesis_and_promotion() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -701,6 +753,7 @@ async fn test_vod_archival_retains_part_files_and_staging_dir_on_failure() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -819,6 +872,7 @@ async fn test_vod_archival_resumes_partial_download_skipping_existing_segments()
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -886,6 +940,7 @@ async fn test_vod_archival_custom_temp_dir() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -938,6 +993,7 @@ async fn test_vod_archival_upload_preflight_failure() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let options = VodOptions {
@@ -1006,6 +1062,7 @@ async fn test_vod_archival_upload_default_retention_preserves_local_files() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let options = VodOptions {
@@ -1103,6 +1160,7 @@ async fn test_vod_archival_upload_delete_after_upload_purges_local_files() {
         delete_after_upload: true,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let options = VodOptions {
@@ -1185,6 +1243,7 @@ async fn test_vod_archival_upload_failure_preserves_local_artifacts() {
         delete_after_upload: true, // even if delete_after_upload is set, failures MUST preserve local files
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let options = VodOptions {
@@ -1259,6 +1318,7 @@ async fn test_vod_archival_unauthenticated_fails_with_actionable_guidance() {
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -1317,6 +1377,7 @@ async fn test_vod_archival_authenticated_propagates_cookies_and_succeeds() {
         delete_after_upload: false,
         nid_aut: Some("valid_aut".to_string()),
         nid_ses: Some("valid_ses".to_string()),
+        max_segments: None,
     };
 
     let cancel_token = CancellationToken::new();
@@ -1366,6 +1427,7 @@ async fn test_vod_archival_diagnostics_on_adult_4001_and_subscriber_4003_errors(
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let err_4001 = run_vod_archival(args_4001, source_4001, CancellationToken::new())
@@ -1396,6 +1458,7 @@ async fn test_vod_archival_diagnostics_on_adult_4001_and_subscriber_4003_errors(
         delete_after_upload: false,
         nid_aut: None,
         nid_ses: None,
+        max_segments: None,
     };
 
     let err_4003 = run_vod_archival(args_4003, source_4003, CancellationToken::new())

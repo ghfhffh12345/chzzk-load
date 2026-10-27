@@ -45,7 +45,7 @@ pub enum Commands {
     Vod(VodArgs),
 }
 
-#[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
+#[derive(clap::Args, Debug, Clone, PartialEq, Eq, Default)]
 pub struct VodArgs {
     #[arg(
         help = "Chzzk video URL (e.g. https://chzzk.naver.com/video/123456) or numeric video ID"
@@ -119,6 +119,13 @@ pub struct VodArgs {
         help = "Naver session cookie NID_SES override for age-restricted or subscriber VODs"
     )]
     pub nid_ses: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Maximum number of video segments to download (useful for quick verification or smoke-testing)"
+    )]
+    pub max_segments: Option<usize>,
 }
 
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]

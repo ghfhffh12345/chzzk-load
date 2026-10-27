@@ -15,5 +15,7 @@ Accepted
 ## Consequences
 
 - An external `aria2c` binary is strictly required for the `vod` subcommand (resolved via `CHZZK_LOAD_ARIA2C_BIN`, `[aria2c]` in `settings.toml`, and `PATH`).
+- NeonPlayer playback manifests support both legacy `media` arrays and MPEG-DASH MPD JSON structures (`period -> adaptationSet -> otherAttributes.m3u`), with progressive MP4 `baseURL` fallback.
+- Signed CDN tokens (e.g. `__gda__` query parameters on Akamai) are preserved across relative URL resolution (`resolve_url`), ensuring child variant playlists and `.ts` chunk requests inherit authentication parameters without HTTP 403 Forbidden failures.
 - Interrupted downloads can be resumed without re-downloading existing media segments via `.vod_staging_<video_id>/` and cursor-resumable `vod_chat.jsonl.part`.
 - Terminal telemetry provides a 10 Hz dual-bar display (`[VID]` and `[CHAT]`) matching the visual language and theme palette of `chzzk-load consolidate`.
