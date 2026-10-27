@@ -7,7 +7,7 @@ pub mod models_vod;
 pub mod source;
 
 pub use chat::ChzzkChatClient;
-pub use client::ChzzkClient;
+pub use client::{ChzzkClient, DEFAULT_USER_AGENT};
 pub use models_metadata::*;
 pub use models_vod::*;
 pub use source::{FakeVodSource, LiveStreamSource, MockLiveStreamSource, VodSource};

@@ -21,9 +21,10 @@ use crate::config::Settings;
 use crate::consolidation::staging::remove_dir_all_with_retry;
 
 pub use aria2c::{
-    download_segments_with_aria2c, download_segments_with_aria2c_and_progress,
-    ensure_aria2c_available, filter_missing_segments, generate_aria2c_input_file,
-    resolve_aria2c_bin, resolve_vod_staging_dir,
+    build_aria2c_segment_args, download_segments_with_aria2c,
+    download_segments_with_aria2c_and_progress, ensure_aria2c_available, filter_missing_segments,
+    generate_aria2c_input_file, resolve_aria2c_bin, resolve_vod_staging_dir,
+    scan_completed_segments,
 };
 pub use chat::{
     VodChatArchivalSummary, VodChatPaginationOptions, VodChatStagedSummary, VodChatTarget,
@@ -43,7 +44,7 @@ pub use naming::{
 };
 pub use progress::{
     VodChatProgressSnapshot, VodChatProgressUpdate, VodMuxProgressSnapshot, VodProgressCoordinator,
-    VodProgressSession, VodVideoProgressSnapshot, VodVideoProgressUpdate,
+    VodProgressSession, VodSpeedTracker, VodVideoProgressSnapshot, VodVideoProgressUpdate,
 };
 pub use remux::{
     build_vod_concat_args, generate_vod_concat_script, remux_vod_to_staged, resolve_ffmpeg_bin,

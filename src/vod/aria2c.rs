@@ -1,10 +1,12 @@
 use anyhow::{Context, Result, bail};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
+use crate::chzzk::DEFAULT_USER_AGENT;
 use crate::vod::manifest::VodSegment;
 
 /// Resolves the path to the aria2c binary:
@@ -189,6 +191,81 @@ pub async fn download_segments_with_aria2c(
     .await
 }
 
+/// Constructs argument list for executing aria2c to download HLS segments.
+///
+/// Injects browser emulation headers (`User-Agent`, `Referer`, `Origin`),
+/// `-k1M` for 1 MiB minimum chunk splitting, and connection concurrency flags.
+pub fn build_aria2c_segment_args(
+    staging_dir: &Path,
+    input_file: &Path,
+    cookie_header: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "-j16".to_string(),
+        "-x16".to_string(),
+        "-s16".to_string(),
+        "-k1M".to_string(),
+        "-c".to_string(),
+        "--allow-overwrite=true".to_string(),
+        "--auto-file-renaming=false".to_string(),
+        "--summary-interval=1".to_string(),
+        format!("--header=User-Agent: {DEFAULT_USER_AGENT}"),
+        "--header=Referer: https://chzzk.naver.com/".to_string(),
+        "--header=Origin: https://chzzk.naver.com".to_string(),
+    ];
+
+    if let Some(cookie) = cookie_header {
+        let trimmed = cookie.trim();
+        if !trimmed.is_empty() {
+            args.push(format!("--header=Cookie: {trimmed}"));
+        }
+    }
+
+    args.push("--dir".to_string());
+    args.push(staging_dir.to_string_lossy().to_string());
+    args.push("--input-file".to_string());
+    args.push(input_file.to_string_lossy().to_string());
+
+    args
+}
+
+/// Scans `staging_dir` for completed `.ts` segments, using `completed_cache`
+/// to eliminate redundant filesystem `stat` calls on previously completed files.
+///
+/// Returns `(completed_count, total_completed_bytes)`.
+pub async fn scan_completed_segments(
+    staging_dir: &Path,
+    completed_cache: &mut HashSet<String>,
+    cached_bytes: &mut u64,
+) -> (usize, u64) {
+    if let Ok(mut read_dir) = tokio::fs::read_dir(staging_dir).await {
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let path = entry.path();
+            if let Some(ext) = path.extension() {
+                if ext == "ts" {
+                    let filename = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if !completed_cache.contains(&filename) {
+                        let aria2_path = staging_dir.join(format!("{filename}.aria2"));
+                        if !tokio::fs::try_exists(&aria2_path).await.unwrap_or(false)
+                            && let Ok(meta) = entry.metadata().await
+                            && meta.is_file()
+                            && meta.len() > 0
+                        {
+                            *cached_bytes += meta.len();
+                            completed_cache.insert(filename);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (completed_cache.len(), *cached_bytes)
+}
+
 /// Executes aria2c to download the specified segments into `staging_dir` with live progress reporting.
 pub async fn download_segments_with_aria2c_and_progress(
     aria2c_bin: &str,
@@ -221,42 +298,20 @@ pub async fn download_segments_with_aria2c_and_progress(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    cmd.args([
-        "-j16",
-        "-x16",
-        "-s16",
-        "-c",
-        "--allow-overwrite=true",
-        "--auto-file-renaming=false",
-        "--summary-interval=1",
-        "--dir",
-    ]);
-    cmd.arg(staging_dir);
-    cmd.arg("--input-file");
-    cmd.arg(input_file);
-
-    if let Some(cookie) = cookie_header {
-        let trimmed = cookie.trim();
-        if !trimmed.is_empty() {
-            cmd.arg(format!("--header=Cookie: {trimmed}"));
-        }
-    }
+    let args = build_aria2c_segment_args(staging_dir, input_file, cookie_header);
+    cmd.args(&args);
 
     let mut child = cmd
         .spawn()
         .with_context(|| format!("Failed to spawn aria2c binary: '{aria2c_bin}'"))?;
 
     let stdout = child.stdout.take();
-    let stdout_tx = progress_tx.clone();
     let stdout_handle = tokio::spawn(async move {
         if let Some(pipe) = stdout {
             let mut lines = tokio::io::BufReader::new(pipe).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Some(ref tx) = stdout_tx {
-                    if let Some(speed) = crate::vod::progress::parse_aria2c_speed(&line) {
-                        let _ = tx.send(crate::vod::progress::VodVideoProgressUpdate::Speed(speed));
-                    }
-                }
+            while let Ok(Some(_line)) = lines.next_line().await {
+                // Stdout is drained to prevent buffer overflow.
+                // Speed calculation is driven by windowed byte-delta throughput in VodProgressCoordinator.
             }
         }
     });
@@ -276,31 +331,18 @@ pub async fn download_segments_with_aria2c_and_progress(
     let staging_dir_buf = staging_dir.to_path_buf();
     let monitor_handle = tokio::spawn(async move {
         if let Some(tx) = monitor_tx {
-            let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             interval.tick().await;
+            let mut completed_cache = HashSet::new();
+            let mut cached_bytes = 0u64;
             loop {
                 interval.tick().await;
-                let mut completed = 0;
-                let mut bytes = 0;
-                if let Ok(mut read_dir) = tokio::fs::read_dir(&staging_dir_buf).await {
-                    while let Ok(Some(entry)) = read_dir.next_entry().await {
-                        let path = entry.path();
-                        if let Some(ext) = path.extension() {
-                            if ext == "ts" {
-                                let filename =
-                                    path.file_name().unwrap_or_default().to_string_lossy();
-                                let aria2_path = staging_dir_buf.join(format!("{filename}.aria2"));
-                                if !tokio::fs::try_exists(&aria2_path).await.unwrap_or(false)
-                                    && let Ok(meta) = entry.metadata().await
-                                    && meta.len() > 0
-                                {
-                                    completed += 1;
-                                    bytes += meta.len();
-                                }
-                            }
-                        }
-                    }
-                }
+                let (completed, bytes) = scan_completed_segments(
+                    &staging_dir_buf,
+                    &mut completed_cache,
+                    &mut cached_bytes,
+                )
+                .await;
                 let _ = tx.send(
                     crate::vod::progress::VodVideoProgressUpdate::SegmentsDownloaded {
                         segments: completed,

@@ -46,6 +46,72 @@ pub fn parse_aria2c_speed(line: &str) -> Option<String> {
     None
 }
 
+/// Tracks rolling byte throughput over a configurable time window (default: 1 second).
+///
+/// Computes aggregate download rate (`delta_bytes / delta_seconds`) across all concurrent
+/// connections, avoiding deceptive single-chunk token extraction. Automatically decays
+/// speed to "0 B/s" when progress is stalled longer than `idle_timeout` (default: 3 seconds).
+#[derive(Debug, Clone)]
+pub struct VodSpeedTracker {
+    last_sample_instant: Instant,
+    last_sample_bytes: u64,
+    last_change_instant: Instant,
+    current_speed: Option<String>,
+    window_duration: Duration,
+    idle_timeout: Duration,
+}
+
+impl VodSpeedTracker {
+    pub fn new(start_time: Instant) -> Self {
+        Self::with_config(start_time, Duration::from_secs(1), Duration::from_secs(3))
+    }
+
+    pub fn with_config(start_time: Instant, window: Duration, idle_timeout: Duration) -> Self {
+        Self {
+            last_sample_instant: start_time,
+            last_sample_bytes: 0,
+            last_change_instant: start_time,
+            current_speed: None,
+            window_duration: window,
+            idle_timeout,
+        }
+    }
+
+    pub fn update_at(&mut self, current_bytes: u64, now: Instant) -> Option<&str> {
+        let elapsed = now.saturating_duration_since(self.last_sample_instant);
+        if elapsed >= self.window_duration {
+            let delta_bytes = current_bytes.saturating_sub(self.last_sample_bytes);
+            let elapsed_secs = elapsed.as_secs_f64();
+            if elapsed_secs > 0.0 {
+                let bps = (delta_bytes as f64 / elapsed_secs).round() as u64;
+                if delta_bytes > 0 {
+                    self.current_speed = Some(format!("{}/s", format_bytes(bps)));
+                    self.last_change_instant = now;
+                } else if now.saturating_duration_since(self.last_change_instant)
+                    >= self.idle_timeout
+                {
+                    self.current_speed = Some("0 B/s".to_string());
+                }
+            }
+            self.last_sample_instant = now;
+            self.last_sample_bytes = current_bytes;
+        } else if now.saturating_duration_since(self.last_change_instant) >= self.idle_timeout
+            && self.current_speed.is_some()
+        {
+            self.current_speed = Some("0 B/s".to_string());
+        }
+        self.current_speed.as_deref()
+    }
+
+    pub fn update(&mut self, current_bytes: u64) -> Option<&str> {
+        self.update_at(current_bytes, Instant::now())
+    }
+
+    pub fn current_speed(&self) -> Option<&str> {
+        self.current_speed.as_deref()
+    }
+}
+
 /// Progress metrics for VOD segment downloads.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VodVideoProgressSnapshot {
@@ -312,6 +378,7 @@ impl<'a> VodRenderState<'a> {
 fn apply_video_update(
     snapshot: &mut VodVideoProgressSnapshot,
     milestones: &mut VodMilestoneTracker,
+    speed_tracker: &mut VodSpeedTracker,
     upd: VodVideoProgressUpdate,
     is_tty: bool,
     output: &CoordinatorOutput,
@@ -320,6 +387,9 @@ fn apply_video_update(
         VodVideoProgressUpdate::SegmentsDownloaded { segments, bytes } => {
             snapshot.segments_downloaded = segments;
             snapshot.bytes_downloaded = bytes;
+            if let Some(spd) = speed_tracker.update_at(bytes, Instant::now()) {
+                snapshot.speed = Some(spd.to_string());
+            }
         }
         VodVideoProgressUpdate::Speed(speed) => {
             snapshot.speed = Some(speed);
@@ -545,6 +615,7 @@ impl VodProgressCoordinator {
             let start_time = Instant::now();
             let mut video_milestones = VodMilestoneTracker::new(start_time);
             let mut chat_milestones = VodMilestoneTracker::new(start_time);
+            let mut speed_tracker = VodSpeedTracker::new(start_time);
 
             let mut last_cols = coordinator.query_terminal_cols();
             let mut first_render = true;
@@ -587,7 +658,7 @@ impl VodProgressCoordinator {
                     }
                     Some(()) = mux_rx.recv() => {
                         while let Ok(v_upd) = v_rx.try_recv() {
-                            apply_video_update(&mut video_snapshot, &mut video_milestones, v_upd, is_tty, &output);
+                            apply_video_update(&mut video_snapshot, &mut video_milestones, &mut speed_tracker, v_upd, is_tty, &output);
                         }
                         if !is_tty && has_video && video_snapshot.pct() < 100 {
                             video_snapshot.segments_downloaded = total_segments;
@@ -601,7 +672,7 @@ impl VodProgressCoordinator {
                         }
                     }
                     Some(v_upd) = v_rx.recv() => {
-                        apply_video_update(&mut video_snapshot, &mut video_milestones, v_upd, is_tty, &output);
+                        apply_video_update(&mut video_snapshot, &mut video_milestones, &mut speed_tracker, v_upd, is_tty, &output);
                         if is_tty {
                             dirty = true;
                         }
@@ -613,10 +684,20 @@ impl VodProgressCoordinator {
                         }
                     }
                     _ = tick_interval.tick() => {
+                        let now = Instant::now();
                         let current_cols = coordinator.query_terminal_cols();
                         if current_cols != last_cols {
                             last_cols = current_cols;
                             dirty = true;
+                        }
+                        if has_video && !mux_snapshot.is_active {
+                            if let Some(spd) = speed_tracker.update_at(video_snapshot.bytes_downloaded, now) {
+                                let spd_str = spd.to_string();
+                                if video_snapshot.speed.as_deref() != Some(&spd_str) {
+                                    video_snapshot.speed = Some(spd_str);
+                                    dirty = true;
+                                }
+                            }
                         }
                         if is_tty && dirty {
                             let bar_width = coordinator.resolve_vod_bar_width(
@@ -654,6 +735,7 @@ impl VodProgressCoordinator {
                 apply_video_update(
                     &mut video_snapshot,
                     &mut video_milestones,
+                    &mut speed_tracker,
                     v_upd,
                     is_tty,
                     &output,
