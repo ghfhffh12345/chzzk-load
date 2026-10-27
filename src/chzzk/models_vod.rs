@@ -233,18 +233,17 @@ impl VodPlaybackInfo {
                 return exact_id.last().map(|c| c.url);
             }
 
-            // 3. Closest resolution <= target_height (highest bandwidth among highest <= target_h)
-            let mut matching: Vec<&ProgressiveCandidate> = candidates
-                .iter()
-                .filter(|c| c.height.is_some_and(|h| h <= target_h))
-                .collect();
-
-            if !matching.is_empty() {
-                matching.sort_by_key(|c| (c.height.unwrap_or(0), c.bandwidth));
-                return matching.last().map(|c| c.url);
-            }
-
             return None;
+        }
+
+        // Exact ID / name match for non-numeric quality query
+        let mut exact_id: Vec<&ProgressiveCandidate> = candidates
+            .iter()
+            .filter(|c| c.id.is_some_and(|id| id.eq_ignore_ascii_case(&quality)))
+            .collect();
+        if !exact_id.is_empty() {
+            exact_id.sort_by_key(|c| (c.height.unwrap_or(0), c.bandwidth));
+            return exact_id.last().map(|c| c.url);
         }
 
         None

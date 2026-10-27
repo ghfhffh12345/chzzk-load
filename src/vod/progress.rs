@@ -541,8 +541,10 @@ fn apply_video_update(
             }
             if speed.is_some() {
                 snapshot.speed = speed;
-            } else if let Some(spd) = speed_tracker.update_at(bytes, Instant::now()) {
-                snapshot.speed = Some(spd.to_string());
+            } else if snapshot.speed.is_none() {
+                if let Some(spd) = speed_tracker.update_at(bytes, Instant::now()) {
+                    snapshot.speed = Some(spd.to_string());
+                }
             }
             if eta.is_some() {
                 snapshot.eta = eta;
@@ -632,6 +634,17 @@ impl Default for VodProgressCoordinator {
     fn default() -> Self {
         Self::new(std::io::stdout().is_terminal())
     }
+}
+
+/// Configuration parameters for starting a VOD progress session.
+#[derive(Debug, Clone, Default)]
+pub struct VodSessionConfig {
+    pub total_segments: usize,
+    pub total_bytes: Option<u64>,
+    pub is_progressive: bool,
+    pub total_chat_duration_ms: u64,
+    pub has_video: bool,
+    pub has_chat: bool,
 }
 
 impl VodProgressCoordinator {
@@ -738,14 +751,14 @@ impl VodProgressCoordinator {
         has_video: bool,
         has_chat: bool,
     ) -> VodProgressSession {
-        self.start_session_internal(
+        self.start_session_internal(VodSessionConfig {
             total_segments,
-            None,
-            false,
+            total_bytes: None,
+            is_progressive: false,
             total_chat_duration_ms,
             has_video,
             has_chat,
-        )
+        })
     }
 
     pub fn start_progressive_session(
@@ -755,26 +768,18 @@ impl VodProgressCoordinator {
         has_video: bool,
         has_chat: bool,
     ) -> VodProgressSession {
-        self.start_session_internal(
-            0,
+        self.start_session_internal(VodSessionConfig {
+            total_segments: 0,
             total_bytes,
-            true,
+            is_progressive: true,
             total_chat_duration_ms,
             has_video,
             has_chat,
-        )
+        })
     }
 
-    fn start_session_internal(
-        &self,
-        total_segments: usize,
-        total_bytes: Option<u64>,
-        is_progressive: bool,
-        total_chat_duration_ms: u64,
-        has_video: bool,
-        has_chat: bool,
-    ) -> VodProgressSession {
-        if !has_video && !has_chat {
+    fn start_session_internal(&self, config: VodSessionConfig) -> VodProgressSession {
+        if !config.has_video && !config.has_chat {
             return VodProgressSession {
                 video_tx: None,
                 chat_tx: None,
@@ -792,20 +797,24 @@ impl VodProgressCoordinator {
         let is_tty = self.is_tty;
         let coordinator = self.clone();
         let output = self.output.clone();
+        let has_video = config.has_video;
+        let has_chat = config.has_chat;
+        let total_segments = config.total_segments;
+        let total_chat_duration_ms = config.total_chat_duration_ms;
 
         let handle = tokio::spawn(async move {
             let mut video_snapshot = VodVideoProgressSnapshot {
                 segments_downloaded: 0,
-                total_segments,
+                total_segments: config.total_segments,
                 bytes_downloaded: 0,
-                total_bytes,
+                total_bytes: config.total_bytes,
                 speed: None,
                 eta: None,
-                is_progressive,
+                is_progressive: config.is_progressive,
             };
             let mut chat_snapshot = VodChatProgressSnapshot {
                 current_time_ms: 0,
-                duration_ms: total_chat_duration_ms,
+                duration_ms: config.total_chat_duration_ms,
                 emitted_messages: 0,
             };
             let mut mux_snapshot = VodMuxProgressSnapshot {
@@ -892,11 +901,16 @@ impl VodProgressCoordinator {
                             dirty = true;
                         }
                         if has_video && !mux_snapshot.is_active {
-                            if let Some(spd) = speed_tracker.update_at(video_snapshot.bytes_downloaded, now) {
-                                let spd_str = spd.to_string();
-                                if video_snapshot.speed.as_deref() != Some(&spd_str) {
-                                    video_snapshot.speed = Some(spd_str);
-                                    dirty = true;
+                            // In progressive download mode where aria2c reports speed directly,
+                            // preserve that speed to prevent 10 Hz coordinator tick overwriting it.
+                            let allow_speed_tracker = !video_snapshot.is_progressive || video_snapshot.speed.is_none();
+                            if allow_speed_tracker {
+                                if let Some(spd) = speed_tracker.update_at(video_snapshot.bytes_downloaded, now) {
+                                    let spd_str = spd.to_string();
+                                    if video_snapshot.speed.as_deref() != Some(&spd_str) {
+                                        video_snapshot.speed = Some(spd_str);
+                                        dirty = true;
+                                    }
                                 }
                             }
                         }

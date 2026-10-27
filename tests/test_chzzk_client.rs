@@ -1504,15 +1504,9 @@ fn test_vod_find_progressive_mp4_exact_and_closest_match() {
         Some("https://cdn.example.com/vod/480p.mp4?token=123")
     );
 
-    // Closest match <= target
-    assert_eq!(
-        info.find_progressive_mp4_url_with_quality("900p"),
-        Some("https://cdn.example.com/vod/720p.mp4?token=123")
-    );
-    assert_eq!(
-        info.find_progressive_mp4_url_with_quality("600p"),
-        Some("https://cdn.example.com/vod/480p.mp4?token=123")
-    );
+    // Exact matching only: unmatched resolutions return None to enable HLS fallback
+    assert_eq!(info.find_progressive_mp4_url_with_quality("900p"), None);
+    assert_eq!(info.find_progressive_mp4_url_with_quality("600p"), None);
 
     // Unreachable lower resolution target returns None
     assert_eq!(info.find_progressive_mp4_url_with_quality("360p"), None);
@@ -1522,6 +1516,57 @@ fn test_vod_find_progressive_mp4_exact_and_closest_match() {
     assert_eq!(
         info.find_progressive_mp4_url_with_quality("unrecognized_quality"),
         None
+    );
+}
+
+#[test]
+fn test_vod_find_progressive_mp4_returns_none_when_requested_resolution_absent() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp4",
+                        "representation": [
+                            {
+                                "id": "PD_720P",
+                                "bandwidth": 4000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/720p.mp4" }
+                                ],
+                                "height": 720
+                            },
+                            {
+                                "id": "PD_480P",
+                                "bandwidth": 2000000,
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/480p.mp4" }
+                                ],
+                                "height": 480
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+
+    // 1080p requested when only 720p/480p present -> must return None so pipeline falls back to HLS
+    assert_eq!(info.find_progressive_mp4_url_with_quality("1080p"), None);
+    assert_eq!(info.find_progressive_mp4_url_with_quality("1080"), None);
+
+    // Exact matches succeed
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("720p"),
+        Some("https://cdn.example.com/vod/720p.mp4")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("480p"),
+        Some("https://cdn.example.com/vod/480p.mp4")
     );
 }
 

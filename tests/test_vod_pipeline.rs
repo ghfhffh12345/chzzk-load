@@ -1475,38 +1475,6 @@ async fn test_vod_archival_diagnostics_on_adult_4001_and_subscriber_4003_errors(
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
-#[test]
-fn test_mock_aria2c_handles_out_flag() {
-    let mock_aria2c = get_mock_aria2c_bin();
-    let temp_dir =
-        std::env::temp_dir().join(format!("test_mock_aria2c_out_{}", rand::random::<u32>()));
-    std::fs::create_dir_all(&temp_dir).unwrap();
-
-    let out_name = "test_vod.mp4.part";
-    let status = std::process::Command::new(mock_aria2c)
-        .arg("--dir")
-        .arg(&temp_dir)
-        .arg(format!("--out={out_name}"))
-        .arg("https://example.com/stream.mp4")
-        .status()
-        .expect("Failed to execute mock aria2c with --out");
-
-    assert!(status.success(), "mock aria2c should exit with 0");
-    let target_file = temp_dir.join(out_name);
-    assert!(target_file.exists(), "Target file must be written");
-    assert_eq!(
-        std::fs::metadata(&target_file).unwrap().len(),
-        56,
-        "Must be 56-byte valid MP4 container"
-    );
-    assert!(
-        probe_moov_atom(&target_file),
-        "Must pass probe_moov_atom container integrity"
-    );
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-}
-
 #[tokio::test]
 async fn test_download_progressive_mp4_with_aria2c_hermetic_success() {
     let mock_aria2c = get_mock_aria2c_bin();
@@ -2012,6 +1980,83 @@ async fn test_vod_archival_fallback_to_hls_when_progressive_absent_or_segregated
         "Segregated fallback must download all 3 HLS segments"
     );
     assert!(summary_2.video_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_fallback_to_hls_when_progressive_resolution_unsatisfied() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_fallback_res_unsatisfied_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    // Scenario: Requested quality is 1080p, but progressive MP4 only provides 720p.
+    // The pipeline must NOT fuzzy-match 720p; it must fall back to HLS master playlist
+    // and ingest the requested 1080p HLS variant stream.
+    let video_no = 7891241;
+    let video_id = "neon_prog_720_unsatisfied";
+    let in_key = "key_prog_720_unsatisfied";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let progressive_720_playback = VodPlaybackInfo {
+        media: vec![
+            VodPlaybackMedia {
+                media_id: Some("HLS".to_string()),
+                protocol: Some("HLS".to_string()),
+                path: "https://cdn.example.com/vod/master.m3u8".to_string(),
+                encoding_option: Some(VodEncodingOption {
+                    width: Some(1920),
+                    height: Some(1080),
+                    bitrate: Some(8000000),
+                    name: Some("1080p".to_string()),
+                }),
+            },
+            VodPlaybackMedia {
+                media_id: Some("PROG_720".to_string()),
+                protocol: Some("mp4".to_string()),
+                path: "https://cdn.example.com/vod/monolithic_720p.mp4".to_string(),
+                encoding_option: Some(VodEncodingOption {
+                    width: Some(1280),
+                    height: Some(720),
+                    bitrate: Some(4000000),
+                    name: Some("720p".to_string()),
+                }),
+            },
+        ],
+        ..Default::default()
+    };
+    source.set_playback_info(video_id, in_key, progressive_720_playback);
+
+    let args = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no}"),
+        quality: "1080p".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let summary = run_vod_archival(args, source, CancellationToken::new())
+        .await
+        .expect(
+            "Must fall back to 1080p HLS variant when progressive MP4 resolution is unsatisfied",
+        );
+    assert_eq!(
+        summary.segments_downloaded, 3,
+        "Must fall back to 1080p HLS variant and download 3 segments"
+    );
+    assert!(summary.video_path.exists());
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }

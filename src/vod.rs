@@ -335,7 +335,7 @@ pub async fn run_vod_archival_with_options(
         // Container Integrity Verification & Faststart Normalization
         let staged = match validate_mp4_container_integrity(&staged_part) {
             Ok(info) if info.is_faststart => staged_part,
-            Ok(_info) => {
+            Ok(_) | Err(_) => {
                 if let Some(ref mut s) = progress_session {
                     s.transition_to_mux();
                 }
@@ -354,40 +354,7 @@ pub async fn run_vod_archival_with_options(
                     if let Some(mut s) = progress_session {
                         s.finish(false).await;
                     }
-                    return Err(err).context("FFmpeg faststart reorganization failed");
-                }
-                if let Err(err) = validate_mp4_container_integrity(&repaired_part) {
-                    if let Some(ref task) = chat_task {
-                        task.abort();
-                    }
-                    if let Some(mut s) = progress_session {
-                        s.finish(false).await;
-                    }
-                    return Err(err)
-                        .context("Reorganized MP4 failed container integrity validation");
-                }
-                repaired_part
-            }
-            Err(_err) => {
-                if let Some(ref mut s) = progress_session {
-                    s.transition_to_mux();
-                }
-                let repaired_part = output_dir.join("vod.mp4.part");
-                if let Err(err) = repair_mp4_faststart(
-                    &staged_part,
-                    &repaired_part,
-                    Some(&ffmpeg_bin),
-                    &cancel_token,
-                )
-                .await
-                {
-                    if let Some(ref task) = chat_task {
-                        task.abort();
-                    }
-                    if let Some(mut s) = progress_session {
-                        s.finish(false).await;
-                    }
-                    return Err(err).context("FFmpeg repair stream copy failed");
+                    return Err(err).context("FFmpeg faststart repair stream copy failed");
                 }
                 if let Err(err) = validate_mp4_container_integrity(&repaired_part) {
                     if let Some(ref task) = chat_task {

@@ -873,3 +873,35 @@ async fn test_vod_progress_coordinator_with_progressive_updates() {
         "must display byte progress"
     );
 }
+
+#[tokio::test]
+async fn test_vod_progressive_speed_stabilization_preserves_aria2c_speed_across_ticks() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = VodProgressCoordinator::with_output(output, true).with_terminal_width(80);
+
+    let mut session =
+        coordinator.start_progressive_session(Some(10_485_760), 7_200_000, true, false);
+    let v_tx = session.video_sender().unwrap();
+
+    let _ = v_tx.send(VodVideoProgressUpdate::ProgressiveProgress {
+        bytes: 5_242_880,
+        total_bytes: Some(10_485_760),
+        speed: Some("25.0MiB/s".to_string()),
+        eta: Some("10s".to_string()),
+    });
+
+    // Allow multiple 100ms coordinator ticks to fire
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+    let vid_lines: Vec<&str> = rows.iter().copied().filter(|l| l.contains("VID")).collect();
+    assert!(!vid_lines.is_empty(), "must render progressive VID line");
+    let last_vid = vid_lines.last().unwrap();
+    assert!(
+        last_vid.contains("25.0MiB/s"),
+        "Aria2c reported speed must be preserved across ticks without flicker: {last_vid}"
+    );
+}

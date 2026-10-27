@@ -177,3 +177,40 @@ fn main() {
         bin_path
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mock_aria2c_handles_out_flag() {
+        let mock_aria2c = get_mock_aria2c_bin();
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_mock_aria2c_out_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let out_name = "test_vod.mp4.part";
+        let status = std::process::Command::new(mock_aria2c)
+            .arg("--dir")
+            .arg(&temp_dir)
+            .arg(format!("--out={out_name}"))
+            .arg("https://example.com/stream.mp4")
+            .status()
+            .expect("Failed to execute mock aria2c with --out");
+
+        assert!(status.success(), "mock aria2c should exit with 0");
+        let target_file = temp_dir.join(out_name);
+        assert!(target_file.exists(), "Target file must be written");
+        assert_eq!(
+            std::fs::metadata(&target_file).unwrap().len(),
+            56,
+            "Must be 56-byte valid MP4 container"
+        );
+        assert!(
+            chzzk_load::consolidation::staging::probe_moov_atom(&target_file),
+            "Must pass probe_moov_atom container integrity"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}

@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use crate::chzzk::DEFAULT_USER_AGENT;
+use crate::consolidation::staging::validate_mp4_container_integrity;
 use crate::vod::manifest::VodSegment;
 
 /// Resolves the path to the aria2c binary:
@@ -305,7 +306,7 @@ pub async fn download_progressive_mp4_with_aria2c(
     // Check if file is already completed (e.g. from prior interrupted session)
     if staged_file_path.exists() && !control_file_path.exists() {
         if let Ok(meta) = tokio::fs::metadata(&staged_file_path).await {
-            if meta.len() > 0 && crate::consolidation::staging::probe_moov_atom(&staged_file_path) {
+            if meta.len() > 0 && validate_mp4_container_integrity(&staged_file_path).is_ok() {
                 if let Some(ref tx) = progress_tx {
                     let _ = tx.send(
                         crate::vod::progress::VodVideoProgressUpdate::ProgressiveProgress {
