@@ -46,6 +46,95 @@ pub fn parse_aria2c_speed(line: &str) -> Option<String> {
     None
 }
 
+/// Parses aria2c human-readable size strings (e.g. "1.2MiB", "5.0GiB", "56B") into byte counts.
+pub fn parse_aria2c_bytes(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    let (val_str, multiplier): (&str, f64) =
+        if let Some(stripped) = s.strip_suffix("TiB").or_else(|| s.strip_suffix("TB")) {
+            (stripped, 1024.0 * 1024.0 * 1024.0 * 1024.0)
+        } else if let Some(stripped) = s.strip_suffix("GiB").or_else(|| s.strip_suffix("GB")) {
+            (stripped, 1024.0 * 1024.0 * 1024.0)
+        } else if let Some(stripped) = s.strip_suffix("MiB").or_else(|| s.strip_suffix("MB")) {
+            (stripped, 1024.0 * 1024.0)
+        } else if let Some(stripped) = s.strip_suffix("KiB").or_else(|| s.strip_suffix("KB")) {
+            (stripped, 1024.0)
+        } else if let Some(stripped) = s.strip_suffix('B').or_else(|| s.strip_suffix('b')) {
+            (stripped, 1.0)
+        } else {
+            (s, 1.0)
+        };
+
+    let num: f64 = val_str.trim().parse().ok()?;
+    if num < 0.0 || num.is_nan() || num.is_infinite() {
+        return None;
+    }
+    Some((num * multiplier).round() as u64)
+}
+
+/// Parses single-file aria2c stdout progress lines into `VodVideoProgressUpdate`.
+///
+/// Example format:
+/// `[#2089b0 1.2MiB/5.0MiB(24%) CN:16 DL:24.5MiB ETA:1m30s]`
+///
+/// Multi-file lines (such as HLS multi-segment downloads) containing multiple
+/// `[#` blocks are ignored and return `None`.
+pub fn parse_aria2c_single_file_progress(line: &str) -> Option<VodVideoProgressUpdate> {
+    let trimmed = line.trim();
+    if trimmed.matches("[#").count() != 1 {
+        return None;
+    }
+
+    let start_bracket = trimmed.find("[#")?;
+    let end_bracket = trimmed[start_bracket..].find(']')?;
+    let block = &trimmed[start_bracket + 1..start_bracket + end_bracket];
+
+    // Find token with '/'
+    let mut slash_token = None;
+    for token in block.split_whitespace() {
+        if token.contains('/') && !token.starts_with("DL:") && !token.starts_with("ETA:") {
+            slash_token = Some(token);
+            break;
+        }
+    }
+
+    let token = slash_token?;
+    let slash_idx = token.find('/')?;
+    let downloaded_str = &token[..slash_idx];
+    let right = &token[slash_idx + 1..];
+    let total_str = right
+        .split(|c: char| c == '(' || c.is_whitespace())
+        .next()?;
+
+    let bytes = parse_aria2c_bytes(downloaded_str)?;
+    let total_bytes = parse_aria2c_bytes(total_str);
+    let speed = parse_aria2c_speed(block);
+    let eta = if let Some(idx) = block.find("ETA:") {
+        let rest = &block[idx + 4..];
+        let token = rest
+            .split(|c: char| c.is_whitespace() || c == ']' || c == ')')
+            .next()?
+            .trim();
+        if !token.is_empty() {
+            Some(token.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Some(VodVideoProgressUpdate::ProgressiveProgress {
+        bytes,
+        total_bytes,
+        speed,
+        eta,
+    })
+}
+
 /// Tracks rolling byte throughput over a configurable time window (default: 1 second).
 ///
 /// Computes aggregate download rate (`delta_bytes / delta_seconds`) across all concurrent
@@ -112,18 +201,33 @@ impl VodSpeedTracker {
     }
 }
 
-/// Progress metrics for VOD segment downloads.
+/// Progress metrics for VOD segment downloads (segmented HLS or progressive MP4).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VodVideoProgressSnapshot {
     pub segments_downloaded: usize,
     pub total_segments: usize,
     pub bytes_downloaded: u64,
+    pub total_bytes: Option<u64>,
     pub speed: Option<String>,
+    pub eta: Option<String>,
+    pub is_progressive: bool,
 }
 
 impl VodVideoProgressSnapshot {
     pub fn pct(&self) -> u16 {
-        if self.total_segments == 0 {
+        if self.is_progressive {
+            if let Some(total) = self.total_bytes {
+                if total == 0 {
+                    100
+                } else {
+                    ((self.bytes_downloaded as f64 / total as f64) * 100.0)
+                        .round()
+                        .min(100.0) as u16
+                }
+            } else {
+                0
+            }
+        } else if self.total_segments == 0 {
             100
         } else {
             ((self.segments_downloaded as f64 / self.total_segments as f64) * 100.0)
@@ -139,11 +243,24 @@ impl VodVideoProgressSnapshot {
             Some(s) if !s.trim().is_empty() => format!(" {s}"),
             _ => String::new(),
         };
-        format!(
-            " {pct}% ({}/{total} segments, {bytes_str}){speed_suffix}",
-            self.segments_downloaded,
-            total = self.total_segments
-        )
+        let eta_suffix = match &self.eta {
+            Some(e) if !e.trim().is_empty() => format!(" ETA: {e}"),
+            _ => String::new(),
+        };
+
+        if self.is_progressive {
+            let total_str = self
+                .total_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "unknown".to_string());
+            format!(" {pct}% ({bytes_str} / {total_str}){speed_suffix}{eta_suffix}")
+        } else {
+            format!(
+                " {pct}% ({}/{total} segments, {bytes_str}){speed_suffix}",
+                self.segments_downloaded,
+                total = self.total_segments
+            )
+        }
     }
 
     pub fn metric_suffix_len(&self) -> usize {
@@ -164,11 +281,22 @@ impl VodVideoProgressSnapshot {
             Some(s) if !s.trim().is_empty() => format!(" speed: {s}"),
             _ => String::new(),
         };
-        format!(
-            "[INFO] [VOD] [VID] Download progress: {pct}% ({}/{total} segments, {bytes_str}){speed_suffix}",
-            self.segments_downloaded,
-            total = self.total_segments
-        )
+
+        if self.is_progressive {
+            let total_str = self
+                .total_bytes
+                .map(format_bytes)
+                .unwrap_or_else(|| "unknown".to_string());
+            format!(
+                "[INFO] [VOD] [VID] Download progress: {pct}% ({bytes_str} / {total_str}){speed_suffix}"
+            )
+        } else {
+            format!(
+                "[INFO] [VOD] [VID] Download progress: {pct}% ({}/{total} segments, {bytes_str}){speed_suffix}",
+                self.segments_downloaded,
+                total = self.total_segments
+            )
+        }
     }
 }
 
@@ -317,7 +445,16 @@ impl VodMilestoneTracker {
 /// Video progress update event sent to the telemetry coordinator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VodVideoProgressUpdate {
-    SegmentsDownloaded { segments: usize, bytes: u64 },
+    SegmentsDownloaded {
+        segments: usize,
+        bytes: u64,
+    },
+    ProgressiveProgress {
+        bytes: u64,
+        total_bytes: Option<u64>,
+        speed: Option<String>,
+        eta: Option<String>,
+    },
     Speed(String),
 }
 
@@ -391,11 +528,36 @@ fn apply_video_update(
                 snapshot.speed = Some(spd.to_string());
             }
         }
+        VodVideoProgressUpdate::ProgressiveProgress {
+            bytes,
+            total_bytes,
+            speed,
+            eta,
+        } => {
+            snapshot.is_progressive = true;
+            snapshot.bytes_downloaded = bytes;
+            if total_bytes.is_some() {
+                snapshot.total_bytes = total_bytes;
+            }
+            if speed.is_some() {
+                snapshot.speed = speed;
+            } else if let Some(spd) = speed_tracker.update_at(bytes, Instant::now()) {
+                snapshot.speed = Some(spd.to_string());
+            }
+            if eta.is_some() {
+                snapshot.eta = eta;
+            }
+        }
         VodVideoProgressUpdate::Speed(speed) => {
             snapshot.speed = Some(speed);
         }
     }
-    if !is_tty && milestones.should_log(snapshot.pct(), snapshot.segments_downloaded as u64) {
+    let progress_val = if snapshot.is_progressive {
+        snapshot.bytes_downloaded
+    } else {
+        snapshot.segments_downloaded as u64
+    };
+    if !is_tty && milestones.should_log(snapshot.pct(), progress_val) {
         output.write_str(&format!("{}\n", snapshot.format_non_interactive()));
     }
 }
@@ -576,6 +738,42 @@ impl VodProgressCoordinator {
         has_video: bool,
         has_chat: bool,
     ) -> VodProgressSession {
+        self.start_session_internal(
+            total_segments,
+            None,
+            false,
+            total_chat_duration_ms,
+            has_video,
+            has_chat,
+        )
+    }
+
+    pub fn start_progressive_session(
+        &self,
+        total_bytes: Option<u64>,
+        total_chat_duration_ms: u64,
+        has_video: bool,
+        has_chat: bool,
+    ) -> VodProgressSession {
+        self.start_session_internal(
+            0,
+            total_bytes,
+            true,
+            total_chat_duration_ms,
+            has_video,
+            has_chat,
+        )
+    }
+
+    fn start_session_internal(
+        &self,
+        total_segments: usize,
+        total_bytes: Option<u64>,
+        is_progressive: bool,
+        total_chat_duration_ms: u64,
+        has_video: bool,
+        has_chat: bool,
+    ) -> VodProgressSession {
         if !has_video && !has_chat {
             return VodProgressSession {
                 video_tx: None,
@@ -600,7 +798,10 @@ impl VodProgressCoordinator {
                 segments_downloaded: 0,
                 total_segments,
                 bytes_downloaded: 0,
+                total_bytes,
                 speed: None,
+                eta: None,
+                is_progressive,
             };
             let mut chat_snapshot = VodChatProgressSnapshot {
                 current_time_ms: 0,

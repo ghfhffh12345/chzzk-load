@@ -6,11 +6,14 @@ use chzzk_load::consolidation::progress::{
     COLOR_BLUE, COLOR_CYAN, CoordinatorOutput, STYLE_DIM, STYLE_RESET, format_interactive_bar,
 };
 use chzzk_load::uploader::unlink_local_file_with_retry;
-use chzzk_load::vod::aria2c::{build_aria2c_segment_args, scan_completed_segments};
+use chzzk_load::vod::aria2c::{
+    build_aria2c_progressive_args, build_aria2c_segment_args, scan_completed_segments,
+};
 use chzzk_load::vod::progress::{
     COLOR_MAGENTA, VodChatProgressSnapshot, VodChatProgressUpdate, VodMilestoneTracker,
     VodMuxProgressSnapshot, VodProgressCoordinator, VodSpeedTracker, VodVideoProgressSnapshot,
-    VodVideoProgressUpdate, format_time_hms, parse_aria2c_speed,
+    VodVideoProgressUpdate, format_time_hms, parse_aria2c_bytes, parse_aria2c_single_file_progress,
+    parse_aria2c_speed,
 };
 
 fn visible_width(s: &str) -> usize {
@@ -81,6 +84,7 @@ fn test_vod_video_progress_snapshot_formatting() {
         total_segments: 10,
         bytes_downloaded: 126_353_408,
         speed: Some("14.5 MB/s".to_string()),
+        ..Default::default()
     };
     assert_eq!(snapshot.pct(), 60);
     assert_eq!(
@@ -100,6 +104,7 @@ fn test_vod_video_progress_snapshot_formatting() {
         total_segments: 10,
         bytes_downloaded: 26_633_830,
         speed: None,
+        ..Default::default()
     };
     assert_eq!(snapshot_no_speed.pct(), 20);
     assert_eq!(
@@ -660,4 +665,211 @@ async fn test_aria2c_scan_completed_segments_memoization() {
     assert!(cache.contains("segment_00001.ts"));
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[test]
+fn test_aria2c_progressive_command_construction() {
+    let staging_dir = Path::new("/var/staging");
+    let url = "https://chzzk.naver.com/video/progressive_1080p.mp4?token=xyz";
+    let out_filename = "vod.mp4.part";
+    let cookie = Some("NID_AUT=aut_token; NID_SES=ses_token");
+
+    let args = build_aria2c_progressive_args(staging_dir, url, out_filename, cookie);
+
+    // Concurrency and chunking flags
+    assert!(args.contains(&"-x16".to_string()) || args.contains(&"-x 16".to_string()));
+    assert!(args.contains(&"-s16".to_string()) || args.contains(&"-s 16".to_string()));
+    assert!(args.contains(&"-k1M".to_string()) || args.contains(&"-k 1M".to_string()));
+    assert!(args.contains(&"-c".to_string()));
+    assert!(args.contains(&"--allow-overwrite=true".to_string()));
+    assert!(args.contains(&"--auto-file-renaming=false".to_string()));
+    assert!(args.contains(&"--summary-interval=1".to_string()));
+
+    // Target directory and output file
+    assert!(
+        args.contains(&format!("--dir={}", staging_dir.display()))
+            || args.contains(&"--dir".to_string())
+    );
+    assert!(args.contains(&format!("--out={out_filename}")) || args.contains(&"--out".to_string()));
+
+    // Browser headers
+    assert!(args.contains(&format!("--header=User-Agent: {DEFAULT_USER_AGENT}")));
+    assert!(args.contains(&"--header=Referer: https://chzzk.naver.com/".to_string()));
+    assert!(args.contains(&"--header=Origin: https://chzzk.naver.com".to_string()));
+
+    // Auth cookies
+    assert!(args.contains(&"--header=Cookie: NID_AUT=aut_token; NID_SES=ses_token".to_string()));
+
+    // Final URL
+    assert_eq!(args.last().unwrap(), url);
+}
+
+#[test]
+fn test_parse_aria2c_bytes() {
+    assert_eq!(parse_aria2c_bytes("0B"), Some(0));
+    assert_eq!(parse_aria2c_bytes("56B"), Some(56));
+    assert_eq!(parse_aria2c_bytes("1024B"), Some(1024));
+    assert_eq!(parse_aria2c_bytes("1KiB"), Some(1024));
+    assert_eq!(parse_aria2c_bytes("1.2MiB"), Some(1_258_291));
+    assert_eq!(parse_aria2c_bytes("5.0MiB"), Some(5_242_880));
+    assert_eq!(parse_aria2c_bytes("1.5GiB"), Some(1_610_612_736));
+    assert_eq!(parse_aria2c_bytes("2GiB"), Some(2_147_483_648));
+    assert_eq!(parse_aria2c_bytes(""), None);
+    assert_eq!(parse_aria2c_bytes("invalid"), None);
+}
+
+#[test]
+fn test_parse_aria2c_single_file_progress() {
+    // Standard progress line with DL and ETA
+    let line1 = "[#2089b0 1.2MiB/5.0MiB(24%) CN:16 DL:24.5MiB ETA:1m30s]";
+    let prog1 = parse_aria2c_single_file_progress(line1).expect("must parse line 1");
+    match prog1 {
+        VodVideoProgressUpdate::ProgressiveProgress {
+            bytes,
+            total_bytes,
+            speed,
+            eta,
+        } => {
+            assert_eq!(bytes, 1_258_291);
+            assert_eq!(total_bytes, Some(5_242_880));
+            assert_eq!(speed, Some("24.5MiB/s".to_string()));
+            assert_eq!(eta, Some("1m30s".to_string()));
+        }
+        other => panic!("Unexpected update type: {other:?}"),
+    }
+
+    // High throughput gigabyte progress line
+    let line2 = "[#2089b0 1.2GiB/1.5GiB(80%) CN:16 DL:45.2MiB/s ETA:32s]";
+    let prog2 = parse_aria2c_single_file_progress(line2).expect("must parse line 2");
+    match prog2 {
+        VodVideoProgressUpdate::ProgressiveProgress {
+            bytes,
+            total_bytes,
+            speed,
+            eta,
+        } => {
+            assert_eq!(bytes, 1_288_490_189);
+            assert_eq!(total_bytes, Some(1_610_612_736));
+            assert_eq!(speed, Some("45.2MiB/s".to_string()));
+            assert_eq!(eta, Some("32s".to_string()));
+        }
+        other => panic!("Unexpected update type: {other:?}"),
+    }
+
+    // Finished progress line without DL/ETA
+    let line3 = "[#2089b0 56B/56B(100%)]";
+    let prog3 = parse_aria2c_single_file_progress(line3).expect("must parse line 3");
+    match prog3 {
+        VodVideoProgressUpdate::ProgressiveProgress {
+            bytes,
+            total_bytes,
+            speed,
+            eta,
+        } => {
+            assert_eq!(bytes, 56);
+            assert_eq!(total_bytes, Some(56));
+            assert_eq!(speed, None);
+            assert_eq!(eta, None);
+        }
+        other => panic!("Unexpected update type: {other:?}"),
+    }
+
+    // Starting line with 0 bytes downloaded
+    let line4 = "[#1 0B/1.0GiB(0%) CN:1]";
+    let prog4 = parse_aria2c_single_file_progress(line4).expect("must parse line 4");
+    match prog4 {
+        VodVideoProgressUpdate::ProgressiveProgress {
+            bytes,
+            total_bytes,
+            speed,
+            eta,
+        } => {
+            assert_eq!(bytes, 0);
+            assert_eq!(total_bytes, Some(1_073_741_824));
+            assert_eq!(speed, None);
+            assert_eq!(eta, None);
+        }
+        other => panic!("Unexpected update type: {other:?}"),
+    }
+
+    // Multi-download HLS lines must be rejected (single-file progress only)
+    let multi_line = "[#1 1.0MiB/5.0MiB(20%)] [#2 2.0MiB/5.0MiB(40%)]";
+    assert_eq!(parse_aria2c_single_file_progress(multi_line), None);
+
+    // Arbitrary logs must be rejected
+    assert_eq!(
+        parse_aria2c_single_file_progress("Downloading something..."),
+        None
+    );
+}
+
+#[test]
+fn test_vod_progressive_progress_snapshot_formatting() {
+    let snapshot = VodVideoProgressSnapshot {
+        segments_downloaded: 0,
+        total_segments: 0,
+        bytes_downloaded: 3_145_728,  // 3.0 MB
+        total_bytes: Some(5_242_880), // 5.0 MB
+        speed: Some("15.0 MB/s".to_string()),
+        eta: Some("20s".to_string()),
+        is_progressive: true,
+    };
+
+    assert_eq!(snapshot.pct(), 60);
+    assert_eq!(
+        snapshot.format_non_interactive(),
+        "[INFO] [VOD] [VID] Download progress: 60% (3.0 MB / 5.0 MB) speed: 15.0 MB/s"
+    );
+    assert!(
+        snapshot
+            .metric_suffix()
+            .contains("60% (3.0 MB / 5.0 MB) 15.0 MB/s ETA: 20s")
+    );
+    assert!(snapshot.format_interactive(20).contains("VID"));
+
+    // Progressive snapshot with unknown total bytes
+    let snapshot_unknown = VodVideoProgressSnapshot {
+        segments_downloaded: 0,
+        total_segments: 0,
+        bytes_downloaded: 1_048_576,
+        total_bytes: None,
+        speed: Some("5.0 MB/s".to_string()),
+        eta: None,
+        is_progressive: true,
+    };
+    assert_eq!(snapshot_unknown.pct(), 0);
+    assert_eq!(
+        snapshot_unknown.format_non_interactive(),
+        "[INFO] [VOD] [VID] Download progress: 0% (1.0 MB / unknown) speed: 5.0 MB/s"
+    );
+}
+
+#[tokio::test]
+async fn test_vod_progress_coordinator_with_progressive_updates() {
+    let (output, buf) = CoordinatorOutput::buffer();
+    let coordinator = VodProgressCoordinator::with_output(output, true).with_terminal_width(80);
+
+    let mut session =
+        coordinator.start_progressive_session(Some(10_485_760), 7_200_000, true, false);
+    let v_tx = session.video_sender().unwrap();
+
+    let _ = v_tx.send(VodVideoProgressUpdate::ProgressiveProgress {
+        bytes: 5_242_880,
+        total_bytes: Some(10_485_760),
+        speed: Some("25.0 MB/s".to_string()),
+        eta: Some("10s".to_string()),
+    });
+
+    session.finish(true).await;
+
+    let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    let rows = terminal_rows(&text);
+    let vid_lines: Vec<&str> = rows.iter().copied().filter(|l| l.contains("VID")).collect();
+    assert!(!vid_lines.is_empty(), "must render progressive VID line");
+    let last_vid = vid_lines.last().unwrap();
+    assert!(last_vid.contains("50%"), "must display 50% progress");
+    assert!(
+        last_vid.contains("5.0 MB / 10.0 MB"),
+        "must display byte progress"
+    );
 }

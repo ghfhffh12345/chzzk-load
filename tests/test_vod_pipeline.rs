@@ -11,6 +11,8 @@ use chzzk_load::chzzk::models_vod::{
 use chzzk_load::chzzk::source::FakeVodSource;
 use chzzk_load::cli::VodArgs;
 use chzzk_load::config::RcloneConfig;
+use chzzk_load::consolidation::staging::probe_moov_atom;
+use chzzk_load::vod::aria2c::download_progressive_mp4_with_aria2c;
 use chzzk_load::vod::{VodOptions, run_vod_archival, run_vod_archival_with_options};
 use common::mock_aria2c::get_mock_aria2c_bin;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
@@ -1471,4 +1473,192 @@ async fn test_vod_archival_diagnostics_on_adult_4001_and_subscriber_4003_errors(
     );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_mock_aria2c_handles_out_flag() {
+    let mock_aria2c = get_mock_aria2c_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_mock_aria2c_out_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let out_name = "test_vod.mp4.part";
+    let status = std::process::Command::new(mock_aria2c)
+        .arg("--dir")
+        .arg(&temp_dir)
+        .arg(format!("--out={out_name}"))
+        .arg("https://example.com/stream.mp4")
+        .status()
+        .expect("Failed to execute mock aria2c with --out");
+
+    assert!(status.success(), "mock aria2c should exit with 0");
+    let target_file = temp_dir.join(out_name);
+    assert!(target_file.exists(), "Target file must be written");
+    assert_eq!(
+        std::fs::metadata(&target_file).unwrap().len(),
+        56,
+        "Must be 56-byte valid MP4 container"
+    );
+    assert!(
+        probe_moov_atom(&target_file),
+        "Must pass probe_moov_atom container integrity"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_download_progressive_mp4_with_aria2c_hermetic_success() {
+    let mock_aria2c = get_mock_aria2c_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_prog_dl_success_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel_token = CancellationToken::new();
+
+    let staged_path = download_progressive_mp4_with_aria2c(
+        &mock_aria2c.to_string_lossy(),
+        &temp_dir,
+        "https://example.com/progressive.mp4?multi_progress=1",
+        Some(tx),
+        Some("NID_AUT=test_aut"),
+        cancel_token,
+    )
+    .await
+    .expect("download_progressive_mp4_with_aria2c must succeed");
+
+    assert_eq!(staged_path, temp_dir.join("vod.mp4.part"));
+    assert!(staged_path.exists());
+    assert_eq!(tokio::fs::metadata(&staged_path).await.unwrap().len(), 56);
+    assert!(probe_moov_atom(&staged_path));
+
+    // Progress updates received
+    let mut received = Vec::new();
+    while let Ok(upd) = rx.try_recv() {
+        received.push(upd);
+    }
+    assert!(
+        !received.is_empty(),
+        "Must receive progress updates from aria2c stdout"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_download_progressive_mp4_with_aria2c_cancellation() {
+    let mock_aria2c = get_mock_aria2c_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_prog_dl_cancel_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    // Case 1: Cancelled before execution
+    let pre_cancelled = CancellationToken::new();
+    pre_cancelled.cancel();
+
+    let err_pre = download_progressive_mp4_with_aria2c(
+        &mock_aria2c.to_string_lossy(),
+        &temp_dir,
+        "https://example.com/progressive.mp4",
+        None,
+        None,
+        pre_cancelled,
+    )
+    .await
+    .expect_err("Must error when pre-cancelled");
+    assert!(
+        err_pre
+            .to_string()
+            .contains("cancelled by token before aria2c execution")
+    );
+
+    // Case 2: In-flight cancellation kills child process
+    let in_flight_cancel = CancellationToken::new();
+    let cancel_clone = in_flight_cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_clone.cancel();
+    });
+
+    let err_in_flight = download_progressive_mp4_with_aria2c(
+        &mock_aria2c.to_string_lossy(),
+        &temp_dir,
+        "https://example.com/progressive.mp4?hang=1",
+        None,
+        None,
+        in_flight_cancel,
+    )
+    .await
+    .expect_err("Must error when cancelled in-flight");
+    assert!(
+        err_in_flight
+            .to_string()
+            .contains("cancelled by token during aria2c execution")
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_download_progressive_mp4_with_aria2c_resumes_with_aria2_control_file() {
+    let mock_aria2c = get_mock_aria2c_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_prog_dl_resume_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    let staged_file = temp_dir.join("vod.mp4.part");
+    let control_file = temp_dir.join("vod.mp4.part.aria2");
+
+    // Case 1: File is already complete and valid with NO .aria2 control file
+    // Write 56-byte valid mock MP4
+    let mock_mp4: &[u8] = &[
+        0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00, 0x02,
+        0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2', 0x00, 0x00, 0x00, 0x10, b'm', b'o',
+        b'o', b'v', b'm', b'v', b'h', b'd', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, b'm',
+        b'd', b'a', b't', b'm', b'o', b'c', b'k', b'd', b'a', b't', b'a',
+    ];
+    tokio::fs::write(&staged_file, mock_mp4).await.unwrap();
+
+    // Use a non-existent binary path to prove that aria2c is NEVER executed when file is already complete!
+    let path = download_progressive_mp4_with_aria2c(
+        "non_existent_binary_that_would_fail",
+        &temp_dir,
+        "https://example.com/progressive.mp4",
+        None,
+        None,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("Should return existing completed file without running aria2c");
+    assert_eq!(path, staged_file);
+
+    // Case 2: File exists, BUT .aria2 control file also exists (interrupted download)
+    // In this case, it MUST NOT return early, but execute aria2c to resume!
+    tokio::fs::write(&control_file, b"aria2_control_data")
+        .await
+        .unwrap();
+
+    let path_resumed = download_progressive_mp4_with_aria2c(
+        &mock_aria2c.to_string_lossy(),
+        &temp_dir,
+        "https://example.com/progressive.mp4",
+        None,
+        None,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("Should resume and complete download via mock aria2c");
+
+    assert_eq!(path_resumed, staged_file);
+    assert!(
+        !control_file.exists(),
+        ".aria2 control file must be removed upon completion"
+    );
+    assert!(
+        probe_moov_atom(&staged_file),
+        "Must have valid MP4 container"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
