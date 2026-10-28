@@ -5,8 +5,8 @@ use std::process::Command;
 use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::manifest::{
     ChunkGap, RawManifestEntry, TargetLocation, build_manifest_from_entries, detect_index_gaps,
-    discover_manifest, is_remote_path, parse_chat_chunk_index, parse_rclone_lsjson,
-    parse_video_chunk_index,
+    discover_manifest, discover_remote_manifest, is_remote_path, parse_chat_chunk_index,
+    parse_rclone_lsjson, parse_video_chunk_index,
 };
 use chzzk_load::consolidation::{delete_original_chunks, run_consolidation};
 
@@ -127,6 +127,7 @@ fn test_chunk_index_parsing() {
     assert_eq!(parse_video_chunk_index("chunk_0001.mp4"), None);
     assert_eq!(parse_video_chunk_index("stream.mp4"), None);
     assert_eq!(parse_video_chunk_index("livestream.mp4"), None);
+    assert_eq!(parse_video_chunk_index("live_stream.mp4"), None);
     assert_eq!(parse_video_chunk_index("consolidated.mp4"), None);
 
     // Chat chunk index parsing
@@ -139,8 +140,10 @@ fn test_chunk_index_parsing() {
     assert_eq!(parse_chat_chunk_index("chat_.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("chat_xyz.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("livemetadata.jsonl"), None);
+    assert_eq!(parse_chat_chunk_index("live_metadata.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("metadata.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("livechat.jsonl"), None);
+    assert_eq!(parse_chat_chunk_index("live_chat.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("chat.jsonl"), None);
     assert_eq!(parse_chat_chunk_index("consolidated.jsonl"), None);
 }
@@ -282,17 +285,21 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
             is_dir: false,
         },
         RawManifestEntry {
-            name: "livestream.mp4".to_string(),
+            name: "live_stream.mp4".to_string(),
             size: 5000,
             is_dir: false,
         },
     ];
 
-    // 1. Without overwrite -> error mentioning livestream.mp4
+    // 1. Without overwrite -> error mentioning live_stream.mp4
     let err = build_manifest_from_entries(target.clone(), entries.clone(), false, false)
-        .expect_err("Should error when pre-existing livestream.mp4 exists without overwrite");
-    assert!(err.to_string().contains("livestream.mp4"));
-    assert!(err.to_string().contains("--overwrite"));
+        .expect_err("Should error when pre-existing live_stream.mp4 exists without overwrite");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("live_stream.mp4"),
+        "Error message must cite live_stream.mp4: {err_str}"
+    );
+    assert!(err_str.contains("--overwrite"));
 
     // 2. With overwrite -> succeeds
     let manifest = build_manifest_from_entries(target.clone(), entries, false, true)
@@ -300,7 +307,7 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
     assert!(manifest.pre_existing_video);
     assert_eq!(manifest.video_chunks.len(), 1);
 
-    // 3. Pre-existing livechat.jsonl without overwrite -> error mentioning livechat.jsonl
+    // 3. Pre-existing live_chat.jsonl without overwrite -> error mentioning live_chat.jsonl
     let chat_entries = vec![
         RawManifestEntry {
             name: "chat_0000.jsonl".to_string(),
@@ -308,21 +315,121 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
             is_dir: false,
         },
         RawManifestEntry {
-            name: "livechat.jsonl".to_string(),
+            name: "live_chat.jsonl".to_string(),
             size: 5000,
             is_dir: false,
         },
     ];
     let err = build_manifest_from_entries(target.clone(), chat_entries.clone(), false, false)
-        .expect_err("Should error when pre-existing livechat.jsonl exists without overwrite");
-    assert!(err.to_string().contains("livechat.jsonl"));
-    assert!(err.to_string().contains("--overwrite"));
+        .expect_err("Should error when pre-existing live_chat.jsonl exists without overwrite");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("live_chat.jsonl"),
+        "Error message must cite live_chat.jsonl: {err_str}"
+    );
+    assert!(err_str.contains("--overwrite"));
 
     // 4. Chat overwrite -> succeeds
-    let chat_manifest = build_manifest_from_entries(target, chat_entries, false, true)
+    let chat_manifest = build_manifest_from_entries(target.clone(), chat_entries, false, true)
         .expect("Should succeed when overwrite is true");
     assert!(chat_manifest.pre_existing_chat);
     assert_eq!(chat_manifest.chat_chunks.len(), 1);
+
+    // 5. Pre-existing both live_stream.mp4 and live_chat.jsonl without overwrite
+    let both_entries = vec![
+        RawManifestEntry {
+            name: "chunk_0000.ts".to_string(),
+            size: 1000,
+            is_dir: false,
+        },
+        RawManifestEntry {
+            name: "chat_0000.jsonl".to_string(),
+            size: 1000,
+            is_dir: false,
+        },
+        RawManifestEntry {
+            name: "live_stream.mp4".to_string(),
+            size: 5000,
+            is_dir: false,
+        },
+        RawManifestEntry {
+            name: "live_chat.jsonl".to_string(),
+            size: 2000,
+            is_dir: false,
+        },
+    ];
+    let err = build_manifest_from_entries(target.clone(), both_entries.clone(), false, false)
+        .expect_err("Should error when pre-existing live_stream.mp4 and live_chat.jsonl exist without overwrite");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("live_stream.mp4, live_chat.jsonl"),
+        "Error message must cite both live_stream.mp4 and live_chat.jsonl: {err_str}"
+    );
+    assert!(err_str.contains("--overwrite"));
+
+    // 6. Both with overwrite -> succeeds
+    let both_manifest = build_manifest_from_entries(target, both_entries, false, true)
+        .expect("Should succeed when overwrite is true");
+    assert!(both_manifest.pre_existing_video);
+    assert!(both_manifest.pre_existing_chat);
+}
+
+#[test]
+fn test_build_manifest_metadata_backward_compatibility() {
+    let target = TargetLocation::Local(PathBuf::from("recordings/metadata_test"));
+
+    // 1. Canonical live_metadata.jsonl marks has_metadata = true
+    let canonical_entries = vec![
+        RawManifestEntry {
+            name: "chunk_0000.ts".to_string(),
+            size: 1000,
+            is_dir: false,
+        },
+        RawManifestEntry {
+            name: "live_metadata.jsonl".to_string(),
+            size: 500,
+            is_dir: false,
+        },
+    ];
+    let manifest = build_manifest_from_entries(target.clone(), canonical_entries, false, false)
+        .expect("Build manifest with canonical live_metadata.jsonl");
+    assert!(
+        manifest.has_metadata,
+        "Canonical live_metadata.jsonl must set has_metadata = true"
+    );
+
+    // 2. Legacy livemetadata.jsonl marks has_metadata = true for backward compatibility
+    let legacy_entries = vec![
+        RawManifestEntry {
+            name: "chunk_0000.ts".to_string(),
+            size: 1000,
+            is_dir: false,
+        },
+        RawManifestEntry {
+            name: "livemetadata.jsonl".to_string(),
+            size: 500,
+            is_dir: false,
+        },
+    ];
+    let manifest_legacy = build_manifest_from_entries(target.clone(), legacy_entries, false, false)
+        .expect("Build manifest with legacy livemetadata.jsonl");
+    assert!(
+        manifest_legacy.has_metadata,
+        "Legacy livemetadata.jsonl must set has_metadata = true"
+    );
+
+    // 3. Absence of metadata sets has_metadata = false
+    let no_meta_entries = vec![RawManifestEntry {
+        name: "chunk_0000.ts".to_string(),
+        size: 1000,
+        is_dir: false,
+    }];
+    let manifest_no_meta = build_manifest_from_entries(target, no_meta_entries, false, false)
+        .expect("Build manifest without metadata");
+    assert!(
+        !manifest_no_meta.has_metadata,
+        "Missing metadata must set has_metadata = false"
+    );
 }
 
 #[test]
@@ -401,6 +508,106 @@ async fn test_discover_local_manifest_filesystem_scan() {
     assert_eq!(manifest.video_chunks[0].name, "chunk_0000.ts");
     assert_eq!(manifest.video_chunks[1].name, "chunk_0001.ts");
     assert_eq!(manifest.chat_chunks[0].name, "chat_0000.jsonl");
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_discover_local_manifest_pre_existing_conflicts() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_manifest_local_conflicts_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    let video_out = temp_dir.join("live_stream.mp4");
+    let chat_out = temp_dir.join("live_chat.jsonl");
+    let meta = temp_dir.join("live_metadata.jsonl");
+
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    fs::write(&chat0, b"{\"time\": 100}\n").unwrap();
+    fs::write(&video_out, b"stale video").unwrap();
+    fs::write(&chat_out, b"stale chat").unwrap();
+    fs::write(&meta, b"{\"event\": \"start\"}\n").unwrap();
+
+    let target = TargetLocation::Local(temp_dir.clone());
+
+    // Without overwrite -> fails citing both live_stream.mp4 and live_chat.jsonl
+    let err = discover_manifest(&target, false, false)
+        .await
+        .expect_err("Should fail with conflict error");
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("live_stream.mp4, live_chat.jsonl"),
+        "Error should cite live_stream.mp4 and live_chat.jsonl: {err_msg}"
+    );
+
+    // With overwrite -> succeeds with pre_existing flags true and has_metadata = true
+    let manifest = discover_manifest(&target, false, true)
+        .await
+        .expect("Should succeed with overwrite");
+    assert!(manifest.pre_existing_video);
+    assert!(manifest.pre_existing_chat);
+    assert!(manifest.has_metadata);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_discover_remote_manifest_pre_existing_conflicts_and_metadata() {
+    let mock_bin = common::mock_rclone::get_mock_rclone_bin()
+        .to_string_lossy()
+        .to_string();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_manifest_remote_conflicts_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    let video_out = temp_dir.join("live_stream.mp4");
+    let chat_out = temp_dir.join("live_chat.jsonl");
+    let meta = temp_dir.join("live_metadata.jsonl");
+
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    fs::write(&chat0, b"{\"time\": 100}\n").unwrap();
+    fs::write(&video_out, b"stale video").unwrap();
+    fs::write(&chat_out, b"stale chat").unwrap();
+    fs::write(&meta, b"{\"event\": \"start\"}\n").unwrap();
+
+    let remote_path = format!("remote:{}", temp_dir.to_string_lossy().replace('\\', "/"));
+
+    // 1. Without overwrite -> fails citing both live_stream.mp4 and live_chat.jsonl
+    let err = discover_remote_manifest(&remote_path, false, false, Some(&mock_bin))
+        .await
+        .expect_err("Should fail on remote conflict when overwrite is false");
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("live_stream.mp4, live_chat.jsonl"),
+        "Remote error should cite live_stream.mp4 and live_chat.jsonl: {err_msg}"
+    );
+
+    // 2. With overwrite -> succeeds with pre_existing flags true and has_metadata = true
+    let manifest = discover_remote_manifest(&remote_path, false, true, Some(&mock_bin))
+        .await
+        .expect("Remote manifest should succeed with overwrite");
+    assert!(manifest.pre_existing_video);
+    assert!(manifest.pre_existing_chat);
+    assert!(manifest.has_metadata);
+
+    // 3. Test backward compatibility with legacy livemetadata.jsonl
+    fs::remove_file(&meta).unwrap();
+    let legacy_meta = temp_dir.join("livemetadata.jsonl");
+    fs::write(&legacy_meta, b"{\"event\": \"legacy\"}\n").unwrap();
+
+    let manifest_legacy = discover_remote_manifest(&remote_path, false, true, Some(&mock_bin))
+        .await
+        .expect("Remote manifest with legacy metadata should succeed");
+    assert!(manifest_legacy.has_metadata);
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
