@@ -52,6 +52,55 @@ pub fn build_vod_concat_args(manifest_path: &Path, output_part_path: &Path) -> V
     ]
 }
 
+/// Constructs FFmpeg CLI arguments for lossless stream-copy remuxing of a local HLS playlist (.m3u8).
+pub fn build_vod_hls_remux_args(playlist_path: &Path, output_part_path: &Path) -> Vec<String> {
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "warning".to_string(),
+        "-y".to_string(),
+        "-fflags".to_string(),
+        "+discardcorrupt".to_string(),
+        "-allowed_extensions".to_string(),
+        "ALL".to_string(),
+        "-i".to_string(),
+        playlist_path.to_string_lossy().to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+        "-avoid_negative_ts".to_string(),
+        "make_zero".to_string(),
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+        "-f".to_string(),
+        "mp4".to_string(),
+        output_part_path.to_string_lossy().to_string(),
+    ]
+}
+
+/// Generates the full content of an HLS playlist (.m3u8) pointing to locally staged segments.
+pub fn generate_vod_hls_playlist(
+    segments: &[VodSegment],
+    init_segment: Option<&VodSegment>,
+) -> String {
+    let mut script = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+    let max_dur = segments
+        .iter()
+        .map(|s| s.duration)
+        .fold(0.0f64, f64::max)
+        .ceil() as u64;
+    script.push_str(&format!("#EXT-X-TARGETDURATION:{}\n", max_dur.max(1)));
+    if let Some(init) = init_segment {
+        script.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init.filename));
+    }
+    for seg in segments {
+        script.push_str(&format!("#EXTINF:{:.6},\n", seg.duration));
+        script.push_str(&seg.filename);
+        script.push('\n');
+    }
+    script.push_str("#EXT-X-ENDLIST\n");
+    script
+}
+
 /// Remuxes downloaded VOD segments into seekable `vod.mp4.part` and validates MP4 container integrity.
 /// Finalization and promotion to `vod.mp4` is deferred to the caller orchestrator seam under
 /// the Two-Stage Atomic Staging pattern (`CODING_STANDARDS.md` §2).
@@ -60,6 +109,7 @@ pub async fn remux_vod_to_staged(
     staging_dir: &Path,
     output_dir: &Path,
     segments: &[VodSegment],
+    init_segment: Option<&VodSegment>,
     cancel_token: CancellationToken,
 ) -> Result<PathBuf> {
     if segments.is_empty() {
@@ -84,25 +134,47 @@ pub async fn remux_vod_to_staged(
         bail!("VOD remuxing cancelled by token before execution");
     }
 
-    // 1. Write concat manifest script inside staging directory
-    let manifest_path = staging_dir.join("concat_manifest.txt");
-    let script_content = generate_vod_concat_script(staging_dir, segments);
-    tokio::fs::write(&manifest_path, script_content.as_bytes())
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to write concat script to '{}'",
-                manifest_path.display()
-            )
-        })?;
+    let is_hls_remux = init_segment.is_some()
+        || segments
+            .first()
+            .map(|s| s.filename.ends_with(".mp4") || s.filename.ends_with(".m4s"))
+            .unwrap_or(false);
 
-    // 2. Build and spawn FFmpeg Concat Demuxer command
+    let (_input_path, args) = if is_hls_remux {
+        let playlist_path = staging_dir.join("local_playlist.m3u8");
+        let playlist_content = generate_vod_hls_playlist(segments, init_segment);
+        tokio::fs::write(&playlist_path, playlist_content.as_bytes())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to write local HLS playlist to '{}'",
+                    playlist_path.display()
+                )
+            })?;
+        let args = build_vod_hls_remux_args(&playlist_path, &staged_path);
+        (playlist_path, args)
+    } else {
+        let manifest_path = staging_dir.join("concat_manifest.txt");
+        let script_content = generate_vod_concat_script(staging_dir, segments);
+        tokio::fs::write(&manifest_path, script_content.as_bytes())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to write concat script to '{}'",
+                    manifest_path.display()
+                )
+            })?;
+        let args = build_vod_concat_args(&manifest_path, &staged_path);
+        (manifest_path, args)
+    };
+
+    // 2. Build and spawn FFmpeg command
     let mut cmd = Command::new(ffmpeg_bin);
     cmd.kill_on_drop(true);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
-    cmd.args(build_vod_concat_args(&manifest_path, &staged_path));
+    cmd.args(args);
 
     let mut child = cmd
         .spawn()

@@ -124,6 +124,7 @@ mod tests {
             video_id: "test_vid".to_string(),
             video_title: title.to_string(),
             in_key: None,
+            live_rewind_playback_json: None,
             live_open_date: live_open.map(String::from),
             publish_date: publish.map(String::from),
             duration: Some(3600),

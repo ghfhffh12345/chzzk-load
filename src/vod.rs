@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::app_path::resolve_path;
+use crate::chzzk::VodPlaybackInfo;
 use crate::chzzk::source::VodSource;
 pub use crate::cli::VodArgs;
 use crate::config::Settings;
@@ -32,7 +33,8 @@ pub use chat::{
     probe_last_chat_player_time, promote_vod_chat,
 };
 pub use manifest::{
-    HlsVariant, VodSegment, parse_master_playlist, parse_variant_playlist, select_variant,
+    HlsVariant, VodSegment, VodVariantManifest, parse_master_playlist, parse_variant_manifest,
+    parse_variant_playlist, select_variant,
 };
 pub use metadata::{
     VodMetadataEvent, VodMetadataEventType, VodMetadataState, VodMetadataTarget,
@@ -47,7 +49,8 @@ pub use progress::{
     VodProgressSession, VodSpeedTracker, VodVideoProgressSnapshot, VodVideoProgressUpdate,
 };
 pub use remux::{
-    build_mp4_repair_args, build_vod_concat_args, generate_vod_concat_script, remux_vod_to_staged,
+    build_mp4_repair_args, build_vod_concat_args, build_vod_hls_remux_args,
+    generate_vod_concat_script, generate_vod_hls_playlist, remux_vod_to_staged,
     repair_mp4_faststart, resolve_ffmpeg_bin,
 };
 pub use target::parse_video_target;
@@ -153,18 +156,33 @@ pub async fn run_vod_archival_with_options(
         .await
         .with_context(|| format!("Failed to retrieve video details for video #{video_no}"))?;
 
-    let in_key = detail.in_key.as_deref().unwrap_or("");
-
-    // 3. Query NeonPlayer playback info
-    let playback_info = source
-        .get_playback_info(&detail.video_id, in_key)
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to retrieve playback info for video ID '{}'",
-                detail.video_id
-            )
-        })?;
+    // 3. Query NeonPlayer playback info or live rewind playback info
+    let playback_info = if let Some(in_key) =
+        detail.in_key.as_deref().filter(|k| !k.trim().is_empty())
+    {
+        match source.get_playback_info(&detail.video_id, in_key).await {
+            Ok(info) => info,
+            Err(err) => {
+                if let Some(ref rewind_json) = detail.live_rewind_playback_json {
+                    serde_json::from_str::<VodPlaybackInfo>(rewind_json)
+                        .context("Failed to parse live rewind playback JSON fallback")?
+                } else {
+                    return Err(err).context(format!(
+                        "Failed to retrieve playback info for video ID '{}'",
+                        detail.video_id
+                    ));
+                }
+            }
+        }
+    } else if let Some(ref rewind_json) = detail.live_rewind_playback_json {
+        serde_json::from_str::<VodPlaybackInfo>(rewind_json)
+            .context("Failed to parse live rewind playback JSON")?
+    } else {
+        bail!(
+            "VOD detail contains neither playback inKey nor liveRewindPlaybackJson for video ID '{}'",
+            detail.video_id
+        );
+    };
 
     // Check for matching progressive MP4 stream representation
     let progressive_url = playback_info
@@ -172,7 +190,7 @@ pub async fn run_vod_archival_with_options(
         .map(|u| u.to_string());
 
     // 4. If progressive MP4 is absent or segregated, fall back to HLS playlist parsing
-    let hls_segments = if progressive_url.is_none() {
+    let (hls_segments, hls_init_segment) = if progressive_url.is_none() {
         let master_url = playback_info
             .find_hls_master_url()
             .ok_or_else(|| anyhow!("No HLS media descriptor found in playback response"))?;
@@ -182,7 +200,7 @@ pub async fn run_vod_archival_with_options(
             .await
             .with_context(|| format!("Failed to fetch HLS master playlist from '{master_url}'"))?;
 
-        let mut segments = if playlist_content.contains("#EXT-X-STREAM-INF:") {
+        let mut manifest = if playlist_content.contains("#EXT-X-STREAM-INF:") {
             let variants = parse_master_playlist(&playlist_content, master_url)
                 .context("Failed to parse master HLS playlist variants")?;
             let selected = select_variant(&variants, &args.quality).with_context(|| {
@@ -194,24 +212,24 @@ pub async fn run_vod_archival_with_options(
                 .with_context(|| {
                     format!("Failed to fetch variant playlist from '{}'", selected.url)
                 })?;
-            parse_variant_playlist(&variant_content, &selected.url)
+            parse_variant_manifest(&variant_content, &selected.url)
                 .context("Failed to parse variant playlist segments")?
         } else {
             // Direct variant playlist
-            parse_variant_playlist(&playlist_content, master_url)
+            parse_variant_manifest(&playlist_content, master_url)
                 .context("Failed to parse direct variant playlist segments")?
         };
 
         if let Some(max) = args.max_segments {
-            segments.truncate(max);
+            manifest.segments.truncate(max);
         }
 
-        if segments.is_empty() {
+        if manifest.segments.is_empty() {
             bail!("Discovered 0 video segments for VOD #{video_no}");
         }
-        Some(segments)
+        (Some(manifest.segments), manifest.init_segment)
     } else {
-        None
+        (None, None)
     };
 
     // 5. Resolve canonical output directory
@@ -381,7 +399,13 @@ pub async fn run_vod_archival_with_options(
         let segments = hls_segments.expect("Segments must be present for HLS fallback");
         let segments_count = segments.len();
 
-        let missing_segments = filter_missing_segments(&staging_dir, &segments).await;
+        let mut all_download_segments = Vec::new();
+        if let Some(ref init_seg) = hls_init_segment {
+            all_download_segments.push(init_seg.clone());
+        }
+        all_download_segments.extend(segments.clone());
+
+        let missing_segments = filter_missing_segments(&staging_dir, &all_download_segments).await;
         let input_file = staging_dir.join("input_segments.txt");
         let batch_content = generate_aria2c_input_file(&missing_segments);
         tokio::fs::write(&input_file, batch_content.as_bytes())
@@ -398,7 +422,7 @@ pub async fn run_vod_archival_with_options(
             &aria2c_bin,
             &staging_dir,
             &input_file,
-            &segments,
+            &all_download_segments,
             video_tx,
             cookie_header,
             cancel_token.clone(),
@@ -424,6 +448,7 @@ pub async fn run_vod_archival_with_options(
             &staging_dir,
             &output_dir,
             &segments,
+            hls_init_segment.as_ref(),
             cancel_token.clone(),
         )
         .await

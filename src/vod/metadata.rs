@@ -204,6 +204,7 @@ mod tests {
             video_id: "neon_xyz_123".to_string(),
             video_title: "Chzzk Live Replay Title".to_string(),
             in_key: None,
+            live_rewind_playback_json: None,
             live_open_date: Some("2026-09-30 11:00:00".to_string()),
             publish_date: Some("2026-09-30 15:00:00".to_string()),
             duration: Some(7200),

@@ -572,8 +572,14 @@ impl ChzzkClient {
     }
 
     pub async fn get_playback_info(&self, video_id: &str, in_key: &str) -> Result<VodPlaybackInfo> {
+        let trimmed_key = in_key.trim();
+        if trimmed_key.is_empty() {
+            bail!(
+                "Cannot query NeonPlayer playback info without a valid inKey for video '{video_id}'"
+            );
+        }
         let url = format!(
-            "{}/neonplayer/vodplay/v1/playback/{video_id}?key={in_key}&env=real",
+            "{}/neonplayer/vodplay/v1/playback/{video_id}?key={trimmed_key}&env=real",
             self.playback_base_url
         );
         let resp = self.client.get(&url).send().await?;

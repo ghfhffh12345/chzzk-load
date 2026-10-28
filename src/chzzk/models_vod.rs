@@ -11,6 +11,8 @@ pub struct VodDetail {
     #[serde(default)]
     pub in_key: Option<String>,
     #[serde(default)]
+    pub live_rewind_playback_json: Option<String>,
+    #[serde(default)]
     pub live_open_date: Option<String>,
     #[serde(default)]
     pub publish_date: Option<String>,

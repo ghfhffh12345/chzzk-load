@@ -196,9 +196,17 @@ pub fn select_variant<'a>(
     );
 }
 
-/// Parses an HLS variant playlist (`#EXTINF`) and extracts all video segments (.ts).
-pub fn parse_variant_playlist(content: &str, variant_url: &str) -> Result<Vec<VodSegment>> {
+/// Representation of an HLS variant playlist including optional fMP4 init segment and media segments.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VodVariantManifest {
+    pub init_segment: Option<VodSegment>,
+    pub segments: Vec<VodSegment>,
+}
+
+/// Parses an HLS variant playlist (`#EXTINF` and optional `#EXT-X-MAP`) and extracts all video segments.
+pub fn parse_variant_manifest(content: &str, variant_url: &str) -> Result<VodVariantManifest> {
     let mut segments = Vec::new();
+    let mut init_segment = None;
     let mut pending_duration: Option<f64> = None;
     let mut segment_index = 0usize;
 
@@ -208,12 +216,33 @@ pub fn parse_variant_playlist(content: &str, variant_url: &str) -> Result<Vec<Vo
             continue;
         }
 
-        if let Some(extinf) = trimmed.strip_prefix("#EXTINF:") {
+        if let Some(map_attr) = trimmed.strip_prefix("#EXT-X-MAP:") {
+            for attr in map_attr.split(',') {
+                let attr = attr.trim();
+                if let Some((k, v)) = attr.split_once('=') {
+                    if k.trim().eq_ignore_ascii_case("URI") {
+                        let uri_val = v.trim().trim_matches('"');
+                        let url = resolve_url(variant_url, uri_val);
+                        init_segment = Some(VodSegment {
+                            index: 0,
+                            filename: "init.mp4".to_string(),
+                            url,
+                            duration: 0.0,
+                        });
+                    }
+                }
+            }
+        } else if let Some(extinf) = trimmed.strip_prefix("#EXTINF:") {
             let dur_str = extinf.split(',').next().unwrap_or("").trim();
             pending_duration = dur_str.parse::<f64>().ok();
         } else if !trimmed.starts_with('#') {
             let url = resolve_url(variant_url, trimmed);
-            let filename = format!("segment_{segment_index:05}.ts");
+            let is_fmp4 = init_segment.is_some()
+                || trimmed.contains(".m4v")
+                || trimmed.contains(".m4s")
+                || trimmed.contains(".mp4");
+            let ext = if is_fmp4 { "mp4" } else { "ts" };
+            let filename = format!("segment_{segment_index:05}.{ext}");
             let duration = pending_duration.take().unwrap_or(0.0);
 
             segments.push(VodSegment {
@@ -230,7 +259,16 @@ pub fn parse_variant_playlist(content: &str, variant_url: &str) -> Result<Vec<Vo
         bail!("Variant playlist contains 0 video segments");
     }
 
-    Ok(segments)
+    Ok(VodVariantManifest {
+        init_segment,
+        segments,
+    })
+}
+
+/// Parses an HLS variant playlist (`#EXTINF`) and extracts all video segments (.ts).
+pub fn parse_variant_playlist(content: &str, variant_url: &str) -> Result<Vec<VodSegment>> {
+    let manifest = parse_variant_manifest(content, variant_url)?;
+    Ok(manifest.segments)
 }
 
 #[cfg(test)]
@@ -314,6 +352,43 @@ chunk_0002.ts?token=abc
         assert_eq!(segments[0].duration, 6.0);
         assert_eq!(segments[2].filename, "segment_00002.ts");
         assert_eq!(segments[2].duration, 4.5);
+    }
+
+    #[test]
+    fn test_parse_variant_manifest_fmp4_with_map() {
+        let content = r#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:6
+#EXT-X-MAP:URI="720p_init.m4s?token=xyz"
+#EXTINF:4.166667,
+720p_chunk_00.m4v
+#EXTINF:4.166667,
+720p_chunk_01.m4v
+#EXT-X-ENDLIST
+"#;
+        let manifest = parse_variant_manifest(
+            content,
+            "https://cdn.example.com/chzzk/720p/vod_chunklist.m3u8?token=xyz",
+        )
+        .unwrap();
+
+        assert!(manifest.init_segment.is_some());
+        let init = manifest.init_segment.unwrap();
+        assert_eq!(init.filename, "init.mp4");
+        assert_eq!(
+            init.url,
+            "https://cdn.example.com/chzzk/720p/720p_init.m4s?token=xyz"
+        );
+        assert_eq!(init.duration, 0.0);
+
+        assert_eq!(manifest.segments.len(), 2);
+        assert_eq!(manifest.segments[0].filename, "segment_00000.mp4");
+        assert_eq!(
+            manifest.segments[0].url,
+            "https://cdn.example.com/chzzk/720p/720p_chunk_00.m4v?token=xyz"
+        );
+        assert_eq!(manifest.segments[0].duration, 4.166667);
+        assert_eq!(manifest.segments[1].filename, "segment_00001.mp4");
     }
 
     #[test]

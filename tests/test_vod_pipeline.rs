@@ -54,6 +54,7 @@ fn create_fake_vod_source(video_no: u64, video_id: &str, in_key: &str) -> FakeVo
         video_id: video_id.to_string(),
         video_title: "Chzzk Live Replay".to_string(),
         in_key: Some(in_key.to_string()),
+        live_rewind_playback_json: None,
         live_open_date: Some("2026-09-30 11:00:00".to_string()),
         publish_date: Some("2026-09-30 15:00:00".to_string()),
         duration: Some(7200),
@@ -193,6 +194,7 @@ async fn test_vod_archival_with_neonplayer_mpd_and_query_token() {
         video_id: video_id.to_string(),
         video_title: "MPD VOD with Query Token".to_string(),
         in_key: Some(in_key.to_string()),
+        live_rewind_playback_json: None,
         live_open_date: Some("2026-10-01 10:00:00".to_string()),
         publish_date: Some("2026-10-01 12:00:00".to_string()),
         duration: Some(3600),
@@ -2125,6 +2127,202 @@ async fn test_vod_archival_progressive_artifact_triad_and_upload() {
     // Staging directory must be cleaned up
     let staging_dir = summary.output_dir.join(format!(".vod_staging_{video_id}"));
     assert!(!staging_dir.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+const SAMPLE_FMP4_MASTER_M3U8: &str = r#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080,NAME="1080p"
+1080p/vod_chunklist.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,NAME="720p"
+720p/vod_chunklist.m3u8
+"#;
+
+const SAMPLE_FMP4_720P_M3U8: &str = r#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:6
+#EXT-X-MAP:URI="720p_init.m4s?token=live_rewind_token"
+#EXTINF:4.166667,
+720p_chunk_00.m4v
+#EXTINF:4.166667,
+720p_chunk_01.m4v
+#EXT-X-ENDLIST
+"#;
+
+#[tokio::test]
+async fn test_vod_archival_with_live_rewind_playback_json_fmp4_map() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_live_rewind_fmp4_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 15285165;
+    let video_id = "4ABD317B04AAC8D56711A4CF3539E27B8C47";
+
+    let rewind_json = r#"{
+        "meta": {
+            "videoId": "4ABD317B04AAC8D56711A4CF3539E27B8C47",
+            "duration": 45171.797
+        },
+        "media": [
+            {
+                "mediaId": "HLS",
+                "protocol": "HLS",
+                "path": "https://cdn.example.com/chzzk/live_rewind/master.m3u8"
+            }
+        ]
+    }"#;
+
+    let detail = VodDetail {
+        video_no,
+        video_id: video_id.to_string(),
+        video_title: "Live Replay Stream With LiveRewindPlaybackJson".to_string(),
+        in_key: None,
+        live_rewind_playback_json: Some(rewind_json.to_string()),
+        live_open_date: Some("2026-09-19 16:11:44".to_string()),
+        publish_date: Some("2026-09-20 04:52:52".to_string()),
+        duration: Some(45170),
+        channel: ChannelInfo {
+            channel_id: "chan_apple_01".to_string(),
+            channel_name: "StreamerApple".to_string(),
+            channel_image_url: None,
+            verified_mark: None,
+        },
+        category_type: Some("GAME".to_string()),
+        video_category: Some("Valheim".to_string()),
+        video_category_value: Some("발헤임".to_string()),
+        tags: vec!["valheim".to_string()],
+        paid_promotion: None,
+        adult: None,
+    };
+
+    let source = FakeVodSource::new()
+        .with_video_detail(video_no, detail)
+        .with_hls_playlist(
+            "https://cdn.example.com/chzzk/live_rewind/master.m3u8",
+            SAMPLE_FMP4_MASTER_M3U8,
+        )
+        .with_hls_playlist(
+            "https://cdn.example.com/chzzk/live_rewind/720p/vod_chunklist.m3u8",
+            SAMPLE_FMP4_720P_M3U8,
+        );
+
+    let args = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no}"),
+        quality: "720p".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, Arc::new(source), cancel_token)
+        .await
+        .expect("VOD archival with live_rewind_playback_json should succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 2);
+    assert!(summary.video_path.exists());
+    assert!(summary.metadata_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_with_live_rewind_fallback_on_playback_failure() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_live_rewind_fallback_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 15285166;
+    let video_id = "rewind_vid_fallback";
+
+    let rewind_json = r#"{
+        "media": [
+            {
+                "mediaId": "HLS",
+                "protocol": "HLS",
+                "path": "https://cdn.example.com/chzzk/live_rewind/master.m3u8"
+            }
+        ]
+    }"#;
+
+    let detail = VodDetail {
+        video_no,
+        video_id: video_id.to_string(),
+        video_title: "Fallback Replay".to_string(),
+        in_key: Some("expired_inkey".to_string()),
+        live_rewind_playback_json: Some(rewind_json.to_string()),
+        live_open_date: Some("2026-09-19 16:11:44".to_string()),
+        publish_date: Some("2026-09-20 04:52:52".to_string()),
+        duration: Some(100),
+        channel: ChannelInfo {
+            channel_id: "chan_fallback".to_string(),
+            channel_name: "FallbackStreamer".to_string(),
+            channel_image_url: None,
+            verified_mark: None,
+        },
+        category_type: None,
+        video_category: None,
+        video_category_value: None,
+        tags: vec![],
+        paid_promotion: None,
+        adult: None,
+    };
+
+    let source = FakeVodSource::new().with_video_detail(video_no, detail);
+    source.set_playback_error(video_id, "expired_inkey", "HTTP 400 Bad Request");
+    let source = source
+        .with_hls_playlist(
+            "https://cdn.example.com/chzzk/live_rewind/master.m3u8",
+            SAMPLE_FMP4_MASTER_M3U8,
+        )
+        .with_hls_playlist(
+            "https://cdn.example.com/chzzk/live_rewind/720p/vod_chunklist.m3u8",
+            SAMPLE_FMP4_720P_M3U8,
+        );
+
+    let args = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no}"),
+        quality: "720p".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, Arc::new(source), cancel_token)
+        .await
+        .expect("VOD archival should gracefully fall back to liveRewindPlaybackJson when get_playback_info fails");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 2);
+    assert!(summary.video_path.exists());
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
