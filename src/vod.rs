@@ -190,7 +190,7 @@ pub async fn run_vod_archival_with_options(
         .map(|u| u.to_string());
 
     // 4. If progressive MP4 is absent or segregated, fall back to HLS playlist parsing
-    let (hls_segments, hls_init_segment) = if progressive_url.is_none() {
+    let (hls_segments, hls_init_segments) = if progressive_url.is_none() {
         let master_url = playback_info
             .find_hls_master_url()
             .ok_or_else(|| anyhow!("No HLS media descriptor found in playback response"))?;
@@ -227,9 +227,9 @@ pub async fn run_vod_archival_with_options(
         if manifest.segments.is_empty() {
             bail!("Discovered 0 video segments for VOD #{video_no}");
         }
-        (Some(manifest.segments), manifest.init_segment)
+        (Some(manifest.segments), manifest.init_segments)
     } else {
-        (None, None)
+        (None, Vec::new())
     };
 
     // 5. Resolve canonical output directory
@@ -400,55 +400,89 @@ pub async fn run_vod_archival_with_options(
         let segments_count = segments.len();
 
         let mut all_download_segments = Vec::new();
-        if let Some(ref init_seg) = hls_init_segment {
-            all_download_segments.push(init_seg.clone());
-        }
+        all_download_segments.extend(hls_init_segments.clone());
         all_download_segments.extend(segments.clone());
 
-        let missing_segments = filter_missing_segments(&staging_dir, &all_download_segments).await;
-        let input_file = staging_dir.join("input_segments.txt");
-        let batch_content = generate_aria2c_input_file(&missing_segments);
-        tokio::fs::write(&input_file, batch_content.as_bytes())
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to write aria2c input file to '{}'",
-                    input_file.display()
-                )
-            })?;
+        let mut missing_segments =
+            filter_missing_segments(&staging_dir, &all_download_segments).await;
+        let mut attempts = 0;
+        const MAX_DOWNLOAD_ATTEMPTS: usize = 3;
 
-        let cookie_header = source.cookie_header();
-        let download_res = download_segments_with_aria2c_and_progress(
-            &aria2c_bin,
-            &staging_dir,
-            &input_file,
-            &all_download_segments,
-            video_tx,
-            cookie_header,
-            cancel_token.clone(),
-        )
-        .await;
+        while !missing_segments.is_empty() && attempts < MAX_DOWNLOAD_ATTEMPTS {
+            attempts += 1;
+            let input_file = staging_dir.join("input_segments.txt");
+            let batch_content = generate_aria2c_input_file(&missing_segments);
+            tokio::fs::write(&input_file, batch_content.as_bytes())
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to write aria2c input file to '{}'",
+                        input_file.display()
+                    )
+                })?;
 
-        if let Err(err) = download_res {
-            if let Some(ref task) = chat_task {
-                task.abort();
+            let cookie_header = source.cookie_header();
+            let download_res = download_segments_with_aria2c_and_progress(
+                &aria2c_bin,
+                &staging_dir,
+                &input_file,
+                &all_download_segments,
+                video_tx.clone(),
+                cookie_header,
+                cancel_token.clone(),
+            )
+            .await;
+
+            if cancel_token.is_cancelled() {
+                if let Some(ref task) = chat_task {
+                    task.abort();
+                }
+                if let Some(mut s) = progress_session {
+                    s.finish(false).await;
+                }
+                bail!("VOD download cancelled by token");
             }
-            if let Some(mut s) = progress_session {
-                s.finish(false).await;
+
+            missing_segments = filter_missing_segments(&staging_dir, &all_download_segments).await;
+            if missing_segments.is_empty() {
+                break;
             }
-            return Err(err);
+
+            if attempts >= MAX_DOWNLOAD_ATTEMPTS {
+                if let Some(ref task) = chat_task {
+                    task.abort();
+                }
+                if let Some(mut s) = progress_session {
+                    s.finish(false).await;
+                }
+                if let Err(err) = download_res {
+                    return Err(err).context(format!(
+                        "aria2c failed and {} segment(s) remain incomplete after {} attempts",
+                        missing_segments.len(),
+                        MAX_DOWNLOAD_ATTEMPTS
+                    ));
+                } else {
+                    bail!(
+                        "aria2c completed but {} segment(s) remain incomplete after {} attempts",
+                        missing_segments.len(),
+                        MAX_DOWNLOAD_ATTEMPTS
+                    );
+                }
+            }
         }
 
         if let Some(ref mut s) = progress_session {
             s.transition_to_mux();
         }
 
+        let expected_dur = segments.iter().map(|s| s.duration).sum::<f64>();
         let staged = match remux_vod_to_staged(
             &ffmpeg_bin,
             &staging_dir,
             &output_dir,
             &segments,
-            hls_init_segment.as_ref(),
+            &hls_init_segments,
+            Some(expected_dur),
             cancel_token.clone(),
         )
         .await

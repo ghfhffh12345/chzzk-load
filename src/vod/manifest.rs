@@ -10,13 +10,33 @@ pub struct HlsVariant {
     pub name: Option<String>,
 }
 
-/// Representation of an individual media segment (.ts) extracted from a variant playlist.
+/// Representation of an individual media segment (.ts or .mp4) extracted from a variant playlist.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VodSegment {
     pub index: usize,
     pub filename: String,
     pub url: String,
     pub duration: f64,
+    pub map_index: Option<usize>,
+    pub discontinuity: bool,
+}
+
+impl VodSegment {
+    pub fn new(
+        index: usize,
+        filename: impl Into<String>,
+        url: impl Into<String>,
+        duration: f64,
+    ) -> Self {
+        Self {
+            index,
+            filename: filename.into(),
+            url: url.into(),
+            duration,
+            map_index: None,
+            discontinuity: false,
+        }
+    }
 }
 
 /// Resolves a relative URL against a base URL, preserving query parameters
@@ -196,9 +216,10 @@ pub fn select_variant<'a>(
     );
 }
 
-/// Representation of an HLS variant playlist including optional fMP4 init segment and media segments.
+/// Representation of an HLS variant playlist including fMP4 init segment(s) and media segments.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VodVariantManifest {
+    pub init_segments: Vec<VodSegment>,
     pub init_segment: Option<VodSegment>,
     pub segments: Vec<VodSegment>,
 }
@@ -206,7 +227,9 @@ pub struct VodVariantManifest {
 /// Parses an HLS variant playlist (`#EXTINF` and optional `#EXT-X-MAP`) and extracts all video segments.
 pub fn parse_variant_manifest(content: &str, variant_url: &str) -> Result<VodVariantManifest> {
     let mut segments = Vec::new();
-    let mut init_segment = None;
+    let mut init_segments: Vec<VodSegment> = Vec::new();
+    let mut current_map_index: Option<usize> = None;
+    let mut pending_discontinuity = false;
     let mut pending_duration: Option<f64> = None;
     let mut segment_index = 0usize;
 
@@ -216,19 +239,30 @@ pub fn parse_variant_manifest(content: &str, variant_url: &str) -> Result<VodVar
             continue;
         }
 
-        if let Some(map_attr) = trimmed.strip_prefix("#EXT-X-MAP:") {
+        if trimmed == "#EXT-X-DISCONTINUITY" {
+            pending_discontinuity = true;
+        } else if let Some(map_attr) = trimmed.strip_prefix("#EXT-X-MAP:") {
             for attr in map_attr.split(',') {
                 let attr = attr.trim();
                 if let Some((k, v)) = attr.split_once('=') {
                     if k.trim().eq_ignore_ascii_case("URI") {
                         let uri_val = v.trim().trim_matches('"');
                         let url = resolve_url(variant_url, uri_val);
-                        init_segment = Some(VodSegment {
-                            index: 0,
-                            filename: "init.mp4".to_string(),
-                            url,
-                            duration: 0.0,
-                        });
+                        if let Some(existing_idx) = init_segments.iter().position(|s| s.url == url)
+                        {
+                            current_map_index = Some(existing_idx);
+                        } else {
+                            let new_idx = init_segments.len();
+                            init_segments.push(VodSegment {
+                                index: new_idx,
+                                filename: format!("init_{new_idx:05}.mp4"),
+                                url,
+                                duration: 0.0,
+                                map_index: None,
+                                discontinuity: false,
+                            });
+                            current_map_index = Some(new_idx);
+                        }
                     }
                 }
             }
@@ -237,19 +271,22 @@ pub fn parse_variant_manifest(content: &str, variant_url: &str) -> Result<VodVar
             pending_duration = dur_str.parse::<f64>().ok();
         } else if !trimmed.starts_with('#') {
             let url = resolve_url(variant_url, trimmed);
-            let is_fmp4 = init_segment.is_some()
+            let is_fmp4 = !init_segments.is_empty()
                 || trimmed.contains(".m4v")
                 || trimmed.contains(".m4s")
                 || trimmed.contains(".mp4");
             let ext = if is_fmp4 { "mp4" } else { "ts" };
             let filename = format!("segment_{segment_index:05}.{ext}");
             let duration = pending_duration.take().unwrap_or(0.0);
+            let discontinuity = std::mem::take(&mut pending_discontinuity);
 
             segments.push(VodSegment {
                 index: segment_index,
                 filename,
                 url,
                 duration,
+                map_index: current_map_index,
+                discontinuity,
             });
             segment_index += 1;
         }
@@ -259,7 +296,14 @@ pub fn parse_variant_manifest(content: &str, variant_url: &str) -> Result<VodVar
         bail!("Variant playlist contains 0 video segments");
     }
 
+    if init_segments.len() == 1 {
+        init_segments[0].filename = "init.mp4".to_string();
+    }
+
+    let init_segment = init_segments.first().cloned();
+
     Ok(VodVariantManifest {
+        init_segments,
         init_segment,
         segments,
     })
@@ -437,5 +481,53 @@ chunk_0002.ts?token=abc
             ),
             "https://cdn.example.com/hls/variant_720.m3u8"
         );
+    }
+
+    #[test]
+    fn test_parse_variant_manifest_multi_map_and_discontinuity() {
+        let content = r#"#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:5
+#EXT-X-MAP:URI="1080p_0.m4s?token=abc"
+#EXTINF:4.167000,
+chunk_00.m4v
+#EXTINF:4.167000,
+chunk_01.m4v
+#EXT-X-DISCONTINUITY
+#EXT-X-MAP:URI="1080p_1.m4s?token=abc"
+#EXTINF:4.167000,
+chunk_02.m4v
+#EXTINF:4.167000,
+chunk_03.m4v
+#EXT-X-ENDLIST
+"#;
+        let manifest = parse_variant_manifest(
+            content,
+            "https://cdn.example.com/chzzk/1080p/vod_chunklist.m3u8?token=abc",
+        )
+        .unwrap();
+
+        assert_eq!(manifest.init_segments.len(), 2);
+        assert_eq!(manifest.init_segments[0].filename, "init_00000.mp4");
+        assert_eq!(
+            manifest.init_segments[0].url,
+            "https://cdn.example.com/chzzk/1080p/1080p_0.m4s?token=abc"
+        );
+        assert_eq!(manifest.init_segments[1].filename, "init_00001.mp4");
+        assert_eq!(
+            manifest.init_segments[1].url,
+            "https://cdn.example.com/chzzk/1080p/1080p_1.m4s?token=abc"
+        );
+
+        assert_eq!(manifest.segments.len(), 4);
+        assert_eq!(manifest.segments[0].map_index, Some(0));
+        assert!(!manifest.segments[0].discontinuity);
+        assert_eq!(manifest.segments[1].map_index, Some(0));
+        assert!(!manifest.segments[1].discontinuity);
+
+        assert_eq!(manifest.segments[2].map_index, Some(1));
+        assert!(manifest.segments[2].discontinuity);
+        assert_eq!(manifest.segments[3].map_index, Some(1));
+        assert!(!manifest.segments[3].discontinuity);
     }
 }

@@ -39,7 +39,7 @@ fn main() {
         std::process::exit(0);
     }
 
-    if args.iter().any(|a| a.contains("fail") || a.contains("mock_fail")) {
+    if args.iter().any(|a| (!a.starts_with("--") || a.starts_with("--dir") || a.starts_with("--out")) && (a.contains("fail") || a.contains("mock_fail"))) {
         eprintln!("[ERROR] aria2c download failed (mock error)");
         std::process::exit(1);
     }
@@ -147,8 +147,25 @@ fn main() {
             for line in content.lines() {
                 let trimmed = line.trim();
                 if let Some(out_name) = trimmed.strip_prefix("out=") {
-                    let out_path = dir.join(out_name.trim());
-                    let _ = std::fs::write(&out_path, &dummy_ts);
+                    let out_trimmed = out_name.trim();
+                    let out_path = dir.join(out_trimmed);
+                    let payload: &[u8] = if out_trimmed.ends_with(".mp4")
+                        || out_trimmed.ends_with(".m4s")
+                        || out_trimmed.ends_with(".m4v")
+                    {
+                        &[
+                            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p',
+                            b'i', b's', b'o', b'm', 0x00, 0x00, 0x02, 0x00,
+                            b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+                            0x00, 0x00, 0x00, 0x10, b'm', b'o', b'o', b'v',
+                            b'm', b'v', b'h', b'd', 0x00, 0x00, 0x00, 0x00,
+                            0x00, 0x00, 0x00, 0x10, b'm', b'd', b'a', b't',
+                            b'm', b'o', b'c', b'k', b'd', b'a', b't', b'a',
+                        ]
+                    } else {
+                        &dummy_ts
+                    };
+                    let _ = std::fs::write(&out_path, payload);
                 }
             }
         }

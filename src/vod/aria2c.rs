@@ -111,21 +111,138 @@ pub fn resolve_vod_staging_dir(
     }
 }
 
+/// Validates whether an MP4 / fMP4 segment on disk has intact ISO BMFF box headers
+/// that cleanly tile the entire file down to the exact byte without trailing corruption.
+fn is_valid_mp4_box_structure(path: &Path, file_len: u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if file_len < 16 {
+        return false;
+    }
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut offset = 0u64;
+    let mut header = [0u8; 8];
+    let mut box_count = 0usize;
+
+    while offset < file_len {
+        if offset.saturating_add(8) > file_len {
+            return false;
+        }
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return false;
+        }
+        if file.read_exact(&mut header).is_err() {
+            return false;
+        }
+
+        let size_u32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let box_type = &header[4..8];
+
+        let box_size = if size_u32 == 1 {
+            if offset.saturating_add(16) > file_len {
+                return false;
+            }
+            let mut ext = [0u8; 8];
+            if file.read_exact(&mut ext).is_err() {
+                return false;
+            }
+            let ext_size = u64::from_be_bytes(ext);
+            if ext_size < 16 {
+                return false;
+            }
+            ext_size
+        } else if size_u32 == 0 {
+            file_len - offset
+        } else if size_u32 < 8 {
+            return false;
+        } else {
+            size_u32 as u64
+        };
+
+        if !box_type
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b' ')
+        {
+            return false;
+        }
+
+        box_count += 1;
+        offset = match offset.checked_add(box_size) {
+            Some(n) if n <= file_len => n,
+            _ => return false,
+        };
+    }
+
+    offset == file_len && box_count > 0
+}
+
+/// Checks whether an MPEG-TS segment file is valid:
+/// non-empty, packet-aligned (multiple of 188 bytes), and starts with 0x47 sync byte.
+fn is_valid_ts_segment(path: &Path, file_len: u64) -> bool {
+    use std::io::Read;
+
+    if file_len < 188 || file_len % 188 != 0 {
+        return false;
+    }
+
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut sync_byte = [0u8; 1];
+    if file.read_exact(&mut sync_byte).is_err() {
+        return false;
+    }
+
+    sync_byte[0] == 0x47
+}
+
 /// Checks whether a segment has already been fully downloaded to `staging_dir`.
 ///
 /// A segment is considered completed if:
 /// 1. Its file exists and has size > 0 bytes.
 /// 2. No `.aria2` control file exists for it.
+/// 3. Its container structure is valid:
+///    - For `.ts`: non-empty, multiple of 188 bytes, starts with `0x47`.
+///    - For `.mp4`, `.m4s`, `.m4v`: valid ISO BMFF box headers cleanly tiling the file.
 pub(crate) async fn is_segment_completed(staging_dir: &Path, filename: &str) -> bool {
     let path = staging_dir.join(filename);
     let aria2_path = staging_dir.join(format!("{filename}.aria2"));
     if tokio::fs::try_exists(&aria2_path).await.unwrap_or(false) {
         return false;
     }
-    match tokio::fs::metadata(&path).await {
-        Ok(meta) => meta.is_file() && meta.len() > 0,
-        Err(_) => false,
+    let meta = match tokio::fs::metadata(&path).await {
+        Ok(meta) => meta,
+        Err(_) => return false,
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return false;
     }
+
+    let file_len = meta.len();
+    let path_clone = path.clone();
+    let filename_str = filename.to_string();
+
+    tokio::task::spawn_blocking(move || {
+        if filename_str.ends_with(".ts") {
+            is_valid_ts_segment(&path_clone, file_len)
+        } else if filename_str.ends_with(".mp4")
+            || filename_str.ends_with(".m4s")
+            || filename_str.ends_with(".m4v")
+        {
+            is_valid_mp4_box_structure(&path_clone, file_len)
+        } else {
+            file_len > 0
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Dispatches completion progress metrics for all segments in `staging_dir`.
@@ -242,6 +359,10 @@ pub fn build_aria2c_segment_args(
         "-x16".to_string(),
         "-s16".to_string(),
         "-k1M".to_string(),
+        "--always-resume=false".to_string(),
+        "--remove-control-file=true".to_string(),
+        "--retry-wait=2".to_string(),
+        "--max-tries=5".to_string(),
         "--allow-overwrite=true".to_string(),
         "--auto-file-renaming=false".to_string(),
         "--file-allocation=none".to_string(),
@@ -645,7 +766,12 @@ pub async fn download_segments_with_aria2c_and_progress(
             let status = res.with_context(|| "Failed waiting on aria2c process")?;
             let stderr_logs = stderr_handle.await.unwrap_or_default();
             if !status.success() {
-                bail!("{}", format_aria2c_failure_message(status, &stdout_logs, &stderr_logs));
+                // If every requested segment is already fully downloaded on disk,
+                // do not fail on transient aria2c process exit status.
+                let missing = filter_missing_segments(staging_dir, segments).await;
+                if !missing.is_empty() {
+                    bail!("{}", format_aria2c_failure_message(status, &stdout_logs, &stderr_logs));
+                }
             }
 
             send_completed_segments_progress(staging_dir, segments, progress_tx.as_ref()).await;
@@ -680,18 +806,8 @@ mod tests {
     #[test]
     fn test_generate_aria2c_input_file() {
         let segments = vec![
-            VodSegment {
-                index: 0,
-                filename: "segment_00000.ts".to_string(),
-                url: "https://example.com/seg0.ts".to_string(),
-                duration: 6.0,
-            },
-            VodSegment {
-                index: 1,
-                filename: "segment_00001.ts".to_string(),
-                url: "https://example.com/seg1.ts".to_string(),
-                duration: 6.0,
-            },
+            VodSegment::new(0, "segment_00000.ts", "https://example.com/seg0.ts", 6.0),
+            VodSegment::new(1, "segment_00001.ts", "https://example.com/seg1.ts", 6.0),
         ];
 
         let content = generate_aria2c_input_file(&segments);
@@ -737,39 +853,21 @@ mod tests {
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
 
         let segments = vec![
-            VodSegment {
-                index: 0,
-                filename: "seg_00.ts".to_string(),
-                url: "https://example.com/00.ts".to_string(),
-                duration: 6.0,
-            },
-            VodSegment {
-                index: 1,
-                filename: "seg_01.ts".to_string(),
-                url: "https://example.com/01.ts".to_string(),
-                duration: 6.0,
-            },
-            VodSegment {
-                index: 2,
-                filename: "seg_02.ts".to_string(),
-                url: "https://example.com/02.ts".to_string(),
-                duration: 6.0,
-            },
-            VodSegment {
-                index: 3,
-                filename: "seg_03.ts".to_string(),
-                url: "https://example.com/03.ts".to_string(),
-                duration: 6.0,
-            },
+            VodSegment::new(0, "seg_00.ts", "https://example.com/00.ts", 6.0),
+            VodSegment::new(1, "seg_01.ts", "https://example.com/01.ts", 6.0),
+            VodSegment::new(2, "seg_02.ts", "https://example.com/02.ts", 6.0),
+            VodSegment::new(3, "seg_03.ts", "https://example.com/03.ts", 6.0),
         ];
 
-        // Case 1: seg_00.ts is fully completed (file exists, size > 0, no .aria2 file)
-        tokio::fs::write(temp_dir.join("seg_00.ts"), b"valid MPEG-TS data")
+        // Case 1: seg_00.ts is fully completed (file exists, valid TS packet 188 bytes, starts with 0x47, no .aria2 file)
+        let mut valid_ts = vec![0u8; 188];
+        valid_ts[0] = 0x47;
+        tokio::fs::write(temp_dir.join("seg_00.ts"), &valid_ts)
             .await
             .unwrap();
 
         // Case 2: seg_01.ts is incomplete (file exists, but seg_01.ts.aria2 control file exists)
-        tokio::fs::write(temp_dir.join("seg_01.ts"), b"partial data")
+        tokio::fs::write(temp_dir.join("seg_01.ts"), &valid_ts)
             .await
             .unwrap();
         tokio::fs::write(temp_dir.join("seg_01.ts.aria2"), b"aria2 control")
@@ -822,6 +920,58 @@ mod tests {
             temp_dir.join("seg_00.ts").exists(),
             "seg_00.ts must be preserved"
         );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_is_segment_completed_fmp4() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_is_seg_fmp4_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        // Build valid fMP4 fragment: styp (20 bytes) + moof (16 bytes) + mdat (16 bytes) = 52 bytes
+        let mut valid_fmp4 = Vec::new();
+        // styp box (20 bytes)
+        valid_fmp4.extend_from_slice(&20u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"stypmsix");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+        // moof box (16 bytes)
+        valid_fmp4.extend_from_slice(&16u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"moof");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+        // mdat box (16 bytes)
+        valid_fmp4.extend_from_slice(&16u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"mdat");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+
+        tokio::fs::write(temp_dir.join("segment_00000.mp4"), &valid_fmp4)
+            .await
+            .unwrap();
+        assert!(is_segment_completed(&temp_dir, "segment_00000.mp4").await);
+
+        // Truncated fMP4: last box declared 100 bytes but file truncated at 40 bytes
+        let mut truncated_fmp4 = valid_fmp4.clone();
+        truncated_fmp4.truncate(40);
+        tokio::fs::write(temp_dir.join("segment_00001.mp4"), &truncated_fmp4)
+            .await
+            .unwrap();
+        assert!(!is_segment_completed(&temp_dir, "segment_00001.mp4").await);
+
+        // 0-byte file
+        tokio::fs::write(temp_dir.join("segment_00002.mp4"), b"")
+            .await
+            .unwrap();
+        assert!(!is_segment_completed(&temp_dir, "segment_00002.mp4").await);
+
+        // Valid file but .aria2 file exists
+        tokio::fs::write(temp_dir.join("segment_00003.mp4"), &valid_fmp4)
+            .await
+            .unwrap();
+        tokio::fs::write(temp_dir.join("segment_00003.mp4.aria2"), b"active")
+            .await
+            .unwrap();
+        assert!(!is_segment_completed(&temp_dir, "segment_00003.mp4").await);
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

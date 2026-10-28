@@ -132,7 +132,7 @@ pub async fn remove_dir_all_with_retry(path: &Path) -> std::io::Result<()> {
 }
 
 /// Structural metadata extracted during MP4 container integrity verification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Mp4ContainerInfo {
     pub file_size: u64,
     pub moov_offset: u64,
@@ -141,6 +141,48 @@ pub struct Mp4ContainerInfo {
     pub mdat_size: u64,
     pub is_faststart: bool,
     pub track_chunk_offsets: Vec<u64>,
+    pub duration_seconds: Option<f64>,
+}
+
+fn parse_mvhd_duration<R: std::io::Read + std::io::Seek>(
+    reader: &mut R,
+    payload_start: u64,
+    payload_end: u64,
+) -> Option<f64> {
+    use std::io::SeekFrom;
+
+    if payload_end.saturating_sub(payload_start) < 20 {
+        return None;
+    }
+    if reader.seek(SeekFrom::Start(payload_start)).is_err() {
+        return None;
+    }
+    let mut buf = [0u8; 32];
+    if reader.read_exact(&mut buf).is_err() {
+        return None;
+    }
+    let version = buf[0];
+    if version == 1 {
+        let timescale = u32::from_be_bytes([buf[20], buf[21], buf[22], buf[23]]);
+        let duration = u64::from_be_bytes([
+            buf[24], buf[25], buf[26], buf[27], buf[28], buf[29], buf[30], buf[31],
+        ]);
+        if timescale > 0 {
+            Some(duration as f64 / timescale as f64)
+        } else {
+            None
+        }
+    } else if version == 0 {
+        let timescale = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+        let duration = u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]);
+        if timescale > 0 {
+            Some(duration as f64 / timescale as f64)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 fn parse_chunk_offsets<R: std::io::Read + std::io::Seek>(
@@ -183,12 +225,14 @@ fn parse_chunk_offsets<R: std::io::Read + std::io::Seek>(
 }
 
 /// Recursively scans container boxes within `moov` (`trak`, `mdia`, `minf`, `stbl`)
-/// extracting sample chunk offsets from `stco` (32-bit) or `co64` (64-bit) boxes.
+/// extracting sample chunk offsets from `stco` (32-bit) or `co64` (64-bit) boxes,
+/// and parses duration from `mvhd`.
 fn scan_moov_chunk_offsets<R: std::io::Read + std::io::Seek>(
     reader: &mut R,
     start: u64,
     end: u64,
     chunk_offsets: &mut Vec<u64>,
+    duration_seconds: &mut Option<f64>,
 ) {
     use std::io::SeekFrom;
 
@@ -233,8 +277,19 @@ fn scan_moov_chunk_offsets<R: std::io::Read + std::io::Seek>(
         let payload_end = next_offset;
 
         match box_type {
+            b"mvhd" => {
+                if duration_seconds.is_none() {
+                    *duration_seconds = parse_mvhd_duration(reader, payload_start, payload_end);
+                }
+            }
             b"trak" | b"mdia" | b"minf" | b"stbl" => {
-                scan_moov_chunk_offsets(reader, payload_start, payload_end, chunk_offsets);
+                scan_moov_chunk_offsets(
+                    reader,
+                    payload_start,
+                    payload_end,
+                    chunk_offsets,
+                    duration_seconds,
+                );
             }
             b"stco" => {
                 parse_chunk_offsets(reader, payload_start, payload_end, false, chunk_offsets);
@@ -372,11 +427,13 @@ pub fn validate_mp4_container_integrity(path: &Path) -> anyhow::Result<Mp4Contai
 
     // Scan chunk offsets in moov and verify they point inside mdat payload ranges
     let mut chunk_offsets = Vec::new();
+    let mut duration_seconds = None;
     scan_moov_chunk_offsets(
         &mut file,
         moov_offset + moov_hdr_size,
         moov_offset + moov_size,
         &mut chunk_offsets,
+        &mut duration_seconds,
     );
 
     for &chunk_offset in &chunk_offsets {
@@ -401,6 +458,7 @@ pub fn validate_mp4_container_integrity(path: &Path) -> anyhow::Result<Mp4Contai
         mdat_size,
         is_faststart,
         track_chunk_offsets: chunk_offsets,
+        duration_seconds,
     })
 }
 

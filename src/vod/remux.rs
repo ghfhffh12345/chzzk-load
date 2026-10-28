@@ -78,21 +78,36 @@ pub fn build_vod_hls_remux_args(playlist_path: &Path, output_part_path: &Path) -
 }
 
 /// Generates the full content of an HLS playlist (.m3u8) pointing to locally staged segments.
-pub fn generate_vod_hls_playlist(
-    segments: &[VodSegment],
-    init_segment: Option<&VodSegment>,
-) -> String {
-    let mut script = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+pub fn generate_vod_hls_playlist(segments: &[VodSegment], init_segments: &[VodSegment]) -> String {
+    let mut script = String::from("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n");
     let max_dur = segments
         .iter()
         .map(|s| s.duration)
         .fold(0.0f64, f64::max)
         .ceil() as u64;
     script.push_str(&format!("#EXT-X-TARGETDURATION:{}\n", max_dur.max(1)));
-    if let Some(init) = init_segment {
-        script.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init.filename));
-    }
+
+    let mut current_map_idx: Option<usize> = None;
+
     for seg in segments {
+        if seg.discontinuity {
+            script.push_str("#EXT-X-DISCONTINUITY\n");
+        }
+        if let Some(map_idx) = seg.map_index {
+            if current_map_idx != Some(map_idx) {
+                if let Some(init_seg) = init_segments.get(map_idx) {
+                    script.push_str(&format!("#EXT-X-MAP:URI=\"{}\"\n", init_seg.filename));
+                    current_map_idx = Some(map_idx);
+                }
+            }
+        } else if current_map_idx.is_none() && !init_segments.is_empty() {
+            // Fallback: emit first init segment if segment doesn't specify map_index
+            script.push_str(&format!(
+                "#EXT-X-MAP:URI=\"{}\"\n",
+                init_segments[0].filename
+            ));
+            current_map_idx = Some(0);
+        }
         script.push_str(&format!("#EXTINF:{:.6},\n", seg.duration));
         script.push_str(&seg.filename);
         script.push('\n');
@@ -109,7 +124,8 @@ pub async fn remux_vod_to_staged(
     staging_dir: &Path,
     output_dir: &Path,
     segments: &[VodSegment],
-    init_segment: Option<&VodSegment>,
+    init_segments: &[VodSegment],
+    expected_duration_seconds: Option<f64>,
     cancel_token: CancellationToken,
 ) -> Result<PathBuf> {
     if segments.is_empty() {
@@ -134,7 +150,7 @@ pub async fn remux_vod_to_staged(
         bail!("VOD remuxing cancelled by token before execution");
     }
 
-    let is_hls_remux = init_segment.is_some()
+    let is_hls_remux = !init_segments.is_empty()
         || segments
             .first()
             .map(|s| s.filename.ends_with(".mp4") || s.filename.ends_with(".m4s"))
@@ -142,7 +158,7 @@ pub async fn remux_vod_to_staged(
 
     let (_input_path, args) = if is_hls_remux {
         let playlist_path = staging_dir.join("local_playlist.m3u8");
-        let playlist_content = generate_vod_hls_playlist(segments, init_segment);
+        let playlist_content = generate_vod_hls_playlist(segments, init_segments);
         tokio::fs::write(&playlist_path, playlist_content.as_bytes())
             .await
             .with_context(|| {
@@ -218,12 +234,24 @@ pub async fn remux_vod_to_staged(
                 }
 
                 // 3. Structural MP4 container validation confirms single moov, mdat, and chunk offsets
-                validate_mp4_container_integrity(&staged_path).with_context(|| {
+                let info = validate_mp4_container_integrity(&staged_path).with_context(|| {
                     format!(
                         "FFmpeg produced an invalid MP4 container at '{}'",
                         staged_path.display()
                     )
                 })?;
+
+                // 4. Validate output duration against expected segment sum
+                if let (Some(expected), Some(actual)) = (expected_duration_seconds, info.duration_seconds) {
+                    if expected > 10.0 && actual < expected * 0.90 {
+                        let _ = unlink_local_file_with_retry(&staged_path).await;
+                        bail!(
+                            "Remuxed MP4 duration {:.2}s is significantly shorter than expected duration {:.2}s (truncated by FFmpeg)",
+                            actual,
+                            expected
+                        );
+                    }
+                }
 
                 Ok(())
             }
@@ -385,5 +413,44 @@ mod tests {
         assert!(args.contains(&"make_zero".to_string()));
         assert!(args.contains(&"+faststart".to_string()));
         assert_eq!(args.last().unwrap(), &output.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn test_generate_vod_hls_playlist_with_discontinuity() {
+        let init_segs = vec![
+            VodSegment::new(0, "init_00000.mp4", "https://example.com/init0.mp4", 0.0),
+            VodSegment::new(1, "init_00001.mp4", "https://example.com/init1.mp4", 0.0),
+        ];
+
+        let mut seg0 = VodSegment::new(0, "seg_00000.mp4", "https://example.com/0.mp4", 4.167);
+        seg0.map_index = Some(0);
+        let mut seg1 = VodSegment::new(1, "seg_00001.mp4", "https://example.com/1.mp4", 4.167);
+        seg1.map_index = Some(0);
+        let mut seg2 = VodSegment::new(2, "seg_00002.mp4", "https://example.com/2.mp4", 4.167);
+        seg2.map_index = Some(1);
+        seg2.discontinuity = true;
+        let mut seg3 = VodSegment::new(3, "seg_00003.mp4", "https://example.com/3.mp4", 4.167);
+        seg3.map_index = Some(1);
+
+        let segments = vec![seg0, seg1, seg2, seg3];
+        let playlist = generate_vod_hls_playlist(&segments, &init_segs);
+
+        assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        assert!(playlist.contains("#EXT-X-MAP:URI=\"init_00000.mp4\""));
+        assert!(playlist.contains("#EXT-X-DISCONTINUITY"));
+        assert!(playlist.contains("#EXT-X-MAP:URI=\"init_00001.mp4\""));
+        assert!(playlist.contains("#EXT-X-ENDLIST"));
+
+        // Verify order: map0 before seg0, discontinuity and map1 between seg1 and seg2
+        let pos_map0 = playlist.find("#EXT-X-MAP:URI=\"init_00000.mp4\"").unwrap();
+        let pos_seg0 = playlist.find("seg_00000.mp4").unwrap();
+        let pos_disc = playlist.find("#EXT-X-DISCONTINUITY").unwrap();
+        let pos_map1 = playlist.find("#EXT-X-MAP:URI=\"init_00001.mp4\"").unwrap();
+        let pos_seg2 = playlist.find("seg_00002.mp4").unwrap();
+
+        assert!(pos_map0 < pos_seg0);
+        assert!(pos_seg0 < pos_disc);
+        assert!(pos_disc < pos_map1);
+        assert!(pos_map1 < pos_seg2);
     }
 }
