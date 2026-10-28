@@ -562,3 +562,130 @@ async fn test_reconciliation_enqueues_orphaned_metadata_when_chunks_already_purg
     assert!(tasks[0].is_metadata());
     assert!(tasks[0].delete_on_success);
 }
+
+#[tokio::test]
+async fn test_reconciliation_enqueues_canonical_orphaned_metadata() {
+    let guard = TempDirGuard::new("test_reconcile_canonical_meta");
+    let session_dir = guard
+        .path()
+        .join("[2026-10-01_1000] [TestStreamer] TestStreamer - Title");
+    fs::create_dir_all(&session_dir).expect("failed to create session directory");
+
+    let chunk0 = session_dir.join("chunk_0000.ts");
+    let chat0 = session_dir.join("chat_0000.jsonl");
+    let chunk1 = session_dir.join("chunk_0001.ts");
+    let meta = session_dir.join("live_metadata.jsonl");
+
+    fs::write(&chunk0, vec![0u8; 1024]).expect("write chunk 0");
+    fs::write(&chat0, vec![0u8; 256]).expect("write chat 0");
+    fs::write(&chunk1, vec![0u8; 512]).expect("write chunk 1 (tail)");
+    fs::write(&meta, b"{\"event\":\"start\",\"stream_offset_ms\":0}\n").expect("write metadata");
+
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(100);
+    let (event_tx, mut _event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let settings = Settings {
+        channels: vec![ChannelConfig::with_alias("test_channel", "TestStreamer")],
+        ..Default::default()
+    };
+
+    let report = reconcile_orphaned_sessions(guard.path(), &upload_tx, &event_tx, &settings).await;
+
+    assert_eq!(report.orphaned_sessions_scanned, 1);
+    assert_eq!(report.chunks_enqueued, 3);
+    assert_eq!(report.chunks_quarantined, 1);
+    assert!(session_dir.join("chunk_0001.ts.quarantine").exists());
+
+    let mut tasks = Vec::new();
+    while let Ok(task) = upload_rx.try_recv() {
+        tasks.push(task);
+    }
+    assert_eq!(tasks.len(), 3);
+    assert_eq!(tasks[0].chunk_name, "chunk_0000.ts");
+    assert_eq!(tasks[1].chunk_name, "chat_0000.jsonl");
+    assert_eq!(tasks[2].chunk_name, "live_metadata.jsonl");
+    assert!(tasks[2].is_metadata());
+    assert!(
+        tasks[2].delete_on_success,
+        "Canonical orphaned metadata must be enqueued with delete_on_success: true"
+    );
+}
+
+#[tokio::test]
+async fn test_reconciliation_prioritizes_canonical_metadata_over_legacy() {
+    let guard = TempDirGuard::new("test_reconcile_meta_priority");
+    let session_dir = guard
+        .path()
+        .join("[2026-10-01_1000] [TestStreamer] TestStreamer - Title");
+    fs::create_dir_all(&session_dir).expect("failed to create session directory");
+
+    let canonical_meta = session_dir.join("live_metadata.jsonl");
+    let legacy_meta = session_dir.join("livemetadata.jsonl");
+    fs::write(
+        &canonical_meta,
+        b"{\"event\":\"canonical\",\"stream_offset_ms\":10}\n",
+    )
+    .expect("write canonical metadata");
+    fs::write(
+        &legacy_meta,
+        b"{\"event\":\"legacy\",\"stream_offset_ms\":0}\n",
+    )
+    .expect("write legacy metadata");
+
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(100);
+    let (event_tx, mut _event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let settings = Settings {
+        channels: vec![ChannelConfig::with_alias("test_channel", "TestStreamer")],
+        ..Default::default()
+    };
+
+    let report = reconcile_orphaned_sessions(guard.path(), &upload_tx, &event_tx, &settings).await;
+
+    assert_eq!(report.orphaned_sessions_scanned, 1);
+    assert_eq!(report.chunks_enqueued, 2);
+    assert_eq!(report.chunks_quarantined, 0);
+
+    let mut tasks = Vec::new();
+    while let Ok(task) = upload_rx.try_recv() {
+        tasks.push(task);
+    }
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks[0].chunk_name, "live_metadata.jsonl",
+        "Canonical live_metadata.jsonl must take priority over legacy livemetadata.jsonl"
+    );
+    assert!(tasks[0].is_metadata());
+    assert!(tasks[0].delete_on_success);
+    assert_eq!(tasks[1].chunk_name, "livemetadata.jsonl");
+    assert!(tasks[1].is_metadata());
+    assert!(tasks[1].delete_on_success);
+}
+
+#[tokio::test]
+async fn test_reconciliation_empty_canonical_metadata_quarantined() {
+    let guard = TempDirGuard::new("test_reconcile_empty_canonical_meta");
+    let session_dir = guard
+        .path()
+        .join("[2026-10-01_1000] [TestStreamer] TestStreamer - Title");
+    fs::create_dir_all(&session_dir).expect("failed to create session directory");
+
+    let meta = session_dir.join("live_metadata.jsonl");
+    fs::write(&meta, b"").expect("write empty canonical metadata");
+
+    let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(100);
+    let (event_tx, mut _event_rx) = mpsc::channel::<AppEvent>(100);
+
+    let settings = Settings {
+        channels: vec![ChannelConfig::with_alias("test_channel", "TestStreamer")],
+        ..Default::default()
+    };
+
+    let report = reconcile_orphaned_sessions(guard.path(), &upload_tx, &event_tx, &settings).await;
+
+    assert_eq!(report.orphaned_sessions_scanned, 1);
+    assert_eq!(report.chunks_enqueued, 0);
+    assert_eq!(report.chunks_quarantined, 1);
+    assert!(session_dir.join("live_metadata.jsonl.quarantine").exists());
+    assert!(upload_rx.try_recv().is_err());
+}

@@ -896,10 +896,9 @@ async fn test_upload_worker_chunk_deletion_unlinks_file_and_logs_reclaimed() {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn test_dlq_disk_aware_eviction_strictly_preserves_metadata_tasks() {
-    let temp_guard = TempDirGuard::new("test_dlq_meta_immunity");
-    let meta_path = temp_guard.path().join("livemetadata.jsonl");
+async fn assert_dlq_disk_aware_eviction_preserves_metadata(meta_filename: &str) {
+    let temp_guard = TempDirGuard::new(&format!("test_dlq_meta_{meta_filename}"));
+    let meta_path = temp_guard.path().join(meta_filename);
     std::fs::write(&meta_path, b"{\"event\":\"INITIAL_STATE\"}\n").unwrap();
 
     let (task_ts, path_ts) = create_chunk_file(temp_guard.path(), "chunk_0001.ts", b"video-0001");
@@ -912,10 +911,11 @@ async fn test_dlq_disk_aware_eviction_strictly_preserves_metadata_tasks() {
         false,
     );
 
-    // Fail attempt 1 so tasks enter DLQ. On retry (attempt 2), allow livemetadata.jsonl to succeed.
-    let backend = Arc::new(FlexibleMockBackend::new(|path, attempt| {
+    // Fail attempt 1 so tasks enter DLQ. On retry (attempt 2), allow metadata file to succeed.
+    let expected_name = meta_filename.to_string();
+    let backend = Arc::new(FlexibleMockBackend::new(move |path, attempt| {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        !(name == "livemetadata.jsonl" && attempt >= 2)
+        !(name == expected_name && attempt >= 2)
     }));
 
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
@@ -951,10 +951,10 @@ async fn test_dlq_disk_aware_eviction_strictly_preserves_metadata_tasks() {
         "chunk_0001.ts should be evicted under low disk pressure"
     );
 
-    // livemetadata.jsonl MUST NOT be evicted or deleted despite low disk pressure and being older
+    // Metadata file MUST NOT be evicted or deleted despite low disk pressure and being older
     assert!(
         meta_path.exists(),
-        "livemetadata.jsonl must strictly be immune from DLQ disk eviction"
+        "{meta_filename} must strictly be immune from DLQ disk eviction"
     );
 
     let mut saw_chunk_eviction = false;
@@ -965,7 +965,7 @@ async fn test_dlq_disk_aware_eviction_strictly_preserves_metadata_tasks() {
                 if entry.message.contains("chunk_0001.ts") {
                     saw_chunk_eviction = true;
                 }
-                if entry.message.contains("livemetadata.jsonl") {
+                if entry.message.contains(meta_filename) {
                     saw_meta_eviction = true;
                 }
             }
@@ -978,6 +978,12 @@ async fn test_dlq_disk_aware_eviction_strictly_preserves_metadata_tasks() {
     );
     assert!(
         !saw_meta_eviction,
-        "livemetadata.jsonl must NEVER be logged as evicted"
+        "{meta_filename} must NEVER be logged as evicted"
     );
+}
+
+#[tokio::test]
+async fn test_dlq_disk_aware_eviction_strictly_preserves_metadata_tasks() {
+    assert_dlq_disk_aware_eviction_preserves_metadata("live_metadata.jsonl").await;
+    assert_dlq_disk_aware_eviction_preserves_metadata("livemetadata.jsonl").await;
 }

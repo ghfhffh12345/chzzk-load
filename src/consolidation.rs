@@ -68,9 +68,10 @@ pub struct ConsolidationSummary {
 
 pub const DEFAULT_DELETE_CONCURRENCY: usize = 16;
 
-/// Returns true if a chunk is eligible for post-consolidation purging (.ts or .jsonl, strictly excluding livemetadata.jsonl).
+/// Returns true if a chunk is eligible for post-consolidation purging (.ts or .jsonl, strictly excluding live_metadata.jsonl and livemetadata.jsonl).
 pub(crate) fn is_purgeable_chunk(chunk: &ConsolidationChunk) -> bool {
-    chunk.name != "livemetadata.jsonl"
+    chunk.name != "live_metadata.jsonl"
+        && chunk.name != "livemetadata.jsonl"
         && (chunk.name.ends_with(".ts") || chunk.name.ends_with(".jsonl"))
 }
 
@@ -93,7 +94,7 @@ pub(crate) fn collect_purgeable_chunks(
 /// Under `TargetLocation::Local`, unlinks files using bounded retry logic handling Windows locks.
 /// Under `TargetLocation::Remote`, deletes files using `rclone deletefile`.
 ///
-/// Invariant: `livemetadata.jsonl` is NEVER deleted.
+/// Invariant: `live_metadata.jsonl` and `livemetadata.jsonl` are NEVER deleted.
 pub async fn delete_original_chunks(
     target: &TargetLocation,
     video_chunks: &[ConsolidationChunk],
@@ -132,7 +133,7 @@ pub async fn delete_original_chunks_with_bin(
 /// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded worker limit.
 ///
 /// Pools video chunks (`.ts`) and chat chunks (`.jsonl`) into a single unified queue,
-/// strictly excluding `livemetadata.jsonl`.
+/// strictly excluding `live_metadata.jsonl` and `livemetadata.jsonl`.
 ///
 /// Implements best-effort failure aggregation: all tasks run to completion, and any failures
 /// are collected and reported in an aggregate error summary upon completion.
@@ -597,7 +598,7 @@ pub async fn run_consolidation_with_coordinator(
 /// and chat deduplication pipelines via `tokio::join!`, atomically finalizes staged `.part`
 /// files upon zero-exit completion of all active pipelines, concurrently uploads finalized
 /// media files to cloud remotes with fail-fast sibling abort, and purges original chunks
-/// when `--keep-original` is false while strictly preserving `livemetadata.jsonl`.
+/// when `--keep-original` is false while strictly preserving `live_metadata.jsonl` and `livemetadata.jsonl`.
 pub async fn run_consolidation_with_coordinator_and_cancel(
     args: ConsolidateArgs,
     coordinator: ConsolidationProgressCoordinator,
@@ -1049,6 +1050,13 @@ mod tests {
 
     #[test]
     fn test_is_purgeable_chunk_filters_metadata_and_non_chunks() {
+        let meta_canonical = ConsolidationChunk {
+            name: "live_metadata.jsonl".to_string(),
+            index: 0,
+            size: 100,
+        };
+        assert!(!is_purgeable_chunk(&meta_canonical));
+
         let meta = ConsolidationChunk {
             name: "livemetadata.jsonl".to_string(),
             index: 0,

@@ -107,7 +107,7 @@ pub enum MetadataEventType {
     MetadataChanged,
 }
 
-/// A version 2 JSON Lines record in `livemetadata.jsonl`.
+/// A version 2 JSON Lines record in `live_metadata.jsonl`.
 ///
 /// Contains an RFC 3339 UTC timestamp, monotonic stream offset in milliseconds,
 /// and a full snapshot of the lean metadata state. Redundant local timestamps (`time_local`)

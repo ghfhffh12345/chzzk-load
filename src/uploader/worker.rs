@@ -1030,7 +1030,7 @@ mod tests {
         let chunk_path = session_dir.join("chunk_0000.ts");
         tokio::fs::write(&chunk_path, b"chunk data").await.unwrap();
 
-        let meta_path = session_dir.join("livemetadata.jsonl");
+        let meta_path = session_dir.join("live_metadata.jsonl");
         tokio::fs::write(&meta_path, b"{\"event\":\"INITIAL_STATE\"}\n")
             .await
             .unwrap();
@@ -1074,7 +1074,7 @@ mod tests {
         // Folder and metadata must NOT be removed by upload worker
         assert!(
             meta_path.exists(),
-            "livemetadata.jsonl must NOT be removed by upload worker"
+            "live_metadata.jsonl must NOT be removed by upload worker"
         );
         assert!(
             session_dir.exists(),

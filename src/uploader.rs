@@ -57,7 +57,7 @@ impl UploadTask {
         }
     }
 
-    /// Creates a metadata snapshot upload task (`livemetadata.jsonl`),
+    /// Creates a metadata snapshot upload task (`live_metadata.jsonl` or legacy `livemetadata.jsonl`),
     /// with an explicit `delete_on_success` retention policy (`false` for live sync,
     /// `true` for stream conclusion or crash recovery).
     pub fn metadata(
@@ -68,21 +68,27 @@ impl UploadTask {
         streamer_name: impl Into<String>,
         delete_on_success: bool,
     ) -> Self {
+        let chunk_path = chunk_path.into();
+        let chunk_name = chunk_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("live_metadata.jsonl")
+            .to_string();
         Self {
             channel_id: channel_id.into(),
             session_folder_id: session_folder_id.into(),
             remote_dir: remote_dir.into(),
-            chunk_path: chunk_path.into(),
-            chunk_name: "livemetadata.jsonl".to_string(),
+            chunk_path,
+            chunk_name,
             streamer_name: streamer_name.into(),
             delete_on_success,
         }
     }
 
-    /// Returns true if this upload task represents the broadcast metadata snapshot (`livemetadata.jsonl`).
+    /// Returns true if this upload task represents a broadcast metadata snapshot (`live_metadata.jsonl` or legacy `livemetadata.jsonl`).
     #[inline]
     pub fn is_metadata(&self) -> bool {
-        self.chunk_name == "livemetadata.jsonl"
+        self.chunk_name == "live_metadata.jsonl" || self.chunk_name == "livemetadata.jsonl"
     }
 
     /// Returns the broadcast identifier for this upload task.
@@ -120,6 +126,21 @@ mod tests {
 
     #[test]
     fn test_upload_task_metadata_constructor() {
+        let canonical_task = UploadTask::metadata(
+            "chan_1",
+            "session_1",
+            "remote/dir",
+            "recordings/live_metadata.jsonl",
+            "Streamer A",
+            false,
+        );
+        assert_eq!(canonical_task.chunk_name, "live_metadata.jsonl");
+        assert!(canonical_task.is_metadata());
+        assert!(
+            !canonical_task.delete_on_success,
+            "canonical live sync metadata must have delete_on_success false"
+        );
+
         let live_sync_task = UploadTask::metadata(
             "chan_2",
             "session_2",
@@ -129,6 +150,7 @@ mod tests {
             false,
         );
         assert_eq!(live_sync_task.chunk_name, "livemetadata.jsonl");
+        assert!(live_sync_task.is_metadata());
         assert!(
             !live_sync_task.delete_on_success,
             "live sync metadata must have delete_on_success false"
@@ -143,6 +165,7 @@ mod tests {
             true,
         );
         assert_eq!(teardown_task.chunk_name, "livemetadata.jsonl");
+        assert!(teardown_task.is_metadata());
         assert!(
             teardown_task.delete_on_success,
             "teardown metadata must have delete_on_success true"

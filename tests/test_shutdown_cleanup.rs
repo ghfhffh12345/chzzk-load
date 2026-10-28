@@ -150,8 +150,8 @@ async fn test_graceful_shutdown_cleans_session_folder_with_metadata_and_last_chu
     assert!(!c0.exists(), "chunk_0000.ts must be uploaded and deleted");
     assert!(c1.exists(), "chunk_0001.ts is still active");
     assert!(
-        session_dir.join("livemetadata.jsonl").exists(),
-        "livemetadata.jsonl exists"
+        session_dir.join("live_metadata.jsonl").exists(),
+        "live_metadata.jsonl exists"
     );
 
     // Now safely exit via 'q' (cancel token)
@@ -170,8 +170,8 @@ async fn test_graceful_shutdown_cleans_session_folder_with_metadata_and_last_chu
         "The last video chunk (chunk_0001.ts) must be uploaded and deleted locally upon safe exit via 'q'"
     );
     assert!(
-        !session_dir.join("livemetadata.jsonl").exists(),
-        "livemetadata.jsonl must be cleaned up upon safe exit via 'q'"
+        !session_dir.join("live_metadata.jsonl").exists(),
+        "live_metadata.jsonl must be cleaned up upon safe exit via 'q'"
     );
     assert!(
         !session_dir.exists(),

@@ -113,7 +113,7 @@ fn match_channel_info(folder_name: &str, settings: &Settings) -> (String, String
 /// 2. Any chunk without a higher index counterpart (e.g. the active tail chunk being written when crash occurred)
 ///    is quarantined by renaming to `.ts.quarantine` or `.jsonl.quarantine`.
 /// 3. Valid sealed chunks (and their matching completed chat `.jsonl` files) are enqueued to `upload_tx` to reclaim local disk space.
-/// 4. Orphaned `livemetadata.jsonl` files are enqueued with `delete_on_success: true` following all media chunks.
+/// 4. Orphaned `live_metadata.jsonl` (or legacy `livemetadata.jsonl`) files are enqueued with `delete_on_success: true` following all media chunks.
 pub async fn reconcile_orphaned_sessions(
     recordings_dir: &Path,
     upload_tx: &Sender<UploadTask>,
@@ -166,7 +166,8 @@ pub async fn reconcile_orphaned_sessions_with_custodian(
 
         let mut chunks: Vec<IndexedChunk> = Vec::new();
         let mut chat_chunks: Vec<IndexedChunk> = Vec::new();
-        let mut orphaned_metadata: Option<PathBuf> = None;
+        let mut orphaned_canonical_metadata: Option<PathBuf> = None;
+        let mut orphaned_legacy_metadata: Option<PathBuf> = None;
 
         while let Ok(Some(file_entry)) = session_entries.next_entry().await {
             let file_path = file_entry.path();
@@ -197,7 +198,8 @@ pub async fn reconcile_orphaned_sessions_with_custodian(
                 // Empty files are quarantined
                 let ext_opt = if file_name.ends_with(".ts") {
                     Some("ts")
-                } else if file_name == "livemetadata.jsonl"
+                } else if file_name == "live_metadata.jsonl"
+                    || file_name == "livemetadata.jsonl"
                     || (file_name.starts_with("chat_") && file_name.ends_with(".jsonl"))
                 {
                     Some("jsonl")
@@ -213,8 +215,10 @@ pub async fn reconcile_orphaned_sessions_with_custodian(
                 continue;
             }
 
-            if file_name == "livemetadata.jsonl" {
-                orphaned_metadata = Some(file_path);
+            if file_name == "live_metadata.jsonl" {
+                orphaned_canonical_metadata = Some(file_path);
+            } else if file_name == "livemetadata.jsonl" {
+                orphaned_legacy_metadata = Some(file_path);
             } else if file_name.ends_with(".ts") {
                 if let Some(index) = parse_chunk_index(&file_name) {
                     chunks.push(IndexedChunk {
@@ -325,8 +329,12 @@ pub async fn reconcile_orphaned_sessions_with_custodian(
             }
         }
 
-        // Enqueue orphaned livemetadata.jsonl with unlinking enabled following all orphaned media chunks
-        if let Some(metadata_path) = orphaned_metadata {
+        // Enqueue orphaned metadata (prioritizing canonical live_metadata.jsonl, followed by legacy livemetadata.jsonl if present)
+        // with unlinking enabled following all orphaned media chunks
+        for metadata_path in [orphaned_canonical_metadata, orphaned_legacy_metadata]
+            .into_iter()
+            .flatten()
+        {
             let task = UploadTask::metadata(
                 &channel_id,
                 &folder_name,
@@ -415,6 +423,67 @@ mod tests {
             .try_recv()
             .expect("metadata task must be enqueued after media");
         assert_eq!(task_meta.chunk_name, "livemetadata.jsonl");
+        assert!(task_meta.is_metadata());
+        assert!(task_meta.delete_on_success);
+
+        // Verify custodian registered the session as draining
+        let tracked = custodian.tracked_state(&session_dir);
+        assert!(tracked.is_some());
+        assert!(tracked.unwrap().is_draining());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_reconciliation_enqueues_canonical_metadata_and_registers_custodian() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_reconcile_canonical_colocated_{}",
+            rand::random::<u32>()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let session_dir = temp_dir.join("[2026-10-01_1000] [Streamer] Streamer - Title");
+        fs::create_dir_all(&session_dir).unwrap();
+
+        let chunk0 = session_dir.join("chunk_0000.ts");
+        let chunk1 = session_dir.join("chunk_0001.ts");
+        fs::write(&chunk0, vec![0u8; 1024]).unwrap();
+        fs::write(&chunk1, vec![0u8; 512]).unwrap();
+
+        let meta = session_dir.join("live_metadata.jsonl");
+        fs::write(&meta, b"{\"event\":\"start\",\"stream_offset_ms\":0}\n").unwrap();
+
+        let (upload_tx, mut upload_rx) = mpsc::channel::<UploadTask>(10);
+        let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(10);
+        let settings = Settings {
+            channels: vec![ChannelConfig::with_alias("chan_test", "Streamer")],
+            ..Default::default()
+        };
+
+        let custodian = SessionCustodian::without_events();
+
+        let report = reconcile_orphaned_sessions_with_custodian(
+            &temp_dir,
+            &upload_tx,
+            &event_tx,
+            &settings,
+            Some(&custodian),
+        )
+        .await;
+
+        assert_eq!(report.orphaned_sessions_scanned, 1);
+        assert_eq!(report.chunks_enqueued, 2);
+        assert_eq!(report.chunks_quarantined, 1);
+
+        let task_media = upload_rx.try_recv().expect("media task must be enqueued");
+        assert_eq!(task_media.chunk_name, "chunk_0000.ts");
+        assert!(!task_media.is_metadata());
+        assert!(task_media.delete_on_success);
+
+        let task_meta = upload_rx
+            .try_recv()
+            .expect("metadata task must be enqueued after media");
+        assert_eq!(task_meta.chunk_name, "live_metadata.jsonl");
         assert!(task_meta.is_metadata());
         assert!(task_meta.delete_on_success);
 

@@ -85,7 +85,7 @@ The real-time progress tracking mechanism providing live visibility into simulta
 _Avoid_: Progress monitor, consolidate logger, status bar
 
 **Lean Metadata Snapshot**:
-The flat JSON Lines event format (`livemetadata.jsonl`) recording essential stream lifecycle and classification state with monotonic offsets, synchronized via the unified upload DLQ pipeline and omitting volatile viewer telemetry and static CDN thumbnail URLs.
+The flat JSON Lines event format (`live_metadata.jsonl`, historically `livemetadata.jsonl`) recording essential stream lifecycle and classification state with monotonic offsets, synchronized via the unified upload DLQ pipeline and omitting volatile viewer telemetry and static CDN thumbnail URLs.
 _Avoid_: Metadata diff, delta log, stream telemetry
 
 **Live Stream Source**:

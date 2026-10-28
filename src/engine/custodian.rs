@@ -501,10 +501,10 @@ mod tests {
         ));
         tokio::fs::create_dir_all(&base_dir).await.unwrap();
 
-        // Subcase A: Directory with only livemetadata.jsonl
+        // Subcase A: Directory with only live_metadata.jsonl
         let dir_a = base_dir.join("session_a");
         tokio::fs::create_dir_all(&dir_a).await.unwrap();
-        let meta_file = dir_a.join("livemetadata.jsonl");
+        let meta_file = dir_a.join("live_metadata.jsonl");
         tokio::fs::write(&meta_file, b"{\"event\":\"INITIAL_STATE\"}\n")
             .await
             .unwrap();
@@ -512,18 +512,18 @@ mod tests {
         custodian.register_active(&dir_a, "channel_a", "Streamer A");
         custodian.mark_concluded(&dir_a);
 
-        // Under strict emptiness, presence of livemetadata.jsonl preserves the directory
+        // Under strict emptiness, presence of live_metadata.jsonl preserves the directory
         let purged_a = custodian.try_purge(&dir_a).await.unwrap();
         assert!(
             !purged_a,
-            "Under strict emptiness, directory with livemetadata.jsonl must NOT be purged until empty"
+            "Under strict emptiness, directory with live_metadata.jsonl must NOT be purged until empty"
         );
         assert!(
             dir_a.exists(),
             "Directory with metadata must still exist on disk"
         );
 
-        // Once livemetadata.jsonl is removed (simulating confirmed upload & unlink), it is purged
+        // Once live_metadata.jsonl is removed (simulating confirmed upload & unlink), it is purged
         unlink_local_file_with_retry(&meta_file).await.unwrap();
         let purged_a_empty = custodian.try_purge(&dir_a).await.unwrap();
         assert!(purged_a_empty, "Strictly empty directory must be purged");
@@ -634,7 +634,7 @@ mod tests {
         // 3. Draining with metadata only
         let dir_meta = base_dir.join("dir_meta");
         tokio::fs::create_dir_all(&dir_meta).await.unwrap();
-        tokio::fs::write(dir_meta.join("livemetadata.jsonl"), b"{}\n")
+        tokio::fs::write(dir_meta.join("live_metadata.jsonl"), b"{}\n")
             .await
             .unwrap();
         custodian.register_active(&dir_meta, "chan_meta", "StreamerMeta");
@@ -786,8 +786,8 @@ mod tests {
         assert!(session_dir.exists());
         unlink_local_file_with_retry(&chat_file).await.unwrap();
 
-        // 3. Directory with livemetadata.jsonl
-        let meta_file = session_dir.join("livemetadata.jsonl");
+        // 3. Directory with live_metadata.jsonl
+        let meta_file = session_dir.join("live_metadata.jsonl");
         tokio::fs::write(&meta_file, b"{\"event\":\"INITIAL_STATE\"}\n")
             .await
             .unwrap();

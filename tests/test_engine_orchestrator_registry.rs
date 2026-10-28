@@ -1238,7 +1238,7 @@ async fn test_recording_session_enqueues_initial_and_final_metadata_snapshots() 
         .expect("initial metadata task timed out")
         .expect("channel closed");
     assert_eq!(task_initial.channel_id, "chan_meta_life");
-    assert_eq!(task_initial.chunk_name, "livemetadata.jsonl");
+    assert_eq!(task_initial.chunk_name, "live_metadata.jsonl");
     assert!(task_initial.is_metadata());
     assert!(
         !task_initial.delete_on_success,
@@ -1255,7 +1255,7 @@ async fn test_recording_session_enqueues_initial_and_final_metadata_snapshots() 
         .expect("final metadata task timed out")
         .expect("channel closed");
     assert_eq!(task_final.channel_id, "chan_meta_life");
-    assert_eq!(task_final.chunk_name, "livemetadata.jsonl");
+    assert_eq!(task_final.chunk_name, "live_metadata.jsonl");
     assert!(task_final.is_metadata());
     assert!(
         task_final.delete_on_success,

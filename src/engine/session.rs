@@ -1,5 +1,8 @@
 use chrono::Utc;
 
+pub const METADATA_FILENAME: &str = "live_metadata.jsonl";
+pub const LEGACY_METADATA_FILENAME: &str = "livemetadata.jsonl";
+
 use crate::chzzk::models_metadata::{MetadataEvent, StreamMetadataState};
 use crate::recorder::ffmpeg::sanitize_filename;
 
@@ -130,11 +133,30 @@ impl ActiveSessionState {
         }
         out
     }
+
+    #[inline]
+    pub fn metadata_filename(&self) -> &'static str {
+        METADATA_FILENAME
+    }
+
+    #[inline]
+    pub fn metadata_path(&self, session_dir: &std::path::Path) -> std::path::PathBuf {
+        session_dir.join(METADATA_FILENAME)
+    }
 }
 
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    pub fn test_active_session_state_metadata_path() {
+        let session = test_session("Streamer", None, "Title");
+        assert_eq!(session.metadata_filename(), "live_metadata.jsonl");
+        let dir = Path::new("recordings/session_folder");
+        assert_eq!(session.metadata_path(dir), dir.join("live_metadata.jsonl"));
+    }
 
     pub fn test_session(streamer: &str, alias: Option<&str>, title: &str) -> ActiveSessionState {
         ActiveSessionState::new(
