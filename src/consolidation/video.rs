@@ -398,7 +398,7 @@ pub fn build_remote_concat_ffmpeg_command(
     cmd
 }
 
-/// Atomically finalizes the staged `livestream.mp4.part` into `livestream.mp4`.
+/// Atomically finalizes the staged `live_stream.mp4.part` into `live_stream.mp4`.
 ///
 /// In local mode: uses `tokio::fs::rename` with Windows file lock retries.
 /// In remote mode: executes `rclone moveto <staged> <final>`.
@@ -408,8 +408,8 @@ pub async fn finalize_staged_video(
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
-            let staged = dir.join("livestream.mp4.part");
-            let finalized = dir.join("livestream.mp4");
+            let staged = dir.join("live_stream.mp4.part");
+            let finalized = dir.join("live_stream.mp4");
             let _ = unlink_local_file_with_retry(&finalized).await;
             rename_local_file_with_retry(&staged, &finalized)
                 .await
@@ -451,11 +451,11 @@ pub async fn finalize_staged_video(
     }
 }
 
-/// Deletes the temporary staged `livestream.mp4.part` if present upon error or abort.
+/// Deletes the temporary staged `live_stream.mp4.part` if present upon error or abort.
 ///
-/// In local mode: unlinks `livestream.mp4.part` (treating NotFound as success).
+/// In local mode: unlinks `live_stream.mp4.part` (treating NotFound as success).
 /// In remote mode: unlinks local `livestream.mp4.part` and executes `rclone deletefile <staged>` on remote.
-/// Finalized `livestream.mp4` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
+/// Finalized `live_stream.mp4` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
 pub async fn cleanup_staged_video(
     target: &TargetLocation,
     rclone_bin: Option<&str>,
@@ -471,8 +471,9 @@ pub async fn cleanup_staged_video_in<P: AsRef<Path>>(
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
-            let staged = dir.join("livestream.mp4.part");
+            let staged = dir.join("live_stream.mp4.part");
             let _ = unlink_local_file_with_retry(&staged).await;
+            let _ = unlink_local_file_with_retry(&dir.join("livestream.mp4.part")).await;
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
@@ -703,11 +704,12 @@ pub async fn consolidate_video_local(
 ) -> anyhow::Result<VideoConsolidationResult> {
     let total_chunks = chunks.len();
     let total_manifest_bytes: u64 = chunks.iter().map(|c| c.size).sum();
-    let staged_path = dir.join("livestream.mp4.part");
+    let staged_path = dir.join("live_stream.mp4.part");
     let target = TargetLocation::Local(dir.to_path_buf());
 
     // Clean up any lingering .part file from prior aborted run
     let _ = unlink_local_file_with_retry(&staged_path).await;
+    let _ = unlink_local_file_with_retry(&dir.join("livestream.mp4.part")).await;
 
     if cancel_token.is_cancelled() {
         anyhow::bail!("Video consolidation cancelled by cooperative cancellation token");

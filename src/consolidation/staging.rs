@@ -411,39 +411,116 @@ pub fn probe_moov_atom(path: &Path) -> bool {
     validate_mp4_container_integrity(path).is_ok()
 }
 
+/// Validates the staging workspace media files (`live_stream.mp4` and `live_chat.jsonl`).
+///
+/// If `has_video` is true, `live_stream.mp4` must exist, be non-empty, and pass full MP4 container integrity verification.
+/// If `has_chat` is true, `live_chat.jsonl` must exist and be non-empty (>0 bytes).
+/// If neither video nor chat is requested, returns an error.
+pub fn validate_staging_workspace(
+    staging_dir: &Path,
+    has_video: bool,
+    has_chat: bool,
+) -> anyhow::Result<()> {
+    if !has_video && !has_chat {
+        anyhow::bail!(
+            "No media selected for staging workspace validation in '{}'",
+            staging_dir.display()
+        );
+    }
+
+    if has_video {
+        let mp4_path = staging_dir.join("live_stream.mp4");
+        if !mp4_path.exists() {
+            anyhow::bail!(
+                "Staging workspace video file does not exist: '{}'",
+                mp4_path.display()
+            );
+        }
+        validate_mp4_container_integrity(&mp4_path)?;
+    }
+
+    if has_chat {
+        let chat_path = staging_dir.join("live_chat.jsonl");
+        let meta = std::fs::metadata(&chat_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Staging workspace chat file does not exist or cannot be read at '{}': {e}",
+                chat_path.display()
+            )
+        })?;
+        if meta.len() == 0 {
+            anyhow::bail!(
+                "Staging workspace chat file is empty (0 bytes): '{}'",
+                chat_path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Checks whether existing staging files in `staging_dir` satisfy all integrity criteria
 /// to resume cloud upload directly without re-executing FFmpeg or chat deduplication.
 ///
-/// If `has_video` is true, `livestream.mp4` must exist with non-zero size and a valid `moov` atom header.
-/// If `has_chat` is true, `livechat.jsonl` must exist with non-zero size.
+/// Supports canonical snake-case identifiers (`live_stream.mp4`, `live_chat.jsonl`)
+/// and backwards-compatible legacy identifiers (`livestream.mp4`, `livechat.jsonl`).
 pub fn check_staging_resume_readiness(staging_dir: &Path, has_video: bool, has_chat: bool) -> bool {
     if !has_video && !has_chat {
         return false;
     }
 
     if has_video {
-        let mp4_path = staging_dir.join("livestream.mp4");
-        if !probe_moov_atom(&mp4_path) {
+        let canonical_mp4 = staging_dir.join("live_stream.mp4");
+        let legacy_mp4 = staging_dir.join("livestream.mp4");
+        let valid = (canonical_mp4.exists() && probe_moov_atom(&canonical_mp4))
+            || (legacy_mp4.exists() && probe_moov_atom(&legacy_mp4));
+        if !valid {
             return false;
         }
     }
 
     if has_chat {
-        let jsonl_path = staging_dir.join("livechat.jsonl");
-        match std::fs::metadata(&jsonl_path) {
-            Ok(m) if m.len() > 0 => {}
-            _ => return false,
+        let canonical_chat = staging_dir.join("live_chat.jsonl");
+        let legacy_chat = staging_dir.join("livechat.jsonl");
+        let valid = matches!(std::fs::metadata(&canonical_chat), Ok(m) if m.len() > 0)
+            || matches!(std::fs::metadata(&legacy_chat), Ok(m) if m.len() > 0);
+        if !valid {
+            return false;
         }
     }
 
     true
 }
 
+/// Purges temporary staged media part files (`live_stream.mp4.part` and `live_chat.jsonl.part`)
+/// from `staging_dir` using retry-backed unlink operations to absorb Windows file locking latencies.
+pub async fn cleanup_staged_media(staging_dir: &Path) -> std::io::Result<()> {
+    let part_files = [
+        "live_stream.mp4.part",
+        "live_chat.jsonl.part",
+        "livestream.mp4.part",
+        "livechat.jsonl.part",
+    ];
+    for file in part_files {
+        let p = staging_dir.join(file);
+        if let Err(e) = crate::uploader::unlink_local_file_with_retry(&p).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Invalidates and removes any existing consolidation staging files in `staging_dir`
-/// (`livestream.mp4`, `livechat.jsonl`, `livestream.mp4.part`, `livechat.jsonl.part`)
+/// (`live_stream.mp4`, `live_chat.jsonl`, `live_stream.mp4.part`, `live_chat.jsonl.part`,
+/// as well as legacy `livestream.mp4`, `livechat.jsonl`, `livestream.mp4.part`, `livechat.jsonl.part`)
 /// using retry-backed unlink operations to absorb Windows file locking latencies.
 pub async fn invalidate_staging_files(staging_dir: &Path) -> std::io::Result<()> {
     let files = [
+        "live_stream.mp4",
+        "live_chat.jsonl",
+        "live_stream.mp4.part",
+        "live_chat.jsonl.part",
         "livestream.mp4",
         "livechat.jsonl",
         "livestream.mp4.part",

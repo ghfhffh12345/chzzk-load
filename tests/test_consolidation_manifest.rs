@@ -721,12 +721,12 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
 
     // Output files exist
     assert!(
-        temp_dir.join("livestream.mp4").exists(),
-        "livestream.mp4 must exist"
+        temp_dir.join("live_stream.mp4").exists(),
+        "live_stream.mp4 must exist"
     );
     assert!(
-        temp_dir.join("livechat.jsonl").exists(),
-        "livechat.jsonl must exist"
+        temp_dir.join("live_chat.jsonl").exists(),
+        "live_chat.jsonl must exist"
     );
 
     // Original chunks deleted when keep_original is false
@@ -819,8 +819,8 @@ async fn test_run_consolidation_single_media_video_only() {
     assert_eq!(summary.chat_chunks_count, 0);
     assert!(summary.video_result.is_some());
     assert!(summary.chat_stats.is_none());
-    assert!(temp_dir.join("livestream.mp4").exists());
-    assert!(!temp_dir.join("livechat.jsonl").exists());
+    assert!(temp_dir.join("live_stream.mp4").exists());
+    assert!(!temp_dir.join("live_chat.jsonl").exists());
     assert!(!chunk0.exists());
     assert!(meta.exists());
 
@@ -859,8 +859,8 @@ async fn test_run_consolidation_single_media_chat_only() {
     assert_eq!(summary.chat_chunks_count, 1);
     assert!(summary.video_result.is_none());
     assert!(summary.chat_stats.is_some());
-    assert!(!temp_dir.join("livestream.mp4").exists());
-    assert!(temp_dir.join("livechat.jsonl").exists());
+    assert!(!temp_dir.join("live_stream.mp4").exists());
+    assert!(temp_dir.join("live_chat.jsonl").exists());
     assert!(!chat0.exists());
     assert!(meta.exists());
 

@@ -208,7 +208,7 @@ impl ChatDeduplicator {
     }
 }
 
-/// Atomically finalizes the staged `livechat.jsonl.part` into `livechat.jsonl`.
+/// Atomically finalizes the staged `live_chat.jsonl.part` into `live_chat.jsonl`.
 ///
 /// In local mode: unlinks any pre-existing destination and renames with Windows retry logic.
 /// In remote mode: executes `rclone moveto <staged> <final>`.
@@ -218,8 +218,8 @@ pub async fn finalize_staged_chat(
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
-            let part_path = dir.join("livechat.jsonl.part");
-            let final_path = dir.join("livechat.jsonl");
+            let part_path = dir.join("live_chat.jsonl.part");
+            let final_path = dir.join("live_chat.jsonl");
             let _ = unlink_local_file_with_retry(&final_path).await;
             rename_local_file_with_retry(&part_path, &final_path)
                 .await
@@ -284,8 +284,9 @@ pub async fn cleanup_staged_chat_in<P: AsRef<Path>>(
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
-            let part_path = dir.join("livechat.jsonl.part");
+            let part_path = dir.join("live_chat.jsonl.part");
             let _ = unlink_local_file_with_retry(&part_path).await;
+            let _ = unlink_local_file_with_retry(&dir.join("livechat.jsonl.part")).await;
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
@@ -404,10 +405,11 @@ pub async fn consolidate_chat_local_with_progress(
     cancel_token: CancellationToken,
     progress_sender: Option<tokio::sync::mpsc::UnboundedSender<ChatProgressUpdate>>,
 ) -> anyhow::Result<ChatConsolidationStats> {
-    let part_path = dir.join("livechat.jsonl.part");
+    let part_path = dir.join("live_chat.jsonl.part");
 
     // Clean up any stale .part file from previous aborted runs
     let _ = unlink_local_file_with_retry(&part_path).await;
+    let _ = unlink_local_file_with_retry(&dir.join("livechat.jsonl.part")).await;
 
     if cancel_token.is_cancelled() {
         anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");

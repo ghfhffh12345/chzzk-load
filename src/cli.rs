@@ -141,7 +141,7 @@ pub struct ConsolidateArgs {
 
     #[arg(
         long,
-        help = "Overwrite existing livestream.mp4 or livechat.jsonl files"
+        help = "Overwrite existing live_stream.mp4 or live_chat.jsonl files"
     )]
     pub overwrite: bool,
 

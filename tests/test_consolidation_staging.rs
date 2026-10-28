@@ -5,9 +5,10 @@ mod common;
 use chzzk_load::consolidation::manifest::TargetLocation;
 use chzzk_load::consolidation::staging::{
     Mp4ContainerInfo, STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes,
-    check_staging_resume_readiness, compute_target_hash, invalidate_staging_files, probe_moov_atom,
-    resolve_staging_dir, staging_folder_name, validate_mp4_container_integrity,
-    verify_staging_capacity, verify_staging_capacity_with_space,
+    check_staging_resume_readiness, cleanup_staged_media, compute_target_hash,
+    invalidate_staging_files, probe_moov_atom, resolve_staging_dir, staging_folder_name,
+    validate_mp4_container_integrity, validate_staging_workspace, verify_staging_capacity,
+    verify_staging_capacity_with_space,
 };
 
 fn create_temp_test_dir(prefix: &str) -> PathBuf {
@@ -332,6 +333,124 @@ async fn test_invalidate_staging_files() {
     assert!(!mp4_part.exists(), "livestream.mp4.part must be removed");
     assert!(!jsonl_part.exists(), "livechat.jsonl.part must be removed");
     assert!(other_file.exists(), "other files must remain untouched");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_cleanup_staged_media_purges_parts_only() {
+    let temp_dir = create_temp_test_dir("test_cleanup_staged_media");
+
+    let live_stream_mp4 = temp_dir.join("live_stream.mp4");
+    let live_chat_jsonl = temp_dir.join("live_chat.jsonl");
+    let video_part = temp_dir.join("live_stream.mp4.part");
+    let chat_part = temp_dir.join("live_chat.jsonl.part");
+    let keep_file = temp_dir.join("other_data.bin");
+
+    std::fs::write(&live_stream_mp4, b"final mp4").unwrap();
+    std::fs::write(&live_chat_jsonl, b"final chat").unwrap();
+    std::fs::write(&video_part, b"partial video").unwrap();
+    std::fs::write(&chat_part, b"partial chat").unwrap();
+    std::fs::write(&keep_file, b"keep me").unwrap();
+
+    let res = cleanup_staged_media(&temp_dir).await;
+    assert!(res.is_ok());
+
+    // .part files MUST be deleted
+    assert!(
+        !video_part.exists(),
+        "live_stream.mp4.part must be removed by cleanup_staged_media"
+    );
+    assert!(
+        !chat_part.exists(),
+        "live_chat.jsonl.part must be removed by cleanup_staged_media"
+    );
+
+    // Final files and other files MUST remain untouched
+    assert!(
+        live_stream_mp4.exists(),
+        "final live_stream.mp4 must NOT be removed by cleanup_staged_media"
+    );
+    assert!(
+        live_chat_jsonl.exists(),
+        "final live_chat.jsonl must NOT be removed by cleanup_staged_media"
+    );
+    assert!(
+        keep_file.exists(),
+        "unrelated files must NOT be removed by cleanup_staged_media"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_validate_staging_workspace_valid_and_invalid_scenarios() {
+    let temp_dir = create_temp_test_dir("test_validate_workspace");
+
+    let mp4_path = temp_dir.join("live_stream.mp4");
+    let chat_path = temp_dir.join("live_chat.jsonl");
+
+    // 1. Both false -> error
+    let err_no_media = validate_staging_workspace(&temp_dir, false, false).unwrap_err();
+    assert!(
+        err_no_media.to_string().contains("No media selected"),
+        "error message must cite no media: {err_no_media}"
+    );
+
+    // 2. Both requested, but files missing -> error
+    let err_missing = validate_staging_workspace(&temp_dir, true, true).unwrap_err();
+    assert!(
+        err_missing.to_string().contains("does not exist"),
+        "error message must cite missing file: {err_missing}"
+    );
+
+    // 3. Create valid faststart MP4
+    let mut fs_bytes = vec![0x00, 0x00, 0x00, 0x18];
+    fs_bytes.extend_from_slice(b"ftypisom\0\0\x02\0isomiso2");
+    fs_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    fs_bytes.extend_from_slice(b"moovmvhd1234");
+    fs_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    fs_bytes.extend_from_slice(b"mdat12345678");
+    std::fs::write(&mp4_path, &fs_bytes).unwrap();
+
+    // Video only requested -> Ok
+    assert!(validate_staging_workspace(&temp_dir, true, false).is_ok());
+
+    // Both requested, but chat still missing -> error
+    let err_chat_missing = validate_staging_workspace(&temp_dir, true, true).unwrap_err();
+    assert!(
+        err_chat_missing.to_string().contains("does not exist")
+            || err_chat_missing.to_string().contains("cannot be read"),
+        "error must cite missing chat: {err_chat_missing}"
+    );
+
+    // 4. Create empty (0-byte) chat file -> error
+    std::fs::write(&chat_path, b"").unwrap();
+    let err_empty_chat = validate_staging_workspace(&temp_dir, true, true).unwrap_err();
+    assert!(
+        err_empty_chat.to_string().contains("empty (0 bytes)"),
+        "error must cite empty chat: {err_empty_chat}"
+    );
+
+    // 5. Create valid non-empty chat file -> Ok
+    std::fs::write(
+        &chat_path,
+        b"{\"time_ms\":1000,\"nickname\":\"user\",\"content\":\"hi\"}\n",
+    )
+    .unwrap();
+    assert!(validate_staging_workspace(&temp_dir, true, true).is_ok());
+
+    // Chat only requested -> Ok
+    assert!(validate_staging_workspace(&temp_dir, false, true).is_ok());
+
+    // 6. Corrupt video container -> error
+    std::fs::write(&mp4_path, b"not an mp4 file").unwrap();
+    let err_corrupt_mp4 = validate_staging_workspace(&temp_dir, true, true).unwrap_err();
+    assert!(
+        err_corrupt_mp4.to_string().contains("too small")
+            || err_corrupt_mp4.to_string().contains("Corrupted MP4"),
+        "error must cite container corruption: {err_corrupt_mp4}"
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }

@@ -457,6 +457,10 @@ fn test_cli_consolidate_subcommand_parsing() {
         "Subcommand help must contain --overwrite: {sub_stdout}"
     );
     assert!(
+        sub_stdout.contains("Overwrite existing live_stream.mp4 or live_chat.jsonl files"),
+        "Subcommand help must contain live_stream.mp4 and live_chat.jsonl: {sub_stdout}"
+    );
+    assert!(
         sub_stdout.contains("--strict"),
         "Subcommand help must contain --strict: {sub_stdout}"
     );

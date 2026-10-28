@@ -198,15 +198,15 @@ async fn test_consolidate_chat_local_pipeline_success() {
     assert_eq!(stats.malformed_messages, 0);
 
     // Verify .part exists and final does NOT exist prior to finalization
-    let part_path = temp_dir.join("livechat.jsonl.part");
-    let final_path = temp_dir.join("livechat.jsonl");
+    let part_path = temp_dir.join("live_chat.jsonl.part");
+    let final_path = temp_dir.join("live_chat.jsonl");
     assert!(
         part_path.exists(),
-        "livechat.jsonl.part must exist before finalize_staged_chat"
+        "live_chat.jsonl.part must exist before finalize_staged_chat"
     );
     assert!(
         !final_path.exists(),
-        "livechat.jsonl must not exist before finalize_staged_chat"
+        "live_chat.jsonl must not exist before finalize_staged_chat"
     );
 
     // Atomically finalize staged chat
@@ -214,8 +214,8 @@ async fn test_consolidate_chat_local_pipeline_success() {
         .await
         .expect("finalize_staged_chat should succeed");
 
-    // Verify livechat.jsonl exists and has 4 lines
-    assert!(final_path.exists(), "livechat.jsonl must exist");
+    // Verify live_chat.jsonl exists and has 4 lines
+    assert!(final_path.exists(), "live_chat.jsonl must exist");
     let final_content = fs::read_to_string(&final_path).unwrap();
     let lines: Vec<&str> = final_content.lines().collect();
     assert_eq!(
@@ -229,7 +229,7 @@ async fn test_consolidate_chat_local_pipeline_success() {
     assert_eq!(lines[3], line4);
 
     // Verify .part file does NOT remain
-    assert!(!part_path.exists(), "livechat.jsonl.part must not remain");
+    assert!(!part_path.exists(), "live_chat.jsonl.part must not remain");
 
     // Verify original chunks are completely untouched
     assert!(chunk0_path.exists(), "Original chunk_0000 must remain");
@@ -268,11 +268,11 @@ async fn test_consolidate_chat_local_pipeline_abort_cleanup_on_error() {
     );
 
     // Verify .part was deleted
-    let part_path = temp_dir.join("livechat.jsonl.part");
+    let part_path = temp_dir.join("live_chat.jsonl.part");
     assert!(!part_path.exists(), "Part file must be removed upon abort");
 
     // Verify final file was NOT created
-    let final_path = temp_dir.join("livechat.jsonl");
+    let final_path = temp_dir.join("live_chat.jsonl");
     assert!(
         !final_path.exists(),
         "Final file must not be created upon abort"
@@ -460,13 +460,13 @@ async fn test_consolidate_chat_cooperative_cancellation() {
         "Cancelled chat consolidation must fail with error"
     );
 
-    let part_path = temp_dir.join("livechat.jsonl.part");
+    let part_path = temp_dir.join("live_chat.jsonl.part");
     assert!(
         !part_path.exists(),
         "Part file must be deleted upon cancellation"
     );
 
-    let final_path = temp_dir.join("livechat.jsonl");
+    let final_path = temp_dir.join("live_chat.jsonl");
     assert!(
         !final_path.exists(),
         "Final file must not be created upon cancellation"
@@ -483,7 +483,7 @@ async fn test_staged_chat_cleanup_local() {
         std::env::temp_dir().join(format!("test_cons_chat_cleanup_{}", rand::random::<u32>()));
     fs::create_dir_all(&temp_dir).unwrap();
 
-    let staged_file = temp_dir.join("livechat.jsonl.part");
+    let staged_file = temp_dir.join("live_chat.jsonl.part");
     let chunk0 = temp_dir.join("chat_0000.jsonl");
 
     tokio::fs::write(&staged_file, b"partial-chat-content")

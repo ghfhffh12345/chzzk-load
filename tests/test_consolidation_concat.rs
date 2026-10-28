@@ -1,7 +1,10 @@
+mod common;
+
+use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::{
     ConcatScriptGuard, create_temp_concat_script, create_temp_concat_script_in,
     create_temp_concat_script_in_sync, create_temp_concat_script_sync, escape_concat_path,
-    generate_concat_script,
+    generate_concat_script, run_consolidation,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -345,5 +348,154 @@ async fn test_concat_script_from_relative_path_contains_absolute_forward_slashes
     }
 
     drop(guard);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_local_consolidation_produces_live_stream_mp4_and_live_chat_jsonl() {
+    let _ = common::mock_ffmpeg::get_mock_ffmpeg_bin();
+
+    let temp_dir = create_temp_test_dir("test_concat_local_artifacts");
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: true,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: None,
+        config: None,
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("run_consolidation should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify canonical Live Artifact Triad filenames
+    let video_out = temp_dir.join("live_stream.mp4");
+    let chat_out = temp_dir.join("live_chat.jsonl");
+
+    assert!(
+        video_out.exists(),
+        "live_stream.mp4 must exist in destination directory"
+    );
+    assert!(
+        chat_out.exists(),
+        "live_chat.jsonl must exist in destination directory"
+    );
+
+    // Staged .part files must not linger
+    assert!(
+        !temp_dir.join("live_stream.mp4.part").exists(),
+        "live_stream.mp4.part must be promoted"
+    );
+    assert!(
+        !temp_dir.join("live_chat.jsonl.part").exists(),
+        "live_chat.jsonl.part must be promoted"
+    );
+
+    // Legacy filenames must not be created
+    assert!(
+        !temp_dir.join("livestream.mp4").exists(),
+        "legacy livestream.mp4 must NOT be created"
+    );
+    assert!(
+        !temp_dir.join("livechat.jsonl").exists(),
+        "legacy livechat.jsonl must NOT be created"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_local_consolidation_overwrite_flag_replaces_existing_artifacts() {
+    let _ = common::mock_ffmpeg::get_mock_ffmpeg_bin();
+
+    let temp_dir = create_temp_test_dir("test_concat_overwrite");
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+
+    let video_out = temp_dir.join("live_stream.mp4");
+    let chat_out = temp_dir.join("live_chat.jsonl");
+
+    // Write pre-existing files
+    fs::write(&video_out, b"old-pre-existing-video").unwrap();
+    fs::write(&chat_out, b"old-pre-existing-chat\n").unwrap();
+
+    // 1. Without overwrite -> must fail citing pre-existing files
+    let args_no_overwrite = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: true,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: None,
+        config: None,
+    };
+    let err = run_consolidation(args_no_overwrite)
+        .await
+        .expect_err("Should error when pre-existing files exist without --overwrite");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("live_stream.mp4") && err_str.contains("live_chat.jsonl"),
+        "Error must cite both live_stream.mp4 and live_chat.jsonl: {err_str}"
+    );
+
+    // 2. With overwrite -> must succeed and cleanly replace destination files
+    let args_overwrite = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        keep_original: true,
+        overwrite: true,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: None,
+        config: None,
+    };
+    let summary = run_consolidation(args_overwrite)
+        .await
+        .expect("run_consolidation with --overwrite should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    assert!(
+        video_out.exists(),
+        "live_stream.mp4 must exist after overwrite"
+    );
+    let video_content = fs::read(&video_out).unwrap();
+    assert_ne!(
+        video_content, b"old-pre-existing-video",
+        "live_stream.mp4 must be replaced by new consolidated video"
+    );
+
+    assert!(
+        chat_out.exists(),
+        "live_chat.jsonl must exist after overwrite"
+    );
+    let chat_content = fs::read_to_string(&chat_out).unwrap();
+    assert_ne!(
+        chat_content, "old-pre-existing-chat\n",
+        "live_chat.jsonl must be replaced by new consolidated chat"
+    );
+
     let _ = fs::remove_dir_all(&temp_dir);
 }
