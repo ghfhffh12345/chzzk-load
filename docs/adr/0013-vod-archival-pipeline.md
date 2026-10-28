@@ -10,7 +10,7 @@ Accepted (Amended: Dual Ingestion Pipeline)
 
 1. **Native Tokio Async HTTP Chunk Workers**: Downloading segments entirely within Rust Tokio tasks without external `aria2c`. Rejected to maximize raw saturation on multi-gigabit connections and leverage battle-tested connection pooling, multi-socket chunking, and session file recovery provided by `aria2c`.
 2. **Direct FFmpeg Manifest Ingestion (`ffmpeg -i <hls_url> -c copy`)**: Delegating the entire download to FFmpeg's internal HLS demuxer. Rejected because FFmpeg downloads segments sequentially over a single connection, leading to suboptimal throughput on large multi-hour 1080p60 VODs.
-3. **Live Recording Name Reuse (`livestream.mp4`)**: Naming output files `livestream.mp4` to match live capture. Rejected in favor of the VOD Artifact Triad (`vod.mp4`, `vod_chat.jsonl`, `vod_metadata.jsonl`) to distinguish post-hoc VOD downloads from real-time recordings while preserving identical internal JSON Lines and MP4 container conventions.
+3. **Live Recording Name Reuse (`live_stream.mp4`)**: Naming output files `live_stream.mp4` to match live capture. Rejected in favor of the VOD Artifact Triad (`vod.mp4`, `vod_chat.jsonl`, `vod_metadata.jsonl`) to distinguish post-hoc VOD downloads from real-time recordings while preserving identical internal JSON Lines and MP4 container conventions.
 4. **Exclusive Segmented HLS Ingestion**: Restricting downloads to HLS `.ts` playlists only. Superseded by the Dual Ingestion Pipeline: progressive MP4 single-file streams are prioritized via multi-socket byte-range chunking (`aria2c -x 16 -s 16 -k 1M`) to match multi-gigabit throughput line speeds, with HLS segment ingestion retained strictly as a fallback.
 
 ## Consequences

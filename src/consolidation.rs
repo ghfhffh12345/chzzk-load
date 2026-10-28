@@ -421,8 +421,8 @@ pub async fn upload_remote_staged_file(
     upload_remote_staged_file_with_args(bin, local_path, remote_dest, &[]).await
 }
 
-/// Concurrently uploads staged media files (`livestream.mp4` and `livechat.jsonl`) to remote destinations
-/// (`remote_base/livestream.mp4.part` and `remote_base/livechat.jsonl.part`) via `rclone copyto`,
+/// Concurrently uploads staged media files (`live_stream.mp4` and `live_chat.jsonl`) to remote destinations
+/// (`remote_base/live_stream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `rclone copyto`,
 /// dispatching live progress telemetry to optional senders.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
@@ -509,8 +509,8 @@ pub async fn upload_remote_staged_media_with_progress(
     Ok(())
 }
 
-/// Concurrently uploads staged media files (`livestream.mp4` and `livechat.jsonl`) to remote destinations
-/// (`remote_base/livestream.mp4.part` and `remote_base/livechat.jsonl.part`) via `rclone copyto`.
+/// Concurrently uploads staged media files (`live_stream.mp4` and `live_chat.jsonl`) to remote destinations
+/// (`remote_base/live_stream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `rclone copyto`.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
 /// is promptly aborted and killed (`kill_on_drop`).
@@ -1171,8 +1171,8 @@ mod tests {
 
     #[test]
     fn test_build_remote_staged_upload_command_structure() {
-        let local_path = std::path::Path::new("local/livestream.mp4");
-        let remote_dest = "remote:bucket/livestream.mp4.part";
+        let local_path = std::path::Path::new("local/live_stream.mp4");
+        let remote_dest = "remote:bucket/live_stream.mp4.part";
         let extra = vec!["--checkers".to_string(), "8".to_string()];
         let cmd = build_remote_staged_upload_command("my_rclone", local_path, remote_dest, &extra);
         let std_cmd = cmd.as_std();

@@ -268,7 +268,7 @@ fn test_ffmpeg_bin_resolution() {
 #[test]
 fn test_build_local_concat_ffmpeg_args_contains_required_flags() {
     let manifest_path = PathBuf::from("temp/concat_manifest.txt");
-    let output_path = PathBuf::from("recordings/livestream.mp4.part");
+    let output_path = PathBuf::from("recordings/live_stream.mp4.part");
     let args = build_local_concat_ffmpeg_args(&manifest_path, &output_path);
 
     // Verify Concat Demuxer input flags
@@ -320,7 +320,7 @@ fn test_build_local_concat_ffmpeg_args_contains_required_flags() {
 #[test]
 fn test_build_remote_concat_ffmpeg_args_contains_required_flags() {
     let manifest_path = PathBuf::from("temp/concat_manifest.txt");
-    let output_path = PathBuf::from("temp_staging/livestream.mp4.part");
+    let output_path = PathBuf::from("temp_staging/live_stream.mp4.part");
     let args = build_remote_concat_ffmpeg_args(&manifest_path, &output_path);
 
     // Verify Concat Demuxer input flags

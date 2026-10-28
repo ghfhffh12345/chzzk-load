@@ -284,7 +284,7 @@ fn append_concat_stream_and_bsf_args(args: &mut Vec<String>) {
 /// - `-avoid_negative_ts make_zero`: Resets container timeline start to 0.0s, eliminating initial playback freezing
 /// - `-movflags +faststart`: Relocates `moov` atom seek table to beginning of MP4 for instant desktop seeking
 /// - `-progress pipe:2`: Emits progress telemetry key-value pairs to stderr
-/// - `<output_path>`: Direct staged file destination (`livestream.mp4.part`) enabling seekable writes
+/// - `<output_path>`: Direct staged file destination (`live_stream.mp4.part`) enabling seekable writes
 pub fn build_local_concat_ffmpeg_args(manifest_path: &Path, output_path: &Path) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".to_string(),
@@ -347,7 +347,7 @@ pub fn build_local_concat_ffmpeg_command(
 /// - `-avoid_negative_ts make_zero`: Resets container timeline start to 0.0s, eliminating initial playback freezing
 /// - `-movflags +faststart`: Relocates `moov` atom seek table to beginning of MP4 for instant desktop seeking (Ticket #70, ADR 0011)
 /// - `-progress pipe:2`: Emits progress telemetry key-value pairs to stderr
-/// - `<output_path>`: Direct local staged file destination (`livestream.mp4.part`) enabling seekable writes
+/// - `<output_path>`: Direct local staged file destination (`live_stream.mp4.part`) enabling seekable writes
 pub fn build_remote_concat_ffmpeg_args(manifest_path: &Path, output_path: &Path) -> Vec<String> {
     let mut args = vec![
         "-hide_banner".to_string(),
@@ -454,7 +454,7 @@ pub async fn finalize_staged_video(
 /// Deletes the temporary staged `live_stream.mp4.part` if present upon error or abort.
 ///
 /// In local mode: unlinks `live_stream.mp4.part` (treating NotFound as success).
-/// In remote mode: unlinks local `livestream.mp4.part` and executes `rclone deletefile <staged>` on remote.
+/// In remote mode: unlinks local `live_stream.mp4.part` and executes `rclone deletefile <staged>` on remote.
 /// Finalized `live_stream.mp4` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
 pub async fn cleanup_staged_video(
     target: &TargetLocation,
@@ -666,10 +666,10 @@ pub fn spawn_stderr_telemetry_monitor(
     })
 }
 
-/// Executes the resilient video consolidation pipeline into staged `livestream.mp4.part`.
+/// Executes the resilient video consolidation pipeline into staged `live_stream.mp4.part`.
 ///
 /// In local mode: uses FFmpeg's native container-aware Concat Demuxer with `-movflags +faststart`
-/// and `-avoid_negative_ts make_zero` directly targeting `livestream.mp4.part`.
+/// and `-avoid_negative_ts make_zero` directly targeting `live_stream.mp4.part`.
 /// In remote mode: uses FFmpeg's native container-aware Concat Demuxer with Ephemeral Loopback Server
 /// writing directly to a seekable local staged file with faststart seek table (`+faststart`).
 pub async fn consolidate_video(
