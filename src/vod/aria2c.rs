@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::chzzk::DEFAULT_USER_AGENT;
 use crate::consolidation::staging::validate_mp4_container_integrity;
+use crate::uploader::unlink_local_file_with_retry;
 use crate::vod::manifest::VodSegment;
 
 /// Resolves the path to the aria2c binary:
@@ -152,7 +153,30 @@ async fn send_completed_segments_progress(
     }
 }
 
+/// Sweeps and deletes any lingering `.aria2` control files in `staging_dir`.
+///
+/// In segmented downloads, completed segments have no `.aria2` files (aria2c removes them
+/// upon complete chunk download). Any `.aria2` file remaining from an interrupted session
+/// represents an incomplete chunk whose control file state may desync with refreshed CDN URLs,
+/// causing aria2c to fail with `total length mismatch` (errorCode=1).
+pub async fn sweep_stale_aria2_control_files(staging_dir: &Path) {
+    if let Ok(mut read_dir) = tokio::fs::read_dir(staging_dir).await {
+        while let Ok(Some(entry)) = read_dir.next_entry().await {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".aria2") {
+                    let _ = unlink_local_file_with_retry(&path).await;
+                }
+            }
+        }
+    }
+}
+
 /// Filters `segments` against `staging_dir`, returning only those that are missing or incomplete.
+///
+/// If an incomplete segment file or its `.aria2` control file exists from a previous run,
+/// they are purged to ensure aria2c downloads the segment cleanly from byte 0 without
+/// triggering control file corruption or size mismatch errors (e.g. `total length mismatch`).
 pub async fn filter_missing_segments(
     staging_dir: &Path,
     segments: &[VodSegment],
@@ -160,9 +184,19 @@ pub async fn filter_missing_segments(
     let mut missing = Vec::with_capacity(segments.len());
     for seg in segments {
         if !is_segment_completed(staging_dir, &seg.filename).await {
+            // Clean up partial segment file and control file if they exist
+            let seg_path = staging_dir.join(&seg.filename);
+            let aria2_path = staging_dir.join(format!("{}.aria2", seg.filename));
+            let _ = unlink_local_file_with_retry(&seg_path).await;
+            let _ = unlink_local_file_with_retry(&aria2_path).await;
+
             missing.push(seg.clone());
         }
     }
+
+    // Sweep any lingering *.aria2 control files in staging_dir
+    sweep_stale_aria2_control_files(staging_dir).await;
+
     missing
 }
 
@@ -196,6 +230,8 @@ pub async fn download_segments_with_aria2c(
 ///
 /// Injects browser emulation headers (`User-Agent`, `Referer`, `Origin`),
 /// `-k1M` for 1 MiB minimum chunk splitting, and connection concurrency flags.
+/// Omits `-c` (`--continue`) so aria2c does not attempt byte-range continuation on
+/// small individual segments; segment-level resume is orchestrated via `filter_missing_segments`.
 pub fn build_aria2c_segment_args(
     staging_dir: &Path,
     input_file: &Path,
@@ -206,7 +242,6 @@ pub fn build_aria2c_segment_args(
         "-x16".to_string(),
         "-s16".to_string(),
         "-k1M".to_string(),
-        "-c".to_string(),
         "--allow-overwrite=true".to_string(),
         "--auto-file-renaming=false".to_string(),
         "--file-allocation=none".to_string(),
@@ -475,13 +510,16 @@ pub async fn scan_completed_segments(
         while let Ok(Some(entry)) = read_dir.next_entry().await {
             let path = entry.path();
             if let Some(ext) = path.extension() {
-                if ext == "ts" {
+                if ext == "ts" || ext == "mp4" || ext == "m4s" || ext == "m4v" {
                     let filename = path
                         .file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    if !completed_cache.contains(&filename) {
+                    if !filename.ends_with(".part")
+                        && !filename.ends_with(".aria2")
+                        && !completed_cache.contains(&filename)
+                    {
                         let aria2_path = staging_dir.join(format!("{filename}.aria2"));
                         if !tokio::fs::try_exists(&aria2_path).await.unwrap_or(false)
                             && let Ok(meta) = entry.metadata().await
@@ -745,6 +783,11 @@ mod tests {
 
         // Case 4: seg_03.ts does not exist at all
 
+        // Case 5: orphan control file without segment
+        tokio::fs::write(temp_dir.join("orphan.ts.aria2"), b"orphan control")
+            .await
+            .unwrap();
+
         let missing = filter_missing_segments(&temp_dir, &segments).await;
 
         // Only seg_01, seg_02, seg_03 are missing; seg_00 must be skipped
@@ -756,6 +799,28 @@ mod tests {
                 "seg_02.ts".to_string(),
                 "seg_03.ts".to_string()
             ]
+        );
+
+        // Verify partial segment and control files were purged
+        assert!(
+            !temp_dir.join("seg_01.ts").exists(),
+            "seg_01.ts must be purged"
+        );
+        assert!(
+            !temp_dir.join("seg_01.ts.aria2").exists(),
+            "seg_01.ts.aria2 must be purged"
+        );
+        assert!(
+            !temp_dir.join("seg_02.ts").exists(),
+            "seg_02.ts (0 bytes) must be purged"
+        );
+        assert!(
+            !temp_dir.join("orphan.ts.aria2").exists(),
+            "orphan.ts.aria2 must be purged"
+        );
+        assert!(
+            temp_dir.join("seg_00.ts").exists(),
+            "seg_00.ts must be preserved"
         );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;

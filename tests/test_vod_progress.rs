@@ -599,6 +599,10 @@ fn test_aria2c_command_construction_browser_headers_and_k1m() {
     assert!(args.contains(&"-j16".to_string()));
     assert!(args.contains(&"-x16".to_string()));
     assert!(args.contains(&"-s16".to_string()));
+    assert!(
+        !args.contains(&"-c".to_string()),
+        "Segment batch args must not pass -c to avoid control file resume errors on tiny chunks"
+    );
     assert!(args.contains(&"--file-allocation=none".to_string()));
     assert!(args.contains(&"--summary-interval=1".to_string()));
     assert!(args.contains(&"--dir".to_string()));
