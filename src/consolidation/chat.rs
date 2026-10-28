@@ -234,8 +234,8 @@ pub async fn finalize_staged_chat(
         }
         TargetLocation::Remote(remote_base) => {
             let bin = resolve_rclone_bin(rclone_bin);
-            let remote_part_path = join_remote_path(remote_base, "livechat.jsonl.part");
-            let remote_final_path = join_remote_path(remote_base, "livechat.jsonl");
+            let remote_part_path = join_remote_path(remote_base, "live_chat.jsonl.part");
+            let remote_final_path = join_remote_path(remote_base, "live_chat.jsonl");
 
             let mut move_cmd = tokio::process::Command::new(&bin);
             move_cmd.kill_on_drop(true);
@@ -291,11 +291,11 @@ pub async fn cleanup_staged_chat_in<P: AsRef<Path>>(
         }
         TargetLocation::Remote(remote_base) => {
             let staging_dir = super::staging::resolve_staging_dir(target, custom_temp_dir);
-            let staged_local_part = staging_dir.join("livechat.jsonl.part");
+            let staged_local_part = staging_dir.join("live_chat.jsonl.part");
             let _ = unlink_local_file_with_retry(&staged_local_part).await;
 
             let bin = resolve_rclone_bin(rclone_bin);
-            let remote_part_path = join_remote_path(remote_base, "livechat.jsonl.part");
+            let remote_part_path = join_remote_path(remote_base, "live_chat.jsonl.part");
             delete_remote_file(&bin, &remote_part_path).await;
             Ok(())
         }
@@ -567,11 +567,12 @@ pub async fn consolidate_chat_remote_with_options(
             )
         })?;
 
-    let staged_path = staging_dir.join("livechat.jsonl.part");
-    let final_path = staging_dir.join("livechat.jsonl");
+    let staged_path = staging_dir.join("live_chat.jsonl.part");
+    let final_path = staging_dir.join("live_chat.jsonl");
 
     // Clean up any stale staged file from prior runs
     let _ = unlink_local_file_with_retry(&staged_path).await;
+    let _ = unlink_local_file_with_retry(&staging_dir.join("livechat.jsonl.part")).await;
 
     if cancel_token.is_cancelled() {
         anyhow::bail!("Chat consolidation cancelled by cooperative cancellation token");

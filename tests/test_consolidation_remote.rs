@@ -141,14 +141,14 @@ async fn test_remote_consolidation_complete_pipeline_loopback_upload_and_purge()
     assert!(summary.has_metadata);
 
     // 1. Verify remote consolidated files exist
-    let remote_mp4 = remote_dir.join("livestream.mp4");
-    let remote_jsonl = remote_dir.join("livechat.jsonl");
-    assert!(remote_mp4.exists(), "Remote livestream.mp4 must exist");
-    assert!(remote_jsonl.exists(), "Remote livechat.jsonl must exist");
+    let remote_mp4 = remote_dir.join("live_stream.mp4");
+    let remote_jsonl = remote_dir.join("live_chat.jsonl");
+    assert!(remote_mp4.exists(), "Remote live_stream.mp4 must exist");
+    assert!(remote_jsonl.exists(), "Remote live_chat.jsonl must exist");
 
     // 2. Verify remote .part files do NOT exist
-    assert!(!remote_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dir.join("livechat.jsonl.part").exists());
+    assert!(!remote_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dir.join("live_chat.jsonl.part").exists());
 
     // 3. Verify deduplication was applied to chat
     let chat_content = fs::read_to_string(&remote_jsonl).unwrap();
@@ -215,8 +215,8 @@ async fn test_remote_consolidation_keep_original_retains_chunks_and_cleans_stagi
     assert_eq!(summary.chat_chunks_count, 1);
 
     // 1. Verify remote consolidated files exist
-    assert!(remote_dir.join("livestream.mp4").exists());
-    assert!(remote_dir.join("livechat.jsonl").exists());
+    assert!(remote_dir.join("live_stream.mp4").exists());
+    assert!(remote_dir.join("live_chat.jsonl").exists());
 
     // 2. Verify original chunks STILL exist on remote
     assert!(
@@ -277,10 +277,10 @@ async fn test_remote_consolidation_dual_pipeline_failure_preserves_remote_chunks
     );
 
     // 1. Verify NO remote files were modified
-    assert!(!remote_dir.join("livestream.mp4").exists());
-    assert!(!remote_dir.join("livechat.jsonl").exists());
-    assert!(!remote_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dir.join("livechat.jsonl.part").exists());
+    assert!(!remote_dir.join("live_stream.mp4").exists());
+    assert!(!remote_dir.join("live_chat.jsonl").exists());
+    assert!(!remote_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dir.join("live_chat.jsonl.part").exists());
 
     // 2. Verify original chunks are completely intact
     assert!(chunk0.exists());
@@ -329,12 +329,12 @@ async fn test_remote_consolidation_upload_failure_cleans_up_remote_part_and_pres
     );
 
     // 1. Remote final files must NOT exist
-    assert!(!remote_dir.join("livestream.mp4").exists());
-    assert!(!remote_dir.join("livechat.jsonl").exists());
+    assert!(!remote_dir.join("live_stream.mp4").exists());
+    assert!(!remote_dir.join("live_chat.jsonl").exists());
 
     // 2. Remote .part files must NOT linger
-    assert!(!remote_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dir.join("livechat.jsonl.part").exists());
+    assert!(!remote_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dir.join("live_chat.jsonl.part").exists());
 
     // 3. Original chunks must NOT be purged
     assert!(chunk0.exists());
@@ -342,15 +342,15 @@ async fn test_remote_consolidation_upload_failure_cleans_up_remote_part_and_pres
     assert!(meta.exists());
 
     // 4. Finalized local staging files must be PRESERVED
-    let local_mp4 = staging_parent.join("livestream.mp4");
-    let local_jsonl = staging_parent.join("livechat.jsonl");
+    let local_mp4 = staging_parent.join("live_stream.mp4");
+    let local_jsonl = staging_parent.join("live_chat.jsonl");
     assert!(
         local_mp4.exists(),
-        "Local livestream.mp4 must be preserved in staging directory upon upload failure"
+        "Local live_stream.mp4 must be preserved in staging directory upon upload failure"
     );
     assert!(
         local_jsonl.exists(),
-        "Local livechat.jsonl must be preserved in staging directory upon upload failure"
+        "Local live_chat.jsonl must be preserved in staging directory upon upload failure"
     );
 }
 
@@ -373,8 +373,8 @@ async fn test_remote_consolidation_resume_upload_bypasses_ffmpeg_on_valid_stagin
     fs::write(&meta, r#"{"type":"SESSION_START","stream_offset_ms":0}"#).unwrap();
 
     // Stage 1: Pre-populate valid completed staging files (simulating completed remux from prior run)
-    let local_mp4 = staging_parent.join("livestream.mp4");
-    let local_jsonl = staging_parent.join("livechat.jsonl");
+    let local_mp4 = staging_parent.join("live_stream.mp4");
+    let local_jsonl = staging_parent.join("live_chat.jsonl");
 
     // Faststart MP4: ftyp (24 bytes) + moov (16 bytes) + mdat (16 bytes)
     let mut fs_bytes = vec![0x00, 0x00, 0x00, 0x18];
@@ -420,8 +420,8 @@ async fn test_remote_consolidation_resume_upload_bypasses_ffmpeg_on_valid_stagin
     assert_eq!(summary.chat_chunks_count, 1);
 
     // 1. Verify remote consolidated files exist
-    assert!(remote_dir.join("livestream.mp4").exists());
-    assert!(remote_dir.join("livechat.jsonl").exists());
+    assert!(remote_dir.join("live_stream.mp4").exists());
+    assert!(remote_dir.join("live_chat.jsonl").exists());
 
     // 2. Verify original chunks were purged
     assert!(!chunk0.exists(), "Original chunk0 must be purged");
@@ -454,8 +454,8 @@ async fn test_remote_consolidation_overwrite_forces_clean_remux() {
     fs::write(&meta, r#"{"type":"SESSION_START","stream_offset_ms":0}"#).unwrap();
 
     // Pre-populate valid staging files
-    let local_mp4 = staging_parent.join("livestream.mp4");
-    let local_jsonl = staging_parent.join("livechat.jsonl");
+    let local_mp4 = staging_parent.join("live_stream.mp4");
+    let local_jsonl = staging_parent.join("live_chat.jsonl");
     fs::write(&local_mp4, b"existing_mp4_bytes").unwrap();
     fs::write(&local_jsonl, b"existing_jsonl_bytes\n").unwrap();
 
@@ -501,11 +501,11 @@ async fn test_remote_consolidation_overwrite_forces_clean_remux() {
     // Existing staging files should have been invalidated
     assert!(
         !local_mp4.exists(),
-        "Local livestream.mp4 must be invalidated by --overwrite"
+        "Local live_stream.mp4 must be invalidated by --overwrite"
     );
     assert!(
         !local_jsonl.exists(),
-        "Local livechat.jsonl must be invalidated by --overwrite"
+        "Local live_chat.jsonl must be invalidated by --overwrite"
     );
 }
 
@@ -547,19 +547,19 @@ async fn test_remote_consolidation_upload_failure_then_resume_without_ffmpeg_end
     assert!(res1.is_err(), "Phase 1 must fail on cloud upload");
 
     // Verify local staging files are intact
-    let local_mp4 = staging_parent.join("livestream.mp4");
-    let local_jsonl = staging_parent.join("livechat.jsonl");
+    let local_mp4 = staging_parent.join("live_stream.mp4");
+    let local_jsonl = staging_parent.join("live_chat.jsonl");
     assert!(
         local_mp4.exists(),
-        "Local livestream.mp4 must be preserved in staging directory"
+        "Local live_stream.mp4 must be preserved in staging directory"
     );
     assert!(
         local_jsonl.exists(),
-        "Local livechat.jsonl must be preserved in staging directory"
+        "Local live_chat.jsonl must be preserved in staging directory"
     );
     assert!(
-        !remote_dir_fail.join("livestream.mp4").exists(),
-        "Remote livestream.mp4 must not exist after failed upload"
+        !remote_dir_fail.join("live_stream.mp4").exists(),
+        "Remote live_stream.mp4 must not exist after failed upload"
     );
 
     // Phase 2: Move the remote directory to a path without fail_copy
@@ -607,12 +607,12 @@ async fn test_remote_consolidation_upload_failure_then_resume_without_ffmpeg_end
 
     // Remote consolidated files now exist
     assert!(
-        remote_dir_ok.join("livestream.mp4").exists(),
-        "Remote livestream.mp4 must exist after resumed upload"
+        remote_dir_ok.join("live_stream.mp4").exists(),
+        "Remote live_stream.mp4 must exist after resumed upload"
     );
     assert!(
-        remote_dir_ok.join("livechat.jsonl").exists(),
-        "Remote livechat.jsonl must exist after resumed upload"
+        remote_dir_ok.join("live_chat.jsonl").exists(),
+        "Remote live_chat.jsonl must exist after resumed upload"
     );
 
     // Original chunks are purged on remote
@@ -669,8 +669,8 @@ async fn test_remote_consolidation_upload_cancellation_preserves_local_files() {
 
     let handle = tokio::spawn(async move { run_consolidation(args).await });
 
-    let local_mp4 = staging_parent.join("livestream.mp4");
-    let local_jsonl = staging_parent.join("livechat.jsonl");
+    let local_mp4 = staging_parent.join("live_stream.mp4");
+    let local_jsonl = staging_parent.join("live_chat.jsonl");
 
     // Wait until remuxing completes and files are finalized in staging
     let start = std::time::Instant::now();
@@ -687,11 +687,11 @@ async fn test_remote_consolidation_upload_cancellation_preserves_local_files() {
     // Completed staging files must be preserved in staging directory
     assert!(
         local_mp4.exists(),
-        "Local livestream.mp4 must be preserved upon upload cancellation"
+        "Local live_stream.mp4 must be preserved upon upload cancellation"
     );
     assert!(
         local_jsonl.exists(),
-        "Local livechat.jsonl must be preserved upon upload cancellation"
+        "Local live_chat.jsonl must be preserved upon upload cancellation"
     );
 }
 
@@ -824,20 +824,20 @@ consolidate_extra_args = ["--checkers", "12", "--stats", "500ms"]
 
     // Domain outcome assertions
     assert!(
-        remote_dir.join("livestream.mp4").exists(),
-        "Remote livestream.mp4 must exist after finalization"
+        remote_dir.join("live_stream.mp4").exists(),
+        "Remote live_stream.mp4 must exist after finalization"
     );
     assert!(
-        remote_dir.join("livechat.jsonl").exists(),
-        "Remote livechat.jsonl must exist after finalization"
+        remote_dir.join("live_chat.jsonl").exists(),
+        "Remote live_chat.jsonl must exist after finalization"
     );
     assert!(
-        !remote_dir.join("livestream.mp4.part").exists(),
-        "Remote livestream.mp4.part must be finalized"
+        !remote_dir.join("live_stream.mp4.part").exists(),
+        "Remote live_stream.mp4.part must be finalized"
     );
     assert!(
-        !remote_dir.join("livechat.jsonl.part").exists(),
-        "Remote livechat.jsonl.part must be finalized"
+        !remote_dir.join("live_chat.jsonl.part").exists(),
+        "Remote live_chat.jsonl.part must be finalized"
     );
     assert!(!chunk0.exists(), "Original chunk_0000.ts must be purged");
     assert!(!chat0.exists(), "Original chat_0000.jsonl must be purged");
@@ -889,20 +889,20 @@ async fn test_remote_consolidation_without_config_uses_default_high_performance_
 
     // Domain outcome assertions
     assert!(
-        remote_dir.join("livestream.mp4").exists(),
-        "Remote livestream.mp4 must exist after finalization"
+        remote_dir.join("live_stream.mp4").exists(),
+        "Remote live_stream.mp4 must exist after finalization"
     );
     assert!(
-        remote_dir.join("livechat.jsonl").exists(),
-        "Remote livechat.jsonl must exist after finalization"
+        remote_dir.join("live_chat.jsonl").exists(),
+        "Remote live_chat.jsonl must exist after finalization"
     );
     assert!(
-        !remote_dir.join("livestream.mp4.part").exists(),
-        "Remote livestream.mp4.part must be finalized"
+        !remote_dir.join("live_stream.mp4.part").exists(),
+        "Remote live_stream.mp4.part must be finalized"
     );
     assert!(
-        !remote_dir.join("livechat.jsonl.part").exists(),
-        "Remote livechat.jsonl.part must be finalized"
+        !remote_dir.join("live_chat.jsonl.part").exists(),
+        "Remote live_chat.jsonl.part must be finalized"
     );
     assert!(!chunk0.exists(), "Original chunk_0000.ts must be purged");
     assert!(!chat0.exists(), "Original chat_0000.jsonl must be purged");
@@ -945,10 +945,10 @@ async fn test_remote_consolidation_uploads_concurrently_parallel() {
     assert_eq!(summary.chat_chunks_count, 1);
 
     // Verify remote final files and cleanup
-    assert!(remote_dir.join("livestream.mp4").exists());
-    assert!(remote_dir.join("livechat.jsonl").exists());
-    assert!(!remote_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dir.join("livechat.jsonl.part").exists());
+    assert!(remote_dir.join("live_stream.mp4").exists());
+    assert!(remote_dir.join("live_chat.jsonl").exists());
+    assert!(!remote_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dir.join("live_chat.jsonl.part").exists());
     assert!(!chunk0.exists(), "Original chunk0 must be purged");
     assert!(!chat0.exists(), "Original chat0 must be purged");
     assert!(meta.exists(), "Metadata must be preserved");
@@ -996,12 +996,12 @@ async fn test_remote_consolidation_chat_failure_aborts_hanging_video_immediately
     );
 
     // Verify remote .part files were removed
-    assert!(!remote_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dir.join("livechat.jsonl.part").exists());
+    assert!(!remote_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dir.join("live_chat.jsonl.part").exists());
 
     // Verify finalized local staging files are preserved
-    assert!(staging_parent.join("livestream.mp4").exists());
-    assert!(staging_parent.join("livechat.jsonl").exists());
+    assert!(staging_parent.join("live_stream.mp4").exists());
+    assert!(staging_parent.join("live_chat.jsonl").exists());
 }
 
 #[tokio::test]
@@ -1042,12 +1042,12 @@ async fn test_remote_consolidation_video_failure_aborts_hanging_chat_immediately
     );
 
     // Verify remote .part files were removed
-    assert!(!remote_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dir.join("livechat.jsonl.part").exists());
+    assert!(!remote_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dir.join("live_chat.jsonl.part").exists());
 
     // Verify finalized local staging files are preserved
-    assert!(staging_parent.join("livestream.mp4").exists());
-    assert!(staging_parent.join("livechat.jsonl").exists());
+    assert!(staging_parent.join("live_stream.mp4").exists());
+    assert!(staging_parent.join("live_chat.jsonl").exists());
 }
 
 #[tokio::test]
@@ -1083,7 +1083,7 @@ async fn test_remote_consolidation_cancellation_token_promptly_terminates_active
     // Trigger cancellation once local remuxing completes and active uploads begin
     tokio::spawn(async move {
         for _ in 0..100 {
-            if staging_check.join("livestream.mp4").exists() {
+            if staging_check.join("live_stream.mp4").exists() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1110,12 +1110,12 @@ async fn test_remote_consolidation_cancellation_token_promptly_terminates_active
     );
 
     // Remote .part files must be cleaned up
-    assert!(!remote_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dir.join("livechat.jsonl.part").exists());
+    assert!(!remote_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dir.join("live_chat.jsonl.part").exists());
 
     // Finalized local staging files must be preserved
-    assert!(staging_parent.join("livestream.mp4").exists());
-    assert!(staging_parent.join("livechat.jsonl").exists());
+    assert!(staging_parent.join("live_stream.mp4").exists());
+    assert!(staging_parent.join("live_chat.jsonl").exists());
 }
 
 #[tokio::test]
@@ -1126,8 +1126,8 @@ async fn test_upload_remote_staged_media_seam_success_and_concurrency() {
     let staging_dir = temp_dir.join("staging");
     fs::create_dir_all(&staging_dir).unwrap();
 
-    let local_mp4 = staging_dir.join("livestream.mp4");
-    let local_jsonl = staging_dir.join("livechat.jsonl");
+    let local_mp4 = staging_dir.join("live_stream.mp4");
+    let local_jsonl = staging_dir.join("live_chat.jsonl");
     fs::write(&local_mp4, b"test_stream_content").unwrap();
     fs::write(&local_jsonl, b"test_chat_content\n").unwrap();
 
@@ -1156,9 +1156,9 @@ async fn test_upload_remote_staged_media_seam_success_and_concurrency() {
         res.err()
     );
 
-    // Verify .part files exist on remote
-    assert!(remote_dest_dir.join("livestream.mp4.part").exists());
-    assert!(remote_dest_dir.join("livechat.jsonl.part").exists());
+    // Verify .part files exist on remote under canonical snake-case naming
+    assert!(remote_dest_dir.join("live_stream.mp4.part").exists());
+    assert!(remote_dest_dir.join("live_chat.jsonl.part").exists());
 
     // Verify local staging files were preserved
     assert!(local_mp4.exists());
@@ -1173,8 +1173,8 @@ async fn test_upload_remote_staged_media_seam_sibling_abort_and_remote_cleanup()
     let staging_dir = temp_dir.join("staging");
     fs::create_dir_all(&staging_dir).unwrap();
 
-    let local_mp4 = staging_dir.join("livestream.mp4");
-    let local_jsonl = staging_dir.join("livechat.jsonl");
+    let local_mp4 = staging_dir.join("live_stream.mp4");
+    let local_jsonl = staging_dir.join("live_chat.jsonl");
     fs::write(&local_mp4, b"test_stream_content").unwrap();
     fs::write(&local_jsonl, b"test_chat_content\n").unwrap();
 
@@ -1207,8 +1207,8 @@ async fn test_upload_remote_staged_media_seam_sibling_abort_and_remote_cleanup()
     );
 
     // Verify remote .part files were removed via rclone deletefile
-    assert!(!remote_dest_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dest_dir.join("livechat.jsonl.part").exists());
+    assert!(!remote_dest_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dest_dir.join("live_chat.jsonl.part").exists());
 
     // Verify local staging files remain intact
     assert!(local_mp4.exists());
@@ -1223,8 +1223,8 @@ async fn test_upload_remote_staged_media_seam_cancellation_and_remote_cleanup() 
     let staging_dir = temp_dir.join("staging");
     fs::create_dir_all(&staging_dir).unwrap();
 
-    let local_mp4 = staging_dir.join("livestream.mp4");
-    let local_jsonl = staging_dir.join("livechat.jsonl");
+    let local_mp4 = staging_dir.join("live_stream.mp4");
+    let local_jsonl = staging_dir.join("live_chat.jsonl");
     fs::write(&local_mp4, b"test_stream_content").unwrap();
     fs::write(&local_jsonl, b"test_chat_content\n").unwrap();
 
@@ -1263,8 +1263,8 @@ async fn test_upload_remote_staged_media_seam_cancellation_and_remote_cleanup() 
     );
 
     // Verify remote .part files were cleaned up
-    assert!(!remote_dest_dir.join("livestream.mp4.part").exists());
-    assert!(!remote_dest_dir.join("livechat.jsonl.part").exists());
+    assert!(!remote_dest_dir.join("live_stream.mp4.part").exists());
+    assert!(!remote_dest_dir.join("live_chat.jsonl.part").exists());
 
     // Verify local staging files remain intact
     assert!(local_mp4.exists());
@@ -1323,8 +1323,8 @@ async fn test_upload_remote_staged_media_with_progress_telemetry() {
     fs::create_dir_all(&staging_dir).unwrap();
     fs::create_dir_all(&remote_dest_dir).unwrap();
 
-    let local_mp4 = staging_dir.join("livestream.mp4");
-    let local_jsonl = staging_dir.join("livechat.jsonl");
+    let local_mp4 = staging_dir.join("live_stream.mp4");
+    let local_jsonl = staging_dir.join("live_chat.jsonl");
     fs::write(&local_mp4, vec![0u8; 20_000]).unwrap();
     fs::write(&local_jsonl, b"chat lines\n").unwrap();
 

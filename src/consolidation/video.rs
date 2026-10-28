@@ -423,8 +423,8 @@ pub async fn finalize_staged_video(
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
-            let staged = join_remote_path(remote_base, "livestream.mp4.part");
-            let finalized = join_remote_path(remote_base, "livestream.mp4");
+            let staged = join_remote_path(remote_base, "live_stream.mp4.part");
+            let finalized = join_remote_path(remote_base, "live_stream.mp4");
             let bin = resolve_rclone_bin(rclone_bin);
 
             let mut cmd = Command::new(&bin);
@@ -478,10 +478,10 @@ pub async fn cleanup_staged_video_in<P: AsRef<Path>>(
         }
         TargetLocation::Remote(remote_base) => {
             let staging_dir = super::staging::resolve_staging_dir(target, custom_temp_dir);
-            let staged_local_part = staging_dir.join("livestream.mp4.part");
+            let staged_local_part = staging_dir.join("live_stream.mp4.part");
             let _ = unlink_local_file_with_retry(&staged_local_part).await;
 
-            let staged = join_remote_path(remote_base, "livestream.mp4.part");
+            let staged = join_remote_path(remote_base, "live_stream.mp4.part");
             let bin = resolve_rclone_bin(rclone_bin);
             super::chat::delete_remote_file(&bin, &staged).await;
             Ok(())
@@ -857,13 +857,14 @@ pub async fn consolidate_video_remote(
             )
         })?;
 
-    let staged_path = staging_dir.join("livestream.mp4.part");
-    let final_path = staging_dir.join("livestream.mp4");
+    let staged_path = staging_dir.join("live_stream.mp4.part");
+    let final_path = staging_dir.join("live_stream.mp4");
     let ffmpeg_bin = resolve_ffmpeg_bin(options.ffmpeg_bin.as_deref());
     let rclone_bin = options.rclone_bin.clone();
 
     // Clean up any lingering local .part file from prior aborted run
     let _ = unlink_local_file_with_retry(&staged_path).await;
+    let _ = unlink_local_file_with_retry(&staging_dir.join("livestream.mp4.part")).await;
 
     if cancel_token.is_cancelled() {
         anyhow::bail!("Video consolidation cancelled by cooperative cancellation token");

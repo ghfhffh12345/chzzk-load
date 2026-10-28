@@ -8,7 +8,7 @@ pub mod video;
 pub use staging::{
     STAGING_HEADROOM_MULTIPLIER, calculate_required_staging_bytes, check_staging_resume_readiness,
     compute_target_hash, invalidate_staging_files, probe_moov_atom, remove_dir_all_with_retry,
-    resolve_staging_dir, staging_folder_name, verify_staging_capacity,
+    resolve_staging_dir, staging_folder_name, validate_staging_workspace, verify_staging_capacity,
     verify_staging_capacity_with_space,
 };
 
@@ -448,12 +448,12 @@ pub async fn upload_remote_staged_media_with_progress(
         return Ok(());
     }
 
-    let remote_video_part = join_remote_path(remote_base, "livestream.mp4.part");
-    let remote_chat_part = join_remote_path(remote_base, "livechat.jsonl.part");
+    let remote_video_part = join_remote_path(remote_base, "live_stream.mp4.part");
+    let remote_chat_part = join_remote_path(remote_base, "live_chat.jsonl.part");
 
     let video_upload_fut = async {
         if has_video {
-            let local_mp4 = staging_dir.join("livestream.mp4");
+            let local_mp4 = staging_dir.join("live_stream.mp4");
             upload_remote_staged_file_with_progress(
                 bin,
                 &local_mp4,
@@ -469,7 +469,7 @@ pub async fn upload_remote_staged_media_with_progress(
 
     let chat_upload_fut = async {
         if has_chat {
-            let local_jsonl = staging_dir.join("livechat.jsonl");
+            let local_jsonl = staging_dir.join("live_chat.jsonl");
             upload_remote_staged_file_with_progress(
                 bin,
                 &local_jsonl,
@@ -687,7 +687,7 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             .expect("staging_dir must be resolved for remote resume");
 
         let resumed_video_result = if has_video {
-            let mp4_path = staging_dir.join("livestream.mp4");
+            let mp4_path = staging_dir.join("live_stream.mp4");
             let bytes_written = std::fs::metadata(&mp4_path).map(|m| m.len()).unwrap_or(0);
             if let Some(v_tx) = media_session.video_sender() {
                 let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
@@ -857,9 +857,13 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             .as_ref()
             .expect("staging_dir must be resolved for remote consolidation");
 
+        // Validate staging workspace prior to cloud upload
+        validate_staging_workspace(staging_dir, has_video, has_chat)?;
+
         // 1. Two-stage cloud upload: upload local files to remote .part destinations concurrently via rclone copyto
         let video_bytes = if has_video {
-            tokio::fs::metadata(staging_dir.join("livestream.mp4"))
+            let mp4_path = staging_dir.join("live_stream.mp4");
+            tokio::fs::metadata(mp4_path)
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0)
@@ -867,7 +871,8 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             0
         };
         let chat_bytes = if has_chat {
-            tokio::fs::metadata(staging_dir.join("livechat.jsonl"))
+            let chat_path = staging_dir.join("live_chat.jsonl");
+            tokio::fs::metadata(chat_path)
                 .await
                 .map(|m| m.len())
                 .unwrap_or(0)
@@ -930,12 +935,12 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             .await;
             delete_remote_file(
                 &rclone_bin,
-                &join_remote_path(remote_base, "livestream.mp4"),
+                &join_remote_path(remote_base, "live_stream.mp4"),
             )
             .await;
             delete_remote_file(
                 &rclone_bin,
-                &join_remote_path(remote_base, "livechat.jsonl"),
+                &join_remote_path(remote_base, "live_chat.jsonl"),
             )
             .await;
             eprintln!(

@@ -335,16 +335,16 @@ async fn test_consolidate_chat_remote_pipeline_success() {
     assert_eq!(stats.deduplicated_messages, 1);
     assert_eq!(stats.emitted_messages, 3);
 
-    // Verify .part was finalized into livechat.jsonl in local staging directory
-    let local_part = staging_dir.join("livechat.jsonl.part");
-    let local_final = staging_dir.join("livechat.jsonl");
+    // Verify .part was finalized into live_chat.jsonl in local staging directory
+    let local_part = staging_dir.join("live_chat.jsonl.part");
+    let local_final = staging_dir.join("live_chat.jsonl");
     assert!(
         !local_part.exists(),
         "Local .part file must be finalized to final name"
     );
     assert!(
         local_final.exists(),
-        "Local livechat.jsonl must exist in staging directory"
+        "Local live_chat.jsonl must exist in staging directory"
     );
 
     let final_content = fs::read_to_string(&local_final).unwrap();
@@ -355,16 +355,16 @@ async fn test_consolidate_chat_remote_pipeline_success() {
     assert_eq!(lines[2], line3);
 
     // Test remote finalization via finalize_staged_chat using a staged remote file
-    let remote_part = temp_dir.join("livechat.jsonl.part");
+    let remote_part = temp_dir.join("live_chat.jsonl.part");
     fs::write(&remote_part, &final_content).unwrap();
     finalize_staged_chat(&remote_target, Some(&mock_bin))
         .await
         .expect("Remote finalize_staged_chat should succeed");
 
-    let remote_final = temp_dir.join("livechat.jsonl");
+    let remote_final = temp_dir.join("live_chat.jsonl");
     assert!(
         remote_final.exists(),
-        "Remote livechat.jsonl must exist after finalize_staged_chat"
+        "Remote live_chat.jsonl must exist after finalize_staged_chat"
     );
     assert!(
         !remote_part.exists(),
@@ -615,13 +615,13 @@ async fn test_consolidate_chat_remote_staging_deduplication_and_part_finalizatio
     assert_eq!(stats.deduplicated_messages, 1);
     assert_eq!(stats.emitted_messages, 3);
 
-    // Verify local staged .part is finalized to livechat.jsonl in staging_dir
-    let local_part = staging_dir.join("livechat.jsonl.part");
-    let local_final = staging_dir.join("livechat.jsonl");
+    // Verify local staged .part is finalized to live_chat.jsonl in staging_dir
+    let local_part = staging_dir.join("live_chat.jsonl.part");
+    let local_final = staging_dir.join("live_chat.jsonl");
     assert!(!local_part.exists(), "Local .part file must be finalized");
     assert!(
         local_final.exists(),
-        "Final livechat.jsonl must exist in staging directory"
+        "Final live_chat.jsonl must exist in staging directory"
     );
 
     let content = fs::read_to_string(&local_final).unwrap();
@@ -675,8 +675,8 @@ async fn test_consolidate_chat_remote_staging_cancellation_unlinks_part() {
         consolidate_chat_with_options(&remote_target, &chunks, false, &options, cancel_token).await;
     assert!(result.is_err(), "Cancelled consolidation must return error");
 
-    let local_part = staging_dir.join("livechat.jsonl.part");
-    let local_final = staging_dir.join("livechat.jsonl");
+    let local_part = staging_dir.join("live_chat.jsonl.part");
+    let local_final = staging_dir.join("live_chat.jsonl");
     assert!(
         !local_part.exists(),
         "Local .part file must be unlinked on cancellation"
@@ -725,8 +725,8 @@ async fn test_consolidate_chat_remote_staging_error_unlinks_part() {
         consolidate_chat_with_options(&remote_target, &chunks, true, &options, cancel_token).await;
     assert!(result.is_err(), "Strict mode must fail on malformed JSON");
 
-    let local_part = staging_dir.join("livechat.jsonl.part");
-    let local_final = staging_dir.join("livechat.jsonl");
+    let local_part = staging_dir.join("live_chat.jsonl.part");
+    let local_final = staging_dir.join("live_chat.jsonl");
     assert!(
         !local_part.exists(),
         "Local .part file must be unlinked on error"
