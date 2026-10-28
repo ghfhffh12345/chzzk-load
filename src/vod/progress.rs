@@ -83,6 +83,11 @@ pub fn parse_aria2c_bytes(s: &str) -> Option<u64> {
 /// Multi-file lines (such as HLS multi-segment downloads) containing multiple
 /// `[#` blocks are ignored and return `None`.
 pub fn parse_aria2c_single_file_progress(line: &str) -> Option<VodVideoProgressUpdate> {
+    // If output contains carriage returns (interactive terminal updates), take the latest update
+    let line = line
+        .split('\r')
+        .rfind(|s| !s.trim().is_empty())
+        .unwrap_or(line);
     let trimmed = line.trim();
     if trimmed.matches("[#").count() != 1 {
         return None;

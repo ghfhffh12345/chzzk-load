@@ -40,6 +40,21 @@ pub struct VodPlaybackInfo {
     pub period: Vec<VodPeriod>,
 }
 
+fn has_audio_codec(codecs: &str) -> bool {
+    let lower = codecs.to_ascii_lowercase();
+    lower.split(',').any(|part| {
+        let trimmed = part.trim();
+        trimmed.starts_with("mp4a")
+            || trimmed.starts_with("aac")
+            || trimmed.starts_with("ac-3")
+            || trimmed.starts_with("ec-3")
+            || trimmed.starts_with("opus")
+            || trimmed.starts_with("vorbis")
+            || trimmed.starts_with("flac")
+            || trimmed.starts_with("alac")
+    })
+}
+
 impl VodPlaybackInfo {
     /// Discovers the HLS master playlist URL from either:
     /// 1. `media` array entries (prioritizing protocol "HLS" or paths with ".m3u8")
@@ -97,11 +112,11 @@ impl VodPlaybackInfo {
     /// 2. Audio and video tracks are segregated (requiring multi-track DASH demuxing).
     /// 3. The requested quality cannot be satisfied.
     pub fn find_progressive_mp4_url_with_quality(&self, requested_quality: &str) -> Option<&str> {
-        // Segregated audio check: if any period contains an adaptationSet or representation
-        // with audio mimeType (e.g. "audio/mp4", "audio/aac"), then audio and video tracks
-        // are segregated, so monolithic single-file download cannot be used without multi-track demuxing.
-        let has_segregated_audio = self.period.iter().any(|period| {
-            period.adaptation_set.iter().any(|set| {
+        let mut candidates = Vec::new();
+
+        for period in &self.period {
+            // Check if this period segregates audio into a separate track/adaptation set
+            let period_has_audio_track = period.adaptation_set.iter().any(|set| {
                 set.mime_type
                     .as_deref()
                     .is_some_and(|m| m.starts_with("audio/"))
@@ -110,15 +125,8 @@ impl VodPlaybackInfo {
                             .as_deref()
                             .is_some_and(|m| m.starts_with("audio/"))
                     })
-            })
-        });
-        if has_segregated_audio {
-            return None;
-        }
+            });
 
-        let mut candidates = Vec::new();
-
-        for period in &self.period {
             for set in &period.adaptation_set {
                 for rep in &set.representation {
                     if let Some(base) = rep.base_url.first() {
@@ -131,6 +139,15 @@ impl VodPlaybackInfo {
                             || set.mime_type.as_deref().is_some_and(|m| m.contains("mp4"));
 
                         if is_mp4 {
+                            // If the period contains segregated audio track(s), ensure this representation
+                            // contains muxed audio (e.g. codecs="avc1...,mp4a..."). A video-only stream
+                            // without audio tracks cannot be consumed as a standalone progressive MP4.
+                            let rep_codecs = rep.codecs.as_deref().or(set.codecs.as_deref());
+                            let rep_has_audio = rep_codecs.is_some_and(has_audio_codec);
+                            if period_has_audio_track && !rep_has_audio {
+                                continue;
+                            }
+
                             let height = rep.height.or(set.height);
                             let bandwidth = rep.bandwidth.or(set.bandwidth).unwrap_or(0);
                             let id = rep.id.as_deref().or(set.id.as_deref());
@@ -289,6 +306,8 @@ pub struct VodAdaptationSet {
     pub height: Option<u32>,
     #[serde(default)]
     pub bandwidth: Option<u64>,
+    #[serde(default)]
+    pub codecs: Option<String>,
     #[serde(default)]
     pub other_attributes: VodOtherAttributes,
     #[serde(default)]

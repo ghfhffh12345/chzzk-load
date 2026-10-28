@@ -406,24 +406,29 @@ pub async fn paginate_vod_chat_to_staged(
             total_messages += 1;
         }
 
-        // Determine next pagination offset
-        if let Some(next_ts) = page.next_player_message_time {
-            if next_ts > current_ts {
-                current_ts = next_ts;
-            } else if let Some(highest_ts) = highest_ts_in_page {
-                current_ts = highest_ts.saturating_add(1);
-            } else {
-                current_ts = current_ts.saturating_add(1000);
+        // Determine next pagination offset ensuring strictly monotonic forward progression
+        match (page.next_player_message_time, highest_ts_in_page) {
+            (Some(next_ts), Some(highest_ts)) => {
+                current_ts = next_ts.max(highest_ts.saturating_add(1));
             }
-        } else if let Some(highest_ts) = highest_ts_in_page {
-            if highest_ts >= current_ts {
-                current_ts = highest_ts.saturating_add(1);
-            } else {
+            (Some(next_ts), None) => {
+                if next_ts > current_ts {
+                    current_ts = next_ts;
+                } else {
+                    current_ts = current_ts.saturating_add(1000);
+                }
+            }
+            (None, Some(highest_ts)) => {
+                if highest_ts >= current_ts {
+                    current_ts = highest_ts.saturating_add(1);
+                } else {
+                    break;
+                }
+            }
+            (None, None) => {
+                // 0 messages in page and next_player_message_time is None
                 break;
             }
-        } else {
-            // 0 messages in page and next_player_message_time is None
-            break;
         }
 
         if message_count_in_page == 0 && page.next_player_message_time.is_none() {
@@ -952,6 +957,130 @@ mod tests {
 
         let content = tokio::fs::read_to_string(&summary.path).await.unwrap();
         assert!(content.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_paginate_vod_chat_emits_completion_progress_when_replay_ends_early() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_pag_comp_{}", rand::random::<u32>()));
+        let _ = tokio::fs::create_dir_all(&temp_dir).await;
+
+        let source = Arc::new(FakeVodSource::new());
+        let video_no = 1001;
+        let duration_ms = 120_000; // 2 minutes total duration
+
+        // Chat stream ends at 30,000 ms (30s in)
+        source.set_chat_page(
+            video_no,
+            0,
+            VodChatPage {
+                video_chats: vec![
+                    serde_json::json!({"playerMessageTime": 15000, "content": "msg 1"}),
+                    serde_json::json!({"playerMessageTime": 30000, "content": "msg 2"}),
+                ],
+                next_player_message_time: None,
+            },
+        );
+
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::vod::progress::VodChatProgressUpdate>();
+
+        let options = VodChatPaginationOptions {
+            initial_pacing: Duration::from_millis(1),
+            progress_sender: Some(progress_tx),
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+
+        let target = VodChatTarget {
+            video_no,
+            duration_ms,
+            anchor_time_ms: None,
+            output_dir: temp_dir.clone(),
+        };
+
+        let summary = paginate_vod_chat(source.clone(), target, options, cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.message_count, 2);
+
+        // Collect all progress updates
+        let mut updates = Vec::new();
+        while let Ok(upd) = progress_rx.try_recv() {
+            updates.push(upd);
+        }
+
+        // Terminal update must set current_time_ms to target.duration_ms (100% completion)
+        let last_upd = updates.last().expect("Must have emitted progress updates");
+        assert_eq!(
+            last_upd.current_time_ms, duration_ms,
+            "Terminal chat progress must advance to duration_ms when replay ends early"
+        );
+        assert_eq!(last_upd.emitted_messages, 2);
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_paginate_vod_chat_monotonic_progression_with_lower_next_ts() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_pag_mono_{}", rand::random::<u32>()));
+        let _ = tokio::fs::create_dir_all(&temp_dir).await;
+
+        let source = Arc::new(FakeVodSource::new());
+        let video_no = 1002;
+        let duration_ms = 60_000;
+
+        // Page at 0 has highest_ts = 25000, but next_player_message_time = 15000 (lower)
+        source.set_chat_page(
+            video_no,
+            0,
+            VodChatPage {
+                video_chats: vec![
+                    serde_json::json!({"playerMessageTime": 10000, "content": "msg 1"}),
+                    serde_json::json!({"playerMessageTime": 25000, "content": "msg 2"}),
+                ],
+                next_player_message_time: Some(15000),
+            },
+        );
+
+        // Next page call must advance past highest_ts (25001), not stepping back to 15000
+        source.set_chat_page(
+            video_no,
+            25001,
+            VodChatPage {
+                video_chats: vec![
+                    serde_json::json!({"playerMessageTime": 30000, "content": "msg 3"}),
+                ],
+                next_player_message_time: None,
+            },
+        );
+
+        let options = VodChatPaginationOptions {
+            initial_pacing: Duration::from_millis(1),
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+
+        let target = VodChatTarget {
+            video_no,
+            duration_ms,
+            anchor_time_ms: None,
+            output_dir: temp_dir.clone(),
+        };
+
+        let summary = paginate_vod_chat(source.clone(), target, options, cancel)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.message_count, 3);
+        assert_eq!(
+            source.chat_page_calls(),
+            vec![(video_no, 0), (video_no, 25001), (video_no, 30001)]
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

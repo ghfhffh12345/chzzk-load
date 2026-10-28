@@ -299,8 +299,15 @@ pub async fn run_vod_archival_with_options(
             output_dir: output_dir.clone(),
         };
 
+        let task_cancel = cancel_token.clone();
         Some(tokio::spawn(async move {
-            paginate_vod_chat_to_staged(chat_source, chat_target, chat_options, chat_cancel).await
+            let res =
+                paginate_vod_chat_to_staged(chat_source, chat_target, chat_options, chat_cancel)
+                    .await;
+            if res.is_err() {
+                task_cancel.cancel();
+            }
+            res
         }))
     } else {
         None

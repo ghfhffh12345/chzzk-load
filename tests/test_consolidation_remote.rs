@@ -1078,10 +1078,18 @@ async fn test_remote_consolidation_cancellation_token_promptly_terminates_active
 
     let cancel_token = CancellationToken::new();
     let cancel_trigger = cancel_token.clone();
+    let staging_check = staging_parent.clone();
 
-    // Trigger cancellation after 100ms
+    // Trigger cancellation once local remuxing completes and active uploads begin
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        for _ in 0..100 {
+            if staging_check.join("livestream.mp4").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // Small delay to ensure rclone upload process is spawned and active
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         cancel_trigger.cancel();
     });
 

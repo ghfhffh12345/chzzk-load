@@ -1750,6 +1750,74 @@ fn test_vod_find_progressive_mp4_segregated_audio_in_representation_returns_none
 }
 
 #[test]
+fn test_vod_find_progressive_mp4_muxed_codecs_with_audio_adaptation_set_succeeds() {
+    use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
+
+    // Real Chzzk NeonPlayer response: period contains video/mp4 with muxed codecs
+    // (codecs: "avc1.64002a,mp4a.40.2") AND an audio/mp4 adaptation set for DASH.
+    let json = r#"{
+        "period": [
+            {
+                "adaptationSet": [
+                    {
+                        "mimeType": "video/mp4",
+                        "representation": [
+                            {
+                                "id": "1080p",
+                                "width": 1920,
+                                "height": 1080,
+                                "bandwidth": 8000000,
+                                "codecs": "avc1.64002a,mp4a.40.2",
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/muxed_1080p.mp4" }
+                                ]
+                            },
+                            {
+                                "id": "720p",
+                                "width": 1280,
+                                "height": 720,
+                                "bandwidth": 4000000,
+                                "codecs": "avc1.4d401f,mp4a.40.2",
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/muxed_720p.mp4" }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "mimeType": "audio/mp4",
+                        "representation": [
+                            {
+                                "id": "audio_track_1",
+                                "bandwidth": 192000,
+                                "codecs": "mp4a.40.2",
+                                "baseURL": [
+                                    { "value": "https://cdn.example.com/vod/audio.m4a" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    let info: VodPlaybackInfo = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("best"),
+        Some("https://cdn.example.com/vod/muxed_1080p.mp4")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url_with_quality("720p"),
+        Some("https://cdn.example.com/vod/muxed_720p.mp4")
+    );
+    assert_eq!(
+        info.find_progressive_mp4_url(),
+        Some("https://cdn.example.com/vod/muxed_1080p.mp4")
+    );
+}
+
+#[test]
 fn test_vod_find_progressive_mp4_missing_or_hls_only_returns_none() {
     use chzzk_load::chzzk::models_vod::VodPlaybackInfo;
 

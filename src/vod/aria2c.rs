@@ -209,6 +209,7 @@ pub fn build_aria2c_segment_args(
         "-c".to_string(),
         "--allow-overwrite=true".to_string(),
         "--auto-file-renaming=false".to_string(),
+        "--file-allocation=none".to_string(),
         "--summary-interval=1".to_string(),
         format!("--header=User-Agent: {DEFAULT_USER_AGENT}"),
         "--header=Referer: https://chzzk.naver.com/".to_string(),
@@ -248,6 +249,7 @@ pub fn build_aria2c_progressive_args(
         "-c".to_string(),
         "--allow-overwrite=true".to_string(),
         "--auto-file-renaming=false".to_string(),
+        "--file-allocation=none".to_string(),
         "--summary-interval=1".to_string(),
         format!("--header=User-Agent: {DEFAULT_USER_AGENT}"),
         "--header=Referer: https://chzzk.naver.com/".to_string(),
@@ -266,6 +268,60 @@ pub fn build_aria2c_progressive_args(
     args.push(url.to_string());
 
     args
+}
+
+fn format_aria2c_failure_message(
+    status: std::process::ExitStatus,
+    stdout_logs: &str,
+    stderr_logs: &str,
+) -> String {
+    let mut details = Vec::new();
+
+    // Check stdout logs first since aria2c emits errors and exceptions to stdout
+    let cleaned_stdout = stdout_logs
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            !l.is_empty() && !l.starts_with("***") && !l.starts_with("===") && !l.starts_with("---")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !cleaned_stdout.is_empty() {
+        details.push(cleaned_stdout);
+    }
+
+    let cleaned_stderr = stderr_logs.trim();
+    if !cleaned_stderr.is_empty() {
+        details.push(cleaned_stderr.to_string());
+    }
+
+    if let Some(code) = status.code() {
+        let explanation = match code {
+            2 => "Time out occurred",
+            3 => "Resource not found (404)",
+            4 => "Resource not found (max file not found limit reached)",
+            5 => "Download speed was too slow",
+            6 => "Network problem occurred",
+            7 => "Unfinished download remained",
+            8 => "Remote server does not support resume",
+            9 => "Not enough disk space available on target storage drive",
+            10 => "Piece length was different from .aria2 control file",
+            14 => "HTTP response code was bad / server error",
+            19 => "Name resolution (DNS lookup) failed",
+            24 => "File allocation error",
+            _ => "",
+        };
+        if !explanation.is_empty() && !details.iter().any(|d| d.contains(explanation)) {
+            details.push(explanation.to_string());
+        }
+    }
+
+    let detail_str = details.join(" | ");
+    if detail_str.is_empty() {
+        format!("aria2c failed with exit status {status}")
+    } else {
+        format!("aria2c failed with exit status {status}: {detail_str}")
+    }
 }
 
 /// Executes aria2c to download a single progressive MP4 video stream into `staging_dir`.
@@ -337,7 +393,8 @@ pub async fn download_progressive_mp4_with_aria2c(
 
     let stdout = child.stdout.take();
     let stdout_tx = progress_tx.clone();
-    let stdout_handle = tokio::spawn(async move {
+    let mut stdout_handle = tokio::spawn(async move {
+        let mut err_lines = std::collections::VecDeque::with_capacity(15);
         if let Some(pipe) = stdout {
             let mut lines = tokio::io::BufReader::new(pipe).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -346,10 +403,19 @@ pub async fn download_progressive_mp4_with_aria2c(
                         crate::vod::progress::parse_aria2c_single_file_progress(&line)
                     {
                         let _ = tx.send(prog);
+                        continue;
                     }
+                }
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    if err_lines.len() >= 15 {
+                        err_lines.pop_front();
+                    }
+                    err_lines.push_back(trimmed.to_string());
                 }
             }
         }
+        err_lines.into_iter().collect::<Vec<_>>().join("\n")
     });
 
     let stderr = child.stderr.take();
@@ -371,14 +437,11 @@ pub async fn download_progressive_mp4_with_aria2c(
             bail!("VOD download cancelled by token during aria2c execution");
         }
         res = child.wait() => {
-            stdout_handle.abort();
-            let status = res.with_context(|| "Failed waiting on aria2c process")?;
+            let stdout_logs = (&mut stdout_handle).await.unwrap_or_default();
             let stderr_logs = stderr_handle.await.unwrap_or_default();
+            let status = res.with_context(|| "Failed waiting on aria2c process")?;
             if !status.success() {
-                bail!(
-                    "aria2c failed with exit status {status}: {}",
-                    stderr_logs.trim()
-                );
+                bail!("{}", format_aria2c_failure_message(status, &stdout_logs, &stderr_logs));
             }
 
             if let Some(ref tx) = progress_tx {
@@ -476,14 +539,21 @@ pub async fn download_segments_with_aria2c_and_progress(
         .with_context(|| format!("Failed to spawn aria2c binary: '{aria2c_bin}'"))?;
 
     let stdout = child.stdout.take();
-    let stdout_handle = tokio::spawn(async move {
+    let mut stdout_handle = tokio::spawn(async move {
+        let mut err_lines = std::collections::VecDeque::with_capacity(15);
         if let Some(pipe) = stdout {
             let mut lines = tokio::io::BufReader::new(pipe).lines();
-            while let Ok(Some(_line)) = lines.next_line().await {
-                // Stdout is drained to prevent buffer overflow.
-                // Speed calculation is driven by windowed byte-delta throughput in VodProgressCoordinator.
+            while let Ok(Some(line)) = lines.next_line().await {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    if err_lines.len() >= 15 {
+                        err_lines.pop_front();
+                    }
+                    err_lines.push_back(trimmed.to_string());
+                }
             }
         }
+        err_lines.into_iter().collect::<Vec<_>>().join("\n")
     });
 
     let stderr = child.stderr.take();
@@ -532,15 +602,12 @@ pub async fn download_segments_with_aria2c_and_progress(
             bail!("VOD download cancelled by token during aria2c execution");
         }
         res = child.wait() => {
-            stdout_handle.abort();
+            let stdout_logs = (&mut stdout_handle).await.unwrap_or_default();
             monitor_handle.abort();
             let status = res.with_context(|| "Failed waiting on aria2c process")?;
             let stderr_logs = stderr_handle.await.unwrap_or_default();
             if !status.success() {
-                bail!(
-                    "aria2c failed with exit status {status}: {}",
-                    stderr_logs.trim()
-                );
+                bail!("{}", format_aria2c_failure_message(status, &stdout_logs, &stderr_logs));
             }
 
             send_completed_segments_progress(staging_dir, segments, progress_tx.as_ref()).await;

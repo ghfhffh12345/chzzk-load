@@ -599,6 +599,7 @@ fn test_aria2c_command_construction_browser_headers_and_k1m() {
     assert!(args.contains(&"-j16".to_string()));
     assert!(args.contains(&"-x16".to_string()));
     assert!(args.contains(&"-s16".to_string()));
+    assert!(args.contains(&"--file-allocation=none".to_string()));
     assert!(args.contains(&"--summary-interval=1".to_string()));
     assert!(args.contains(&"--dir".to_string()));
     assert!(args.contains(&staging_dir.to_string_lossy().to_string()));
@@ -683,6 +684,7 @@ fn test_aria2c_progressive_command_construction() {
     assert!(args.contains(&"-c".to_string()));
     assert!(args.contains(&"--allow-overwrite=true".to_string()));
     assert!(args.contains(&"--auto-file-renaming=false".to_string()));
+    assert!(args.contains(&"--file-allocation=none".to_string()));
     assert!(args.contains(&"--summary-interval=1".to_string()));
 
     // Target directory and output file
@@ -795,6 +797,44 @@ fn test_parse_aria2c_single_file_progress() {
     // Multi-download HLS lines must be rejected (single-file progress only)
     let multi_line = "[#1 1.0MiB/5.0MiB(20%)] [#2 2.0MiB/5.0MiB(40%)]";
     assert_eq!(parse_aria2c_single_file_progress(multi_line), None);
+
+    // Carriage-return delimited status updates from terminal stream: take latest update
+    let cr_line =
+        "[#2089b0 1.0MiB/5.0MiB(20%)]\r[#2089b0 2.5MiB/5.0MiB(50%) CN:16 DL:12.3MiB ETA:10s]";
+    let prog_cr = parse_aria2c_single_file_progress(cr_line).expect("must parse CR-delimited line");
+    match prog_cr {
+        VodVideoProgressUpdate::ProgressiveProgress {
+            bytes,
+            total_bytes,
+            speed,
+            eta,
+        } => {
+            assert_eq!(bytes, 2_621_440);
+            assert_eq!(total_bytes, Some(5_242_880));
+            assert_eq!(speed, Some("12.3MiB/s".to_string()));
+            assert_eq!(eta, Some("10s".to_string()));
+        }
+        other => panic!("Unexpected update type: {other:?}"),
+    }
+
+    // Line containing [FileAlloc:#gid ...] block alongside progress
+    let alloc_line = "[#f24103 0B/9.1GiB(0%) CN:1 DL:0B] [FileAlloc:#f24103 4.8GiB/9.1GiB(53%)]";
+    let prog_alloc =
+        parse_aria2c_single_file_progress(alloc_line).expect("must parse FileAlloc line");
+    match prog_alloc {
+        VodVideoProgressUpdate::ProgressiveProgress {
+            bytes,
+            total_bytes,
+            speed,
+            eta,
+        } => {
+            assert_eq!(bytes, 0);
+            assert_eq!(total_bytes, Some(9_771_050_598));
+            assert_eq!(speed, Some("0B/s".to_string()));
+            assert_eq!(eta, None);
+        }
+        other => panic!("Unexpected update type: {other:?}"),
+    }
 
     // Arbitrary logs must be rejected
     assert_eq!(
