@@ -2326,3 +2326,70 @@ async fn test_vod_archival_with_live_rewind_fallback_on_playback_failure() {
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
+
+#[tokio::test]
+async fn test_vod_archival_resumes_without_purging_transiently_locked_segments() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_lock_res_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 777888;
+    let video_id = "locked_seg_test_vid";
+    let in_key = "key_lock_test";
+    let source = create_fake_vod_source(video_no, video_id, in_key);
+    let source = Arc::new(source);
+
+    let folder_name = "[2026-09-30_110000] ProGamer - Chzzk Live Replay";
+    let output_dir = temp_dir.join(folder_name);
+    let staging_dir = output_dir.join(format!(".vod_staging_{video_id}"));
+    std::fs::create_dir_all(&staging_dir).unwrap();
+
+    // 1. Simulate existing completed segment: chunk_00.ts
+    let completed_seg = staging_dir.join("chunk_00.ts");
+    let initial_data = [0x47u8; 376];
+    std::fs::write(&completed_seg, initial_data).unwrap();
+
+    // 2. Lock chunk_00.ts exclusively for 50ms in background thread
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.share_mode(0); // Exclusive lock (ERROR_SHARING_VIOLATION to other openers)
+    }
+    let lock_file = opts.open(&completed_seg).unwrap();
+
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(lock_file);
+    });
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: true,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("VOD archival must tolerate transient file locks on existing segments");
+
+    assert_eq!(summary.video_no, video_no);
+    assert_eq!(summary.segments_downloaded, 3);
+    assert!(summary.video_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}

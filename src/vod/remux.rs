@@ -116,6 +116,57 @@ pub fn generate_vod_hls_playlist(segments: &[VodSegment], init_segments: &[VodSe
     script
 }
 
+/// Inspects segments in `staging_dir` and filters out corrupted / unparseable segments
+/// that would cause FFmpeg's demuxer to halt prematurely.
+/// Marks `discontinuity = true` on the segment immediately following any omitted segment.
+pub fn filter_valid_remux_segments(
+    staging_dir: &Path,
+    segments: &[VodSegment],
+) -> (Vec<VodSegment>, usize, f64) {
+    let mut valid_segments = Vec::with_capacity(segments.len());
+    let mut skipped_count = 0usize;
+    let mut skipped_duration = 0.0f64;
+    let mut next_is_discontinuous = false;
+
+    for seg in segments {
+        let seg_path = staging_dir.join(&seg.filename);
+        let is_valid = match std::fs::metadata(&seg_path) {
+            Ok(meta) if meta.is_file() && meta.len() > 0 => {
+                if seg.filename.ends_with(".ts") {
+                    crate::vod::aria2c::is_valid_ts_segment(&seg_path, meta.len())
+                } else if seg.filename.ends_with(".mp4")
+                    || seg.filename.ends_with(".m4s")
+                    || seg.filename.ends_with(".m4v")
+                {
+                    crate::vod::aria2c::is_valid_mp4_box_structure_strict(&seg_path, meta.len())
+                } else {
+                    true
+                }
+            }
+            _ => false,
+        };
+
+        if is_valid {
+            let mut seg_clone = seg.clone();
+            if next_is_discontinuous {
+                seg_clone.discontinuity = true;
+                next_is_discontinuous = false;
+            }
+            valid_segments.push(seg_clone);
+        } else {
+            skipped_count += 1;
+            skipped_duration += seg.duration;
+            eprintln!(
+                "[WARN] [VOD] Excluding unparseable/corrupted segment '{}' from remux playlist ({:.2}s dropped by broadcast)",
+                seg.filename, seg.duration
+            );
+            next_is_discontinuous = true;
+        }
+    }
+
+    (valid_segments, skipped_count, skipped_duration)
+}
+
 /// Remuxes downloaded VOD segments into seekable `vod.mp4.part` and validates MP4 container integrity.
 /// Finalization and promotion to `vod.mp4` is deferred to the caller orchestrator seam under
 /// the Two-Stage Atomic Staging pattern (`CODING_STANDARDS.md` §2).
@@ -150,15 +201,34 @@ pub async fn remux_vod_to_staged(
         bail!("VOD remuxing cancelled by token before execution");
     }
 
+    let (valid_segments, skipped_count, skipped_duration) =
+        filter_valid_remux_segments(staging_dir, segments);
+
+    if valid_segments.is_empty() {
+        bail!(
+            "No valid media segments available for remuxing (all {} segments were unparseable or corrupted)",
+            segments.len()
+        );
+    }
+
+    if skipped_count > 0 {
+        eprintln!(
+            "[INFO] [VOD] Remuxing {} valid segments (skipped {} corrupted segment(s), total {:.2}s dropped by broadcast)",
+            valid_segments.len(),
+            skipped_count,
+            skipped_duration
+        );
+    }
+
     let is_hls_remux = !init_segments.is_empty()
-        || segments
+        || valid_segments
             .first()
             .map(|s| s.filename.ends_with(".mp4") || s.filename.ends_with(".m4s"))
             .unwrap_or(false);
 
     let (_input_path, args) = if is_hls_remux {
         let playlist_path = staging_dir.join("local_playlist.m3u8");
-        let playlist_content = generate_vod_hls_playlist(segments, init_segments);
+        let playlist_content = generate_vod_hls_playlist(&valid_segments, init_segments);
         tokio::fs::write(&playlist_path, playlist_content.as_bytes())
             .await
             .with_context(|| {
@@ -171,7 +241,7 @@ pub async fn remux_vod_to_staged(
         (playlist_path, args)
     } else {
         let manifest_path = staging_dir.join("concat_manifest.txt");
-        let script_content = generate_vod_concat_script(staging_dir, segments);
+        let script_content = generate_vod_concat_script(staging_dir, &valid_segments);
         tokio::fs::write(&manifest_path, script_content.as_bytes())
             .await
             .with_context(|| {
@@ -241,8 +311,10 @@ pub async fn remux_vod_to_staged(
                     )
                 })?;
 
-                // 4. Validate output duration against expected segment sum
-                if let (Some(expected), Some(actual)) = (expected_duration_seconds, info.duration_seconds) {
+                // 4. Validate output duration against expected segment sum (accounting for any skipped corrupted segments)
+                let adjusted_expected =
+                    expected_duration_seconds.map(|d| (d - skipped_duration).max(0.0));
+                if let (Some(expected), Some(actual)) = (adjusted_expected, info.duration_seconds) {
                     if expected > 10.0 && actual < expected * 0.90 {
                         let _ = unlink_local_file_with_retry(&staged_path).await;
                         bail!(
@@ -452,5 +524,54 @@ mod tests {
         assert!(pos_seg0 < pos_disc);
         assert!(pos_disc < pos_map1);
         assert!(pos_map1 < pos_seg2);
+    }
+
+    #[test]
+    fn test_filter_valid_remux_segments_omits_corrupted_chunks_and_marks_discontinuity() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_remux_filter_{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Build valid fMP4 segment: 52 bytes
+        let mut valid_fmp4 = Vec::new();
+        valid_fmp4.extend_from_slice(&20u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"stypmsix");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+        valid_fmp4.extend_from_slice(&16u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"moof");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+        valid_fmp4.extend_from_slice(&16u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"mdat");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+
+        std::fs::write(temp_dir.join("segment_00000.mp4"), &valid_fmp4).unwrap();
+        // Corrupted segment (raw payload without ISO BMFF boxes)
+        std::fs::write(
+            temp_dir.join("segment_00001.mp4"),
+            [0xf9, 0x35, 0x6c, 0x29, 0x11, 0x22, 0x33, 0x44],
+        )
+        .unwrap();
+        std::fs::write(temp_dir.join("segment_00002.mp4"), &valid_fmp4).unwrap();
+
+        let segments = vec![
+            VodSegment::new(0, "segment_00000.mp4", "https://example.com/0.mp4", 4.0),
+            VodSegment::new(1, "segment_00001.mp4", "https://example.com/1.mp4", 4.0),
+            VodSegment::new(2, "segment_00002.mp4", "https://example.com/2.mp4", 4.0),
+        ];
+
+        let (valid, skipped_count, skipped_dur) = filter_valid_remux_segments(&temp_dir, &segments);
+
+        assert_eq!(skipped_count, 1);
+        assert_eq!(skipped_dur, 4.0);
+        assert_eq!(valid.len(), 2);
+        assert_eq!(valid[0].filename, "segment_00000.mp4");
+        assert!(!valid[0].discontinuity);
+        assert_eq!(valid[1].filename, "segment_00002.mp4");
+        assert!(
+            valid[1].discontinuity,
+            "Segment following skipped corrupted chunk must have discontinuity set"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::chzzk::DEFAULT_USER_AGENT;
 use crate::consolidation::staging::validate_mp4_container_integrity;
-use crate::uploader::unlink_local_file_with_retry;
+use crate::uploader::{is_transient_lock_error, lock_backoff_delay, unlink_local_file_with_retry};
 use crate::vod::manifest::VodSegment;
 
 /// Resolves the path to the aria2c binary:
@@ -111,16 +111,59 @@ pub fn resolve_vod_staging_dir(
     }
 }
 
+/// Opens a file synchronously with bounded exponential backoff retries (up to 10 attempts),
+/// absorbing transient Windows sharing violations (32) and access denied errors (5).
+fn open_file_with_retry_sync(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut attempts = 0;
+    loop {
+        match std::fs::File::open(path) {
+            Ok(file) => return Ok(file),
+            Err(e) if is_transient_lock_error(&e) && attempts < 10 => {
+                attempts += 1;
+                std::thread::sleep(lock_backoff_delay(attempts));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Queries file metadata asynchronously with bounded exponential backoff retries (up to 10 attempts),
+/// absorbing transient Windows sharing violations (32) and access denied errors (5).
+async fn metadata_with_retry(path: &Path) -> std::io::Result<std::fs::Metadata> {
+    let mut attempts = 0;
+    loop {
+        match tokio::fs::metadata(path).await {
+            Ok(meta) => return Ok(meta),
+            Err(e) if is_transient_lock_error(&e) && attempts < 10 => {
+                attempts += 1;
+                tokio::time::sleep(lock_backoff_delay(attempts)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Known top-level box types that start an ISO BMFF / fMP4 segment or file.
+const KNOWN_START_BOXES: &[&[u8]] = &[
+    b"styp", b"moof", b"ftyp", b"moov", b"emsg", b"prft", b"sidx", b"ssix", b"free", b"skip",
+    b"mdat", b"meta",
+];
+
 /// Validates whether an MP4 / fMP4 segment on disk has intact ISO BMFF box headers
 /// that cleanly tile the entire file down to the exact byte without trailing corruption.
+///
+/// If the segment does not start with a recognized ISO BMFF start box (e.g. broadcast-drop
+/// raw payload or stream glitch chunks served by the live CDN), it is accepted as a
+/// non-box CDN segment to avoid infinite delete-and-redownload retry loops, and left to
+/// FFmpeg to handle with `-fflags +discardcorrupt`.
 fn is_valid_mp4_box_structure(path: &Path, file_len: u64) -> bool {
     use std::io::{Read, Seek, SeekFrom};
 
-    if file_len < 16 {
+    if file_len < 8 {
         return false;
     }
 
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match open_file_with_retry_sync(path) {
         Ok(f) => f,
         Err(_) => return false,
     };
@@ -142,6 +185,88 @@ fn is_valid_mp4_box_structure(path: &Path, file_len: u64) -> bool {
 
         let size_u32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         let box_type = &header[4..8];
+
+        if box_count == 0 && !KNOWN_START_BOXES.contains(&box_type) {
+            // Segment is not a standard ISO BMFF box-structured file (e.g. raw / broadcast-drop
+            // payload emitted by Chzzk live slit recorder). Since aria2c finished downloading
+            // without error, accept the file to avoid an infinite purge-and-redownload retry cycle.
+            return true;
+        }
+
+        let box_size = if size_u32 == 1 {
+            if offset.saturating_add(16) > file_len {
+                return false;
+            }
+            let mut ext = [0u8; 8];
+            if file.read_exact(&mut ext).is_err() {
+                return false;
+            }
+            let ext_size = u64::from_be_bytes(ext);
+            if ext_size < 16 {
+                return false;
+            }
+            ext_size
+        } else if size_u32 == 0 {
+            file_len - offset
+        } else if size_u32 < 8 {
+            return false;
+        } else {
+            size_u32 as u64
+        };
+
+        if !box_type
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b' ')
+        {
+            return false;
+        }
+
+        box_count += 1;
+        offset = match offset.checked_add(box_size) {
+            Some(n) if n <= file_len => n,
+            _ => return false,
+        };
+    }
+
+    offset == file_len && box_count > 0
+}
+
+/// Validates whether an MP4 / fMP4 segment on disk strictly conforms to ISO BMFF box structure,
+/// starting with a recognized start box and cleanly tiling down to `file_len`.
+/// Used by remuxing to ensure only parseable media segments are included in the FFmpeg playlist.
+pub fn is_valid_mp4_box_structure_strict(path: &Path, file_len: u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if file_len < 16 {
+        return false;
+    }
+
+    let mut file = match open_file_with_retry_sync(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+
+    let mut offset = 0u64;
+    let mut header = [0u8; 8];
+    let mut box_count = 0usize;
+
+    while offset < file_len {
+        if offset.saturating_add(8) > file_len {
+            return false;
+        }
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return false;
+        }
+        if file.read_exact(&mut header).is_err() {
+            return false;
+        }
+
+        let size_u32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let box_type = &header[4..8];
+
+        if box_count == 0 && !KNOWN_START_BOXES.contains(&box_type) {
+            return false;
+        }
 
         let box_size = if size_u32 == 1 {
             if offset.saturating_add(16) > file_len {
@@ -183,14 +308,14 @@ fn is_valid_mp4_box_structure(path: &Path, file_len: u64) -> bool {
 
 /// Checks whether an MPEG-TS segment file is valid:
 /// non-empty, packet-aligned (multiple of 188 bytes), and starts with 0x47 sync byte.
-fn is_valid_ts_segment(path: &Path, file_len: u64) -> bool {
+pub fn is_valid_ts_segment(path: &Path, file_len: u64) -> bool {
     use std::io::Read;
 
     if file_len < 188 || file_len % 188 != 0 {
         return false;
     }
 
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match open_file_with_retry_sync(path) {
         Ok(f) => f,
         Err(_) => return false,
     };
@@ -207,7 +332,7 @@ fn is_valid_ts_segment(path: &Path, file_len: u64) -> bool {
 ///
 /// A segment is considered completed if:
 /// 1. Its file exists and has size > 0 bytes.
-/// 2. No `.aria2` control file exists for it.
+/// 2. No `.aria2` control file exists for it (allowing brief grace period for async unlinks).
 /// 3. Its container structure is valid:
 ///    - For `.ts`: non-empty, multiple of 188 bytes, starts with `0x47`.
 ///    - For `.mp4`, `.m4s`, `.m4v`: valid ISO BMFF box headers cleanly tiling the file.
@@ -215,9 +340,21 @@ pub(crate) async fn is_segment_completed(staging_dir: &Path, filename: &str) -> 
     let path = staging_dir.join(filename);
     let aria2_path = staging_dir.join(format!("{filename}.aria2"));
     if tokio::fs::try_exists(&aria2_path).await.unwrap_or(false) {
-        return false;
+        // If an .aria2 control file exists, verify if it is transiently pending deletion
+        // upon completed aria2c process execution.
+        let mut aria2_still_exists = true;
+        for attempt in 1..=5 {
+            tokio::time::sleep(lock_backoff_delay(attempt)).await;
+            if !tokio::fs::try_exists(&aria2_path).await.unwrap_or(false) {
+                aria2_still_exists = false;
+                break;
+            }
+        }
+        if aria2_still_exists {
+            return false;
+        }
     }
-    let meta = match tokio::fs::metadata(&path).await {
+    let meta = match metadata_with_retry(&path).await {
         Ok(meta) => meta,
         Err(_) => return false,
     };
@@ -972,6 +1109,167 @@ mod tests {
             .await
             .unwrap();
         assert!(!is_segment_completed(&temp_dir, "segment_00003.mp4").await);
+
+        // Raw CDN payload (non-box broadcast drop / stream glitch emitted by CDN)
+        let raw_cdn_payload = vec![0xf9, 0x35, 0x6c, 0x29, 0x24, 0x00, 0x11, 0x22, 0x33, 0x44];
+        tokio::fs::write(temp_dir.join("segment_00004.mp4"), &raw_cdn_payload)
+            .await
+            .unwrap();
+        assert!(
+            is_segment_completed(&temp_dir, "segment_00004.mp4").await,
+            "Non-box CDN payload must be accepted as completed"
+        );
+
+        // Truncated tiny file (< 8 bytes)
+        tokio::fs::write(temp_dir.join("segment_00005.mp4"), &[0x01, 0x02, 0x03])
+            .await
+            .unwrap();
+        assert!(
+            !is_segment_completed(&temp_dir, "segment_00005.mp4").await,
+            "File smaller than 8 bytes must be rejected as incomplete"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_is_segment_completed_tolerates_transient_lock() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_is_seg_lock_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let filename = "segment_00000.mp4";
+        let path = temp_dir.join(filename);
+
+        // Build valid fMP4 fragment: 52 bytes
+        let mut valid_fmp4 = Vec::new();
+        valid_fmp4.extend_from_slice(&20u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"stypmsix");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+        valid_fmp4.extend_from_slice(&16u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"moof");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+        valid_fmp4.extend_from_slice(&16u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"mdat");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+
+        tokio::fs::write(&path, &valid_fmp4).await.unwrap();
+
+        // Lock file with exclusive access for 50ms (simulating Windows Defender / process closing handle)
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            opts.share_mode(0); // Exclusive lock (ERROR_SHARING_VIOLATION to other openers)
+        }
+        let lock_file = opts.open(&path).unwrap();
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(lock_file);
+        });
+
+        let completed = is_segment_completed(&temp_dir, filename).await;
+        assert!(
+            completed,
+            "is_segment_completed must tolerate transient file locks without failing"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_filter_missing_segments_does_not_purge_transiently_locked_valid_segment() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_filter_lock_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let filename = "segment_00000.mp4";
+        let path = temp_dir.join(filename);
+
+        // Build valid fMP4 fragment: 52 bytes
+        let mut valid_fmp4 = Vec::new();
+        valid_fmp4.extend_from_slice(&20u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"stypmsix");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+        valid_fmp4.extend_from_slice(&16u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"moof");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+        valid_fmp4.extend_from_slice(&16u32.to_be_bytes());
+        valid_fmp4.extend_from_slice(b"mdat");
+        valid_fmp4.extend_from_slice(&[0u8; 8]);
+
+        tokio::fs::write(&path, &valid_fmp4).await.unwrap();
+
+        // Lock file exclusively for 50ms
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            opts.share_mode(0); // Exclusive lock
+        }
+        let lock_file = opts.open(&path).unwrap();
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(lock_file);
+        });
+
+        let segments = vec![VodSegment {
+            index: 0,
+            filename: filename.to_string(),
+            url: "https://example.com/segment_00000.mp4".to_string(),
+            duration: 4.0,
+            map_index: None,
+            discontinuity: false,
+        }];
+
+        let missing = filter_missing_segments(&temp_dir, &segments).await;
+        assert!(
+            missing.is_empty(),
+            "filter_missing_segments must not mark transiently locked valid segment as missing: {:?}",
+            missing
+        );
+        assert!(
+            path.exists(),
+            "filter_missing_segments must not purge transiently locked valid segment"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_filter_missing_segments_preserves_raw_cdn_payload() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_filter_raw_{}", rand::random::<u32>()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+        let filename = "segment_00922.mp4";
+        let path = temp_dir.join(filename);
+        let raw_payload = vec![0xf9, 0x35, 0x6c, 0x29, 0x24, 0x00, 0x11, 0x22, 0x33, 0x44];
+        tokio::fs::write(&path, &raw_payload).await.unwrap();
+
+        let segments = vec![VodSegment {
+            index: 922,
+            filename: filename.to_string(),
+            url: "https://example.com/segment_00922.mp4".to_string(),
+            duration: 4.0,
+            map_index: None,
+            discontinuity: false,
+        }];
+
+        let missing = filter_missing_segments(&temp_dir, &segments).await;
+        assert!(
+            missing.is_empty(),
+            "Raw CDN payload must not be marked as missing: {:?}",
+            missing
+        );
+        assert!(
+            path.exists(),
+            "filter_missing_segments must not purge raw CDN payload file"
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

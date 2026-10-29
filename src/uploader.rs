@@ -7,8 +7,9 @@ pub mod worker;
 pub use backend::{BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend};
 pub use rclone::{RcloneBackend, RcloneStats, format_destination, parse_rclone_log_line};
 pub use worker::{
-    DiskSpaceProvider, DlqConfig, PairedChunkPaths, UploadWorker, rename_local_file_with_retry,
-    resolve_paired_paths, unlink_local_file_with_retry, unlink_local_file_with_retry_sync,
+    DiskSpaceProvider, DlqConfig, PairedChunkPaths, UploadWorker, is_transient_lock_error,
+    lock_backoff_delay, rename_local_file_with_retry, resolve_paired_paths,
+    unlink_local_file_with_retry, unlink_local_file_with_retry_sync,
 };
 
 /// Returns the broadcast identifier for logging, prioritizing the streamer/channel name

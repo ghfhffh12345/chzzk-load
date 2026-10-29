@@ -448,6 +448,10 @@ pub async fn run_vod_archival_with_options(
                 break;
             }
 
+            if attempts < MAX_DOWNLOAD_ATTEMPTS {
+                tokio::time::sleep(tokio::time::Duration::from_millis(500 * attempts as u64)).await;
+            }
+
             if attempts >= MAX_DOWNLOAD_ATTEMPTS {
                 if let Some(ref task) = chat_task {
                     task.abort();

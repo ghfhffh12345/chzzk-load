@@ -273,7 +273,7 @@ async fn enforce_dlq_disk_eviction(
 }
 
 #[inline]
-pub(crate) fn is_transient_lock_error(e: &std::io::Error) -> bool {
+pub fn is_transient_lock_error(e: &std::io::Error) -> bool {
     let raw_os = e.raw_os_error();
     raw_os == Some(32) // ERROR_SHARING_VIOLATION
         || raw_os == Some(5)  // ERROR_ACCESS_DENIED
@@ -282,7 +282,7 @@ pub(crate) fn is_transient_lock_error(e: &std::io::Error) -> bool {
 }
 
 #[inline]
-pub(crate) fn lock_backoff_delay(attempts: usize) -> Duration {
+pub fn lock_backoff_delay(attempts: usize) -> Duration {
     let backoff_ms = std::cmp::min(
         20u64.saturating_mul(
             1u64.checked_shl(attempts.saturating_sub(1) as u32)
