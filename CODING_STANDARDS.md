@@ -1,39 +1,39 @@
 # Coding Standards & Review Guidelines (`CODING_STANDARDS.md`)
 
-This document is the authoritative standard for code review under the `/code-review` skill. Review subagents consult these rules to distinguish documented repo violations from baseline judgement calls.
+This document is the authoritative standard for code review under the `/code-review` skill. Review subagents consult these rules to distinguish documented repository violations from baseline judgement calls.
 
 ---
 
 ## 1. Test Architecture & Seam Discipline
 
-- **Sub-Second Unit Test Seams**: Unit suites (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, `test_cli_smoke`, `test_consolidation_staging`, `test_consolidation_concat`, `test_consolidation_progress`, `test_consolidation_remote`) and internal module tests run via `cargo test --lib <filter>` must complete execution in under 1 second.
+- **Sub-Second Unit Test Seams**: Unit test suites (`test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, `test_cli_smoke`, `test_consolidation_staging`, `test_consolidation_concat`, `test_consolidation_progress`, `test_consolidation_remote`) and internal library tests run via `cargo test --lib <filter>` must complete in under 1 second.
   - *Hard Violation*: Adding blocking sleep ticks, network roundtrips, or heavy multi-step loops to unit test files or internal library tests.
-  - *Resolution*: Heavy multi-step integration scenarios belong strictly in `tests/test_engine_events.rs` (20–25s budget).
-- **Virtual Time Testing**: Test async timeouts, grace periods, and debounces using Tokio's virtual time (`tokio::time::pause()`) rather than wall-clock thread sleeps (`std::thread::sleep` or unpaused `tokio::time::sleep`).
+  - *Resolution*: Multi-step integration scenarios belong strictly in `tests/test_engine_events.rs` (20–25s budget).
+- **Deterministic Virtual Time**: Test async timeouts, grace periods, and debounces using Tokio's virtual time (`tokio::time::pause()`) rather than wall-clock thread sleeps (`std::thread::sleep` or unpaused `tokio::time::sleep`).
   - *Hard Violation*: Adding wall-clock sleeps to simulate timeout expiration or debounce delays in unit tests.
   - *Resolution*: Initialize unit tests with `#[tokio::test(start_paused = true)]` or invoke `tokio::time::pause()` to advance time deterministically via `tokio::time::advance()`.
-- **Shared Subprocess Mocking**: Never invoke `rustc` or recompile dummy executables inline inside individual test bodies.
-  - *Hard Violation*: Inline dummy process compilation or duplicate C-ABI `atexit` temporary directory handlers.
-  - *Resolution*: Import and reuse shared mock fixtures via `mod common; use common::mock_ffmpeg::get_mock_ffmpeg_bin;` or `use common::mock_rclone::get_mock_rclone_bin;`, registering mock paths via `common::register_mock_temp_dir`.
-- **Subprocess Mock Test Co-location & Domain API Assertions**: Integration test suites (`tests/test_*.rs`) must assert domain behaviors exclusively through public APIs (`run_consolidation`, `upload_file`, `FfmpegSession`). Never assert raw subprocess mock CLI exit codes or deprecation text directly in domain integration files.
+- **Reusable Subprocess Mock Fixtures**: Share test binary mock fixtures across test suites via `tests/common/` helpers.
+  - *Hard Violation*: Inline dummy process compilation (`rustc`) or duplicate C-ABI `atexit` temporary directory handlers inside test files.
+  - *Resolution*: Import shared mock fixtures (`common::mock_ffmpeg::get_mock_ffmpeg_bin;`, `common::mock_rclone::get_mock_rclone_bin;`), registering mock directories via `common::register_mock_temp_dir`.
+- **Public Domain API Assertions in Integration Suites**: Integration test suites (`tests/test_*.rs`) must assert domain behaviors exclusively through public APIs (`run_consolidation`, `upload_file`, `FfmpegSession`).
   - *Hard Violation*: Probing subprocess mock CLI syntax, raw exit codes, or deprecation text directly in domain integration suites.
-  - *Resolution*: Integration suites must test domain behavior through real public APIs. Subprocess mock CLI syntax or deprecation tests belong in dedicated test harness suites under `tests/common/` if needed, not in domain integration files.
-- **Shared Asynchronous Test Listeners**: Encapsulate recurring background notification loops (such as `drain_notify` driving `SessionCustodian::try_purge_drained`) into reusable test helper functions rather than duplicating ad-hoc spawned loops across individual test cases.
+  - *Resolution*: Integration suites must test domain behavior through real public APIs. Subprocess mock CLI syntax or deprecation tests belong in dedicated harness suites under `tests/common/`.
+- **Encapsulated Asynchronous Test Listeners**: Encapsulate recurring background notification loops (such as `drain_notify` driving `SessionCustodian::try_purge_drained`) into reusable test helper functions.
   - *Code Smell (Duplicated Code)*: Re-implementing identical background signal listeners (`tokio::spawn(async move { loop { notify.notified().await; ... } })`) across multiple integration tests.
   - *Resolution*: Factor background signal listeners into a shared test helper (such as `spawn_drain_purge_listener(custodian, drain_notify)`) within the test file or `tests/common/`.
-- **Ephemeral Port & Path Isolation**: Tests must never bind hardcoded network ports (`127.0.0.1:0` only) and all filesystem mutations must operate strictly within `std::env::temp_dir()`.
-- **No Test-Convenience Forwarding Shims**: Top-level orchestrators (`EngineOrchestrator`) must expose only real public caller interfaces. Never add public static or instance forwarding shims (*Middle Man* smell) solely to facilitate tests of internal subsystems from external integration tests.
-  - *Hard Violation*: Adding public static or instance pass-through shims on `EngineOrchestrator` (e.g. `process_sealed_chunk`, `seal_and_enqueue_chunks`) to test internal subsystem logic from outer integration tests.
-  - *Resolution*: The interface is the test surface. Internal subsystem behavior (segment dispatching, WebSocket frames, upload queue tasks) must be tested at its own co-located module seam (e.g., `RecordingSession`, `ChatWriter`, `RcloneBackend`), using unit tests co-located under `#[cfg(test)] mod tests` or dedicated module unit test suites.
-- **No Mock Pollution in Production**: Production runtime pipelines must never synthesize fallback files or fake outcomes to accommodate test mock limitations. Mock fixtures must fully satisfy production contracts; production code must fail strictly on missing artifacts.
+- **Ephemeral Port & Path Isolation**: Tests must bind ephemeral ports (`127.0.0.1:0`) and execute all filesystem mutations strictly within `std::env::temp_dir()`.
+- **Direct Subsystem Seam Testing**: Top-level orchestrators (`EngineOrchestrator`) must expose only real caller interfaces. Test internal subsystem behavior directly at its own co-located module seam.
+  - *Hard Violation*: Adding public static or instance pass-through shims on `EngineOrchestrator` (e.g. `process_sealed_chunk`, `seal_and_enqueue_chunks`) solely to test internal subsystems from outer integration tests.
+  - *Resolution*: The interface is the test surface. Test internal subsystem behavior (segment dispatching, WebSocket frames, upload queue tasks) at its own module seam (e.g., `RecordingSession`, `ChatWriter`, `RcloneBackend`), using unit tests under `#[cfg(test)] mod tests` or dedicated module unit test suites.
+- **Contract-Compliant Subprocess Mocks**: Subprocess mock fixtures must fully satisfy production contracts, and production pipelines must fail strictly on missing artifacts.
   - *Hard Violation*: Adding conditional fallback branches, dummy file synthesis (e.g., 0-byte placeholders for missing metadata), or mock-accommodating bypasses in production code.
-  - *Resolution*: Enhance subprocess mocks (`mock_ffmpeg.rs`, `mock_rclone.rs`) to faithfully produce all contractually expected files and exit behaviors; ensure production code fails strictly and visibly when required inputs or artifacts are absent.
+  - *Resolution*: Enhance subprocess mocks (`mock_ffmpeg.rs`, `mock_rclone.rs`) to produce all contractually expected files and exit behaviors; ensure production code fails strictly and visibly when required inputs or artifacts are absent.
 
 ---
 
 ## 2. Process & Stream Lifecycle
 
-- **Autonomous Video Segmenter**: FFmpeg child processes, pipe I/O, stderr log parsing, and AES key error detection are encapsulated entirely within `FfmpegSession`.
+- **Encapsulated Video Segmenter**: FFmpeg child processes, pipe I/O, stderr log parsing, and AES key error detection must remain encapsulated entirely within `FfmpegSession`.
   - *Hard Violation*: Direct subprocess spawning (`Command::new("ffmpeg")`), manual pipe reading, or polling atomic flags for key errors outside the `recorder` crate.
 - **Unified Graceful Teardown**: Post-recording shutdown (natural manifest EOF, session cancellation, or disk space circuit breaker) must funnel through a single call to `session.stop_graceful(timeout)` and final segment sealing outside the main select loop.
   - *Code Smell (Duplicated Code)*: Triplicating `stop_graceful`, log emission, and chunk sealing across individual `tokio::select!` break branches.
@@ -42,13 +42,13 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Safe Multiplexing in `tokio::select!`**: Branch future expressions evaluate eagerly on every loop tick before guards (`if <cond> =>`) are evaluated.
   - *Hard Violation*: Calling `.unwrap()` or executing fallible logic in a `tokio::select!` branch future expression (e.g. `_ = sleep_until(deadline.unwrap()), if deadline.is_some() =>`).
   - *Resolution*: Defer evaluation inside an `async` block that yields `std::future::pending().await` when inactive (e.g., `async { match deadline { Some(d) => sleep_until(d).await, None => std::future::pending().await } }`).
-- **Two-Stage Atomic Staging Pattern**: Concurrently joined worker pipelines (such as video and chat consolidation) must exclusively stream to temporary `.part` staging files. Destination file finalization must occur at the outer orchestrator seam only after zero-exit status of all active futures (e.g. via `tokio::try_join!`), preserving clean abort invariants if any concurrent task fails.
+- **Two-Stage Atomic Staging Pattern**: Concurrently joined worker pipelines (such as video and chat consolidation) must stream exclusively to temporary `.part` staging files. Destination file finalization must occur at the outer orchestrator seam only after zero-exit status of all active futures (e.g. via `tokio::try_join!`).
   - *Hard Violation*: Individual worker tasks or futures self-finalizing (`rename`, `moveto`) `.part` files into final destination paths prior to orchestrator join synchronization.
-  - *Resolution*: Confine worker futures to reading sources and generating `.part` files. Perform destination renaming and finalization at the caller orchestrator seam after all worker tasks succeed, and purge `.part` files upon abort or failure (in consolidation; in cursor-resumable VOD archival sessions under ADR 0013 and Issue #84, unfinished `.part` files and staging folders are retained upon abort/failure for subsequent resume).
-- **Multi-Track Process Helper Parameter Bundling**: Functions coordinating concurrent video, chat, and upload pipelines must bundle communication channels, cancel tokens, and flags into cohesive option or context structs (e.g., session options or progress sender bundles) to keep parameter counts within Clippy limits ($\le 7$).
+  - *Resolution*: Confine worker futures to reading sources and generating `.part` files. Finalize destination paths at the caller orchestrator seam after all worker tasks succeed, and purge `.part` files upon failure (in consolidation; in cursor-resumable VOD archival sessions under ADR 0013 and Issue #84, unfinished `.part` files and staging folders are retained for subsequent resume).
+- **Multi-Track Process Helper Parameter Bundling**: Functions coordinating concurrent video, chat, and upload pipelines must bundle communication channels, cancel tokens, and flags into cohesive option or context structs to keep parameter counts within Clippy limits ($\le 7$).
   - *Code Smell (Too Many Arguments)*: Accumulating individual per-track sender channels (`video_tx`, `chat_tx`), tokens, and configuration flags as loose function parameters, requiring `#[allow(clippy::too_many_arguments)]`.
   - *Resolution*: Group multi-track communication handles and cancellation controls into dedicated data structures (such as `UploadProgressSenders` or execution options) passed by value or reference.
-- **Strict Container Integrity Verification**: Video container validation prior to promotion (`live_stream.mp4.part` $\to$ `live_stream.mp4`) or upload resume must verify full structural integrity (`validate_mp4_container_integrity`). Never rely on superficial atom string sniffing.
+- **Strict Container Integrity Verification**: Video container validation prior to promotion (`live_stream.mp4.part` $\to$ `live_stream.mp4`) or upload resume must verify full structural integrity (`validate_mp4_container_integrity`).
   - *Hard Violation*: Checking only for the presence of an atom type without verifying container tiling (`offset == file_len`), box cardinality (`moov_count == 1`, `mdat_count >= 1`), and chunk offset boundary alignment.
   - *Resolution*: Validate top-level box sequence, ensure zero trailing unindexed data, and scan `stbl` (`stco`/`co64`) to confirm sample offsets fall strictly within `mdat` media payload ranges.
 
@@ -56,10 +56,10 @@ This document is the authoritative standard for code review under the `/code-rev
 
 ## 3. TUI Decoupling & Terminal Safety
 
-- **Zero Terminal Pollution**: Never use `println!`, `eprintln!`, or unredirected subprocess outputs in the engine, recorder, or uploader layers.
+- **Structured Terminal Event Logging**: Route all logging through `AppEvent::Log(...)` in the engine, recorder, and uploader layers. Direct standard stream writes (`println!`, `eprintln!`) or unredirected subprocess streams are prohibited while the TUI is active.
 - **Non-Blocking Telemetry**: Telemetry sent to the TUI must use bounded channels with `try_send` or non-blocking forwarders; recording and WebSocket loops must never block on terminal rendering.
 - **Typed Semantic Outcomes**: Use typed enums (`FfmpegExit::Clean`, `FfmpegExit::Killed`, `RestrictionReason`) rather than unstructured error strings for state transitions and logging.
-- **Line Budget Containment for Interactive ANSI Terminal Emitters**: Renderers using cursor-up (`\x1b[1A`) repositioning must ensure visible character width is strictly bounded ($\le \text{cols} - 1$) by computing dynamic suffix budgets and clamping progress bars to prevent line wrapping and cursor desynchronization.
+- **Bounded Character Budgets for ANSI Terminal Emitters**: Renderers using cursor-up (`\x1b[1A`) repositioning must ensure visible character width is strictly bounded ($\le \text{cols} - 1$) by computing dynamic suffix budgets and clamping progress bars to prevent line wrapping and cursor desynchronization.
   - *Hard Violation*: Emitting unconstrained or dynamically sized progress lines without column clamping in multi-line ANSI terminal loops, risking terminal line wrapping and cursor vertical desynchronization.
   - *Resolution*: Compute dynamic prefix and suffix display budgets, allocate remaining column width ($\text{cols} - \text{prefix} - \text{suffix} - 1$) to progress bars with safe clamping (`available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)`), and clamp or omit bar elements when available width is exhausted.
 - **Synchronized Column Width Budgeting for Dual-Track ANSI Renderers**: When rendering concurrent progress tracks (e.g. video remux/upload and chat deduplication/upload), compute synchronized column width allocation (`resolve_dual_track_bar_width`) across all active tracks based on the maximum suffix length among active tracks (`video_suffix_len.max(chat_suffix_len)`).
@@ -70,25 +70,24 @@ This document is the authoritative standard for code review under the `/code-rev
 
 ## 4. Domain Model Hygiene & Schema Transitions
 
-- **Contract Phase Canonicalization**: When completing the contract or purge phase of a schema refactoring, internal engine, recorder, and client modules must directly consume canonical type names (`StreamMetadataState`, `MetadataEvent`).
+- **Contract Phase Canonicalization**: Upon completing the contract or purge phase of a schema refactoring, internal engine, recorder, and client modules must directly consume canonical type names (`StreamMetadataState`, `MetadataEvent`).
   - *Code Smell (Middle Man / Speculative Generality)*: Retaining transitional version aliases (`*V2`, `*Old`) across internal callers after legacy models have been purged.
   - *Resolution*: Migrate internal imports and usages directly to canonical types; preserve aliases only when required for external library consumers.
-- **Artifact & Filesystem Path Canonicalization**: When migrating media, chat, or metadata file naming conventions (e.g. `livestream.mp4` $\to$ `live_stream.mp4`), internal production runtime and validation pipelines must directly target canonical names.
+- **Canonical Artifact Path Construction**: Production runtime and validation pipelines must directly target canonical file paths (`live_stream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`).
   - *Hard Violation*: Adding conditional runtime fallback branches (e.g. `if canonical.exists() ... else if legacy.exists() ...`) or speculative dual cleanup calls in production validation or upload loops to accommodate legacy artifacts.
   - *Resolution*: Directly construct and require canonical artifact paths in production pipelines; ensure production code fails strictly and visibly if required inputs or artifacts are absent.
-- **External API Acronym Aliasing in Deserialization**: When deserializing third-party JSON schemas with uppercase acronyms (e.g. `baseURL`, `mediaId`, `videoId`, `hlsUrl`), never rely solely on `#[serde(rename_all = "camelCase")]`. Serde's `camelCase` converts `base_url` to `baseUrl` rather than `baseURL`, causing silent field omissions.
-  - *Hard Violation*: Relying solely on `#[serde(rename_all = "camelCase")]` for fields containing acronyms when parsing external API payloads.
-  - *Resolution*: Explicitly declare aliases for both camelCase and acronym casing (e.g. `#[serde(default, alias = "baseURL", alias = "baseUrl")]`) to ensure resilient deserialization across upstream API updates.
+- **Explicit Deserialization Aliasing for Acronyms**: When deserializing third-party JSON schemas with uppercase acronyms (e.g. `baseURL`, `mediaId`, `videoId`, `hlsUrl`), declare explicit Serde aliases for both camelCase and uppercase acronym forms.
+  - *Hard Violation*: Relying solely on `#[serde(rename_all = "camelCase")]` for fields containing acronyms when parsing external API payloads (Serde converts `base_url` to `baseUrl`, silently dropping `baseURL`).
+  - *Resolution*: Explicitly declare aliases for both representations (e.g. `#[serde(default, alias = "baseURL", alias = "baseUrl")]`) to maintain resilient deserialization across upstream API variants.
 
 ---
 
 ## 5. Filesystem Invariants & Windows OS Safety
 
-- **Windows Transient Lock & Unlink Resilience**: All filesystem deletion routines operating on child process outputs (`unlink_local_file_with_retry`, `unlink_local_file_with_retry_sync`) or directory unlinks (`SessionCustodian::purge_dir_if_empty`) must implement bounded exponential backoff retries handling `ERROR_SHARING_VIOLATION` (32), `ERROR_ACCESS_DENIED` (5), and `ERROR_DIR_NOT_EMPTY` (145), and treat `ErrorKind::NotFound` as success.
+- **Windows Transient Lock & Unlink Resilience**: All filesystem deletion routines operating on child process outputs (`unlink_local_file_with_retry`, `unlink_local_file_with_retry_sync`) or directory unlinks (`SessionCustodian::purge_dir_if_empty`) must implement bounded exponential backoff retries handling `ERROR_SHARING_VIOLATION` (32), `ERROR_ACCESS_DENIED` (5), and `ERROR_DIR_NOT_EMPTY` (145), treating `ErrorKind::NotFound` as success.
   - *Hard Violation*: Single-attempt `tokio::fs::remove_file` or `remove_dir` immediately following child process termination or file deletion.
-  - *Resolution*: Retry up to 5–10 attempts with exponential backoff using the standard formula `Duration::from_millis(std::cmp::min(max_ms, base_ms * (1 << (attempt - 1))))` (20ms–200ms) before returning an I/O error, allowing background Windows antivirus and filesystem filter drivers to release locks.
-- **No Silent Directory Cleanup Error Suppression**: Directory purge routines (`SessionCustodian::purge_dir_if_empty`, `try_purge`) must distinguish between non-empty preserved directories (`Ok(false)`) and filesystem I/O failures.
+  - *Resolution*: Retry up to 5–10 attempts with exponential backoff (`20ms`–`200ms`, standard min-formula `min(max_ms, base_ms * (1 << (attempt - 1)))`) before returning an I/O error, absorbing background Windows antivirus and filesystem filter driver lock latency.
+- **Explicit Directory Cleanup Error Propagation**: Directory purge routines (`SessionCustodian::purge_dir_if_empty`, `try_purge`) must distinguish between non-empty preserved directories (`Ok(false)`) and filesystem I/O failures.
   - *Hard Violation*: Silently suppressing or swallowing unrecovered non-transient I/O errors (e.g. returning `Ok(false)` on `tokio::fs::remove_dir` or `read_dir` failures) during directory cleanup.
   - *Resolution*: Unrecovered non-transient I/O errors must be propagated (`Err(e)`) after bounded retry exhaustion rather than silently returning `Ok(false)`.
-- **External Subprocess Hermeticity**: Integration tests invoking real external binaries (`rclone`, `ffmpeg`) must guard execution behind an availability check (e.g. `ensure_rclone_available()`, `ensure_ffmpeg_available()`) to prevent environment-dependent test failures in lightweight runner environments. External live network streams or credentials must be marked `#[ignore]`.
-
+- **Subprocess Hermeticity Guards**: Integration tests invoking real external binaries (`rclone`, `ffmpeg`) must guard execution behind an availability check (e.g. `ensure_rclone_available()`, `ensure_ffmpeg_available()`). Tests requiring external live network streams or credentials must be marked `#[ignore]`.

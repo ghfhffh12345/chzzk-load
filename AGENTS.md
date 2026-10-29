@@ -1,32 +1,32 @@
 # Developer & AI Agent Guide (`AGENTS.md`)
 
-`chzzk-load` is a standalone Rust application with a Ratatui TUI that monitors Naver Chzzk streams, losslessly segments video via stream-copied FFmpeg (`-c copy`), concurrently archives live chat into structured JSON Lines (`chat_%04d.jsonl`), uploads completed chunks via rclone (or retains them in local-only mode), and immediately purges local files to maintain a strictly bounded disk footprint.
+`chzzk-load` is a standalone Rust application with a Ratatui TUI that monitors Naver Chzzk streams, losslessly segments video via stream-copied FFmpeg (`-c copy`), concurrently archives live chat into structured JSON Lines (`chat_%04d.jsonl`), uploads completed chunks via rclone (or retains them locally), and immediately purges local files to maintain a strictly bounded disk footprint.
 
 ---
 
 ## 1. Quick Commands
 
 ```bash
-# Check, lint, and format (PowerShell / Bash compatible; calibrate WaitMsBeforeAsync: 20000 for chained commands)
-cargo check --tests; cargo clippy --tests           # Fast test linter loop (<1s, catch style/import errors before test runs)
+# Lint, format, and check (calibrate WaitMsBeforeAsync: 20000 for chained runs)
+cargo check --tests; cargo clippy --tests           # Fast test linter loop (<1s)
 cargo check --all-targets; cargo clippy --all-targets -- -D warnings; cargo fmt --check
 
-# Test suite (Tiered Fast Feedback; calibrate WaitMsBeforeAsync: 20000 for suites / chained runs)
-# Note: Batch multiple --test flags in a single cargo test invocation to avoid repeated process/linking lock overhead
-cargo test --lib <filter>                           # Fast internal module unit tests (<1s, skips linking integration binaries)
+# Test suite (Tiered fast feedback; calibrate WaitMsBeforeAsync: 20000 for suites)
+cargo test --lib <filter>                           # Fast internal module unit tests (<1s)
 cargo test --test test_cli_smoke                    # CLI & binary startup smoke tests (<1s)
 cargo test --test test_channel_lifecycle_registry   # Fast registry unit tests (<1s)
 cargo test --test test_engine_orchestrator_registry # Typed engine seam unit tests (<1s)
 cargo test --test test_recorder_ffmpeg              # FfmpegSession unit tests (<1s)
 cargo test --test test_recorder_watcher             # FFmpeg watcher unit tests (<1s)
 cargo test --test test_tui_state                    # TUI state unit tests (<1s)
-cargo test --test test_consolidation_staging --test test_consolidation_concat --test test_consolidation_progress --test test_consolidation_remote # Fast consolidation unit suites (<1s each; batch for speed)
-cargo test --test test_shutdown_cleanup             # Shutdown & cleanup tests (calibrate WaitMsBeforeAsync: 20000)
-cargo test --test test_engine_events <filter>       # Heavy async integration tests (20-25s; calibrate WaitMsBeforeAsync: 20000)
-cargo test -j 2                                         # Full test suite (final verification gate, bounded jobs to prevent OS handle/RAM exhaustion; calibrate WaitMsBeforeAsync: 20000)
+# Batched consolidation unit suites (<1s each; batched to avoid linking lock overhead)
+cargo test --test test_consolidation_staging --test test_consolidation_concat --test test_consolidation_progress --test test_consolidation_remote
+cargo test --test test_shutdown_cleanup             # Shutdown & cleanup tests (WaitMsBeforeAsync: 20000)
+cargo test --test test_engine_events <filter>       # Heavy async integration tests (20-25s; WaitMsBeforeAsync: 20000)
+cargo test -j 2                                     # Full test suite verification gate (bounded jobs; WaitMsBeforeAsync: 20000)
 node scripts/test-npm-packages.js                   # Node packaging and CLI launcher suite
 
-# Git commit (triggers .githooks/pre-commit: fmt, check, clippy, fast unit tests; calibrate WaitMsBeforeAsync: 20000)
+# Git commit (runs .githooks/pre-commit: fmt, check, clippy, fast unit tests; WaitMsBeforeAsync: 20000)
 git commit -m "feat/fix: ..."
 
 # Build release binary
@@ -37,99 +37,71 @@ cargo build --release
 
 ## 2. Architectural Invariants
 
-### 2.1. Video Recording & FFmpeg (`src/recorder/`, `src/consolidation/`)
-- **Lossless Stream-Copy**: Always use `-c copy` with piped stdin and stderr. Never transcode or re-encode video (`-c:v libx264`).
-- **Clean EOF Termination**: Omit `-reconnect*` flags so natural broadcast end causes instant manifest EOF exit.
-- **P2P/Grid Bypass**: Decode base64 `cdn_url` in `p2pPath`/`p2pPathUrlEncoding` for direct CDN HLS streams.
-- **Binary Resolution**: Respect `CHZZK_LOAD_FFMPEG_BIN` override before falling back to `"ffmpeg"`.
-- **Numeric N+1 Boundary Safety**: In `SegmentWatcher`, seal chunk $N$ only after chunk $N+1$ exists (>0 bytes) or child process exits. Parse chunk numeric index (`chunk_%04d.ts`) rather than array length to prevent false boundary seals during retries.
-- **Post-Recording Consolidation & Concat Demuxer**: When consolidating recorded streams into final MP4 ([ADR 0010](docs/adr/0010-concat-demuxer-timestamp-normalization.md), `src/consolidation/video.rs`), use FFmpeg's concat demuxer (`-f concat -safe 0`) with `-avoid_negative_ts make_zero`. Never feed raw chunk byte streams into `pipe:0`. Produce seekable MP4 with `+faststart` across both local and remote modes ([ADR 0011](docs/adr/0011-locally-staged-seekable-consolidation.md)); remote mode streams chunks into memory via an ephemeral read-only HTTP loopback server (`rclone serve http`) while writing seekable output directly to a local staging target before cloud upload. Manage manifest scripts with RAII `ConcatScriptGuard`.
-- **Container Integrity & Chunk Offset Alignment**: Prior to promoting staged `live_stream.mp4.part` to `live_stream.mp4` or resuming staging uploads, validate container structural integrity (`validate_mp4_container_integrity`): enforce single `moov`, at least one `mdat`, exact file boundary coverage without trailing unindexed garbage, and confirm `stco`/`co64` sample chunk offsets point strictly within the `mdat` media payload.
-- **Consolidation Module Topology**:
-  - `src/consolidation.rs`: Top-level orchestrator and concurrent chunk purge loop; re-exports CLI argument model (`ConsolidateArgs`).
-  - `src/cli.rs`: CLI argument structures (`ConsolidateArgs`, `Cli`, `Commands`).
-  - `src/consolidation/progress.rs`: Consolidation Progress Telemetry, responsive ANSI bars, and 10 Hz dirty render loop.
-  - `src/consolidation/video.rs`: Concat demuxer remuxing and FFmpeg telemetry monitor.
-  - `src/consolidation/chat.rs`: Streaming deduplication and part-file staging.
-  - `src/consolidation/manifest.rs`: Chunk gap discovery and validation.
-  - `src/consolidation/staging.rs`: Staging workspace path resolution and pre-flight capacity verification.
-  - `src/consolidation/loopback.rs`: Ephemeral read-only HTTP loopback server for remote remuxing.
+### 2.1. Video Recording & Remuxing
+- **Lossless Stream Copy**: Capture HLS streams directly with `-c copy` using piped stdin and stderr. Leave video uncompressed and un-transcoded.
+- **Clean EOF Termination**: Omit `-reconnect*` flags so natural broadcast conclusion causes immediate manifest EOF exit.
+- **Direct CDN Bypass**: Decode base64 `cdn_url` in `p2pPath`/`p2pPathUrlEncoding` for direct CDN HLS stream ingestion.
+- **Binary Override**: Respect `CHZZK_LOAD_FFMPEG_BIN` override before falling back to `"ffmpeg"` on `PATH`.
+- **Numeric Chunk Sealing**: In `SegmentWatcher`, seal chunk $N$ only when chunk $N+1$ exists (>0 bytes) or child process exits. Parse chunk numeric index (`chunk_%04d.ts`) rather than array length to prevent false boundary seals during retries.
+- **Concat Demuxer Consolidation**: Consolidate recorded streams into seekable MP4 (`+faststart`) via FFmpeg concat demuxer (`-f concat -safe 0`) with `-avoid_negative_ts make_zero`. In remote mode, stream chunks into memory via an ephemeral read-only HTTP loopback server (`rclone serve http`) while writing seekable output directly to local staging targets before cloud upload. Manage manifest scripts with RAII `ConcatScriptGuard`.
+- **Container Structural Integrity**: Prior to promoting staged `live_stream.mp4.part` or resuming staging uploads, validate container integrity (`validate_mp4_container_integrity`): enforce single `moov`, at least one `mdat`, exact file boundary coverage without trailing unindexed bytes, and verify `stco`/`co64` sample chunk offsets point strictly within the `mdat` payload.
 
-### 2.2. Live Chat Archiving (`src/chzzk/chat.rs`, `src/recorder/chat_writer.rs`)
-- **Flash-Friendly Batched I/O**: Serialize chat messages directly to in-memory `Vec<u8>` buffers in `ChatWriter`. Flush on dual triggers (500 messages or 64 KB) or periodic timer. Never flush or sync disk per message.
-- **Chunk Rotation**: Rotate chat chunks aligned with `chunk_duration_seconds` into `chat_%04d.jsonl`, send completed paths via channel to upload queue, and delete locally upon confirmed upload.
-- **WebSocket Protocol**: Connect to `wss://kr-ss{n}.chat.naver.com/chat`. Handle handshake (`cmd: 100`), auto-respond to ping (`cmd: 0` $\to$ pong `cmd: 10000`), send 20s heartbeat, and deserialize chat messages (`cmd: 93101`, `93102`).
+### 2.2. Live Chat Archiving
+- **Batched Memory I/O**: Serialize live chat messages directly to in-memory `Vec<u8>` buffers in `ChatWriter`. Flush on dual triggers (500 messages or 64 KB) or periodic timer ticks.
+- **Chunk Rotation**: Rotate chat chunks aligned with `chunk_duration_seconds` into `chat_%04d.jsonl`, enqueue completed paths to the upload queue, and unlink locally upon confirmed upload.
+- **WebSocket Protocol**: Connect to `wss://kr-ss{n}.chat.naver.com/chat`. Complete handshake (`cmd: 100`), reply to ping (`cmd: 0` $\to$ pong `cmd: 10000`), maintain 20s heartbeat, and deserialize messages (`cmd: 93101`, `93102`).
 
-### 2.3. Upload Pipeline & Disk Management (`src/uploader/`, `src/engine/`)
-- **Universal Cloud & Local Sync**: Use `RcloneBackend` for remote uploads (`rclone copyto ... --progress`). All file transfers—video segments, chat logs, and stream metadata snapshots (`live_metadata.jsonl`)—are unified under `UploadBackend::upload_file`. Eliminate `upload_text` and `rcat` streaming entirely. Respect `CHZZK_LOAD_RCLONE_BIN` override before `settings.rclone.rclone_bin` and `"rclone"` on `PATH`. If `remote_path` is empty (`""`), skip upload and retain files locally.
-- **Non-Blocking DLQ & Task Retention Policy**: Process uploads through a non-blocking primary queue with cross-channel concurrency (default: 3). Failed uploads divert immediately to a Dead-Letter Queue (DLQ) with exponential backoff (initial 2s, capped at 5m, infinite retries, capped at 20 tasks/channel in RAM) so subsequent chunks proceed without head-of-line blocking. Each `UploadTask` specifies an explicit `delete_on_success` retention policy: `true` for chunks, final stream teardown metadata, and orphaned reconciliation; `false` for intermediate live metadata snapshots. Under disk pressure, DLQ evicts oldest chunk pairs (`.ts` and `.jsonl`) while metadata tasks remain strictly immune from eviction.
-- **Strictly Bounded Disk Footprint**: Delete local video and chat chunks immediately upon confirmed upload (maintaining 1–2 video segments and at most 1 chat segment on disk per active stream).
-- **Strict Directory Emptiness & Quiescence**: Local file unlinking is driven exclusively by `UploadWorker` upon upload confirmation when `delete_on_success` is true, signaling `drain_notify`. `SessionCustodian` enforces strict directory emptiness (exactly 0 entries, without heuristic file-name sniffing) before purging session folders once all in-flight uploads and unlinks reach quiescence.
+### 2.3. Upload Pipeline & Disk Management
+- **Universal Cloud & Local Sync**: Use `RcloneBackend` for remote transfers (`rclone copyto ... --progress`). Unify all transfers (video segments, chat logs, `live_metadata.jsonl`) under `UploadBackend::upload_file`. Respect `CHZZK_LOAD_RCLONE_BIN` override before `settings.rclone.rclone_bin` and `"rclone"` on `PATH`. When `remote_path` is empty (`""`), retain files locally.
+- **Non-Blocking DLQ & Retention Policy**: Process uploads through a non-blocking queue with cross-channel concurrency (default: 3). Route failures immediately to a Dead-Letter Queue (DLQ) with exponential backoff (2s initial, 5m cap, infinite retries, 20 tasks/channel in RAM). Tasks carry explicit `delete_on_success` retention policies: `true` for chunks, stream teardown metadata, and crash reconciliation; `false` for intermediate live metadata snapshots. Under disk pressure, DLQ evicts oldest chunk pairs (`.ts` and `.jsonl`) while preserving metadata tasks.
+- **Strictly Bounded Footprint**: Purge local video and chat chunks immediately upon confirmed upload (maintaining 1–2 video segments and at most 1 chat segment on disk per active stream).
+- **Strict Directory Emptiness & Quiescence**: Drive local file deletion exclusively from `UploadWorker` upon upload confirmation when `delete_on_success` is true, signaling `drain_notify`. `SessionCustodian` enforces strict directory emptiness (exactly 0 entries) before purging session folders once all in-flight uploads and unlinks reach quiescence.
 - **Disk Circuit Breaker**: Periodically check free disk space against `min_free_disk_gb`. If breached, gracefully terminate FFmpeg (`"q\n"`), seal/upload final chunks, and block new sessions until disk space recovers.
-- **Crash Recovery & Reconciliation**: Detect orphaned chunks and `live_metadata.jsonl` (or legacy `livemetadata.jsonl`) on startup, validate contiguity, enqueue pending files into `upload_tx` (metadata with `delete_on_success: true`), and quarantine partial tail chunks.
-- **Graceful Shutdown Barrier**: Maintain strict exit order: (1) terminate FFmpeg gracefully, (2) seal lingering chunks (`is_stream_finished = true`), (3) await all session tasks, (4) drop `upload_tx`, (5) drain and await `UploadWorker`, and (6) purge empty local session directories. Never invoke folder cleanup before the upload worker finishes in-flight chunk deletions.
-- **Windows File Lock Resilience**: Bounded exponential backoff retries when removing files post-upload (`worker.rs`) or purging directories (`custodian.rs`) to absorb transient Windows sharing violations (32), access denied errors (5), and asynchronous unlink latency (145).
-- **Post-Recording Consolidation Pipeline**: For offline/post-stream consolidation ([ADR 0010](docs/adr/0010-concat-demuxer-timestamp-normalization.md), [ADR 0012](docs/adr/0012-canonical-consolidation-naming-and-upload-telemetry.md)), consolidate video via concat demuxer and merge chat logs into `live_chat.jsonl.part` using the two-stage atomic staging pattern to produce the canonical Live Artifact Triad (`live_stream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`). In remote consolidation ([ADR 0011](docs/adr/0011-locally-staged-seekable-consolidation.md)), stream chunks on demand via ephemeral HTTP loopback into a seekable local staging target (bounded to 1× disk footprint) before two-stage cloud upload; upon orchestrator-level success, purge source chunk files atomically via `Concurrent Chunk Purge`.
+- **Crash Recovery & Reconciliation**: Detect orphaned chunks and `live_metadata.jsonl` on startup, validate contiguity, enqueue pending files to `upload_tx` (metadata with `delete_on_success: true`), and quarantine partial tail chunks.
+- **Ordered Shutdown Barrier**: Follow strict teardown order: (1) terminate FFmpeg gracefully, (2) seal lingering chunks (`is_stream_finished = true`), (3) await all session tasks, (4) drop `upload_tx`, (5) drain and await `UploadWorker`, and (6) purge empty local session directories.
+- **Windows File Lock Resilience**: Apply bounded exponential backoff retries when removing files post-upload (`worker.rs`) or purging directories (`custodian.rs`) to absorb transient Windows sharing violations (32), access denied errors (5), and asynchronous unlink latency (145).
+- **Canonical Post-Recording Consolidation**: Merge video and chat into `.part` staging files using the two-stage atomic staging pattern to produce the canonical Live Artifact Triad (`live_stream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`). Upon orchestrator success, upload staged artifacts and purge source chunks via `Concurrent Chunk Purge`.
 
-### 2.4. Stream Polling & Orchestration (`src/engine/`)
-- **Module Topology**:
-  - `src/engine.rs`: Top-level `EngineOrchestrator` runtime coordinator and poll loop.
-  - `src/engine/recording.rs`: Per-stream `RecordingSession` subprocess and chunk lifecycle.
-  - `src/engine/session.rs`: Active recording session state, metadata history, and folder naming.
-  - `src/engine/registry.rs`: Atomic lifecycle state machine (`ChannelLifecycleRegistry`).
-  - `src/engine/custodian.rs`: Lifecycle coordinator for recording session directory tracking, safe quiescence-based purging, and unmanaged empty directory sweeps (`SessionCustodian`).
-  - `src/engine/reconciliation.rs`: Startup crash recovery and orphaned chunk reconciliation.
+### 2.4. Lifecycle Orchestration & Metadata
+- **Atomic State Transitions**: Coordinate state transitions across channel states (Idle, Recording, Cooldown, Restricted) exclusively through `ChannelLifecycleRegistry` under a short-lived synchronous mutex. Complete all async I/O outside registry locks.
 - **Anti-Race Cooldown**: Deduplicate CDN cache TTL (10–30s) using finished `live_id`s and post-recording cooldown.
-- **Atomic Lifecycle Transitions**: State transitions across channel states (Idle, Recording, Cooldown, Restricted) are mediated exclusively by `ChannelLifecycleRegistry` under a short-lived sync mutex; never perform async I/O while holding registry locks.
-- **Stream Metadata Tracking**: Dual-write state changes (title, category, tags, flags) to `live_metadata.jsonl` with monotonic `stream_offset_ms` and non-blockingly enqueue `UploadTask::metadata` snapshots to `upload_tx` (live updates with `delete_on_success: false`, stream teardown with `delete_on_success: true`). Exclude high-frequency telemetry (`concurrent_user_count`). Zero synchronous child process awaits in the orchestrator poll loop.
+- **Stream Metadata Tracking**: Dual-write state changes to `live_metadata.jsonl` with monotonic `stream_offset_ms` and enqueue non-blocking `UploadTask::metadata` snapshots to `upload_tx`. Exclude high-frequency viewer telemetry.
 
-### 2.5. TUI & Terminal Safety (`src/tui/`)
-- **Zero Terminal Pollution**: Never use `println!`, `eprintln!`, or unredirected subprocess outputs while TUI is active. Route all logs to `AppEvent::Log(...)`.
-- **Panic Recovery Hook**: Maintain a panic hook that restores terminal raw mode and leaves the alternate screen before invoking the default panic handler.
-- **Non-Blocking Telemetry**: Always use `try_send` for TUI telemetry and stats; never block WebSockets or recording loops.
-- **Headless Mode**: Auto-detect non-TTY environments or `--headless`/`--no-tui` flags to run safely as a background daemon.
+### 2.5. Terminal & Subprocess Safety
+- **Structured Terminal Event Logging**: Route all logging through `AppEvent::Log(...)`. Unredirected stdout/stderr writes are prohibited while the TUI is active.
+- **Panic Hook**: Maintain a panic hook restoring terminal raw mode and leaving the alternate screen before invoking the default panic handler.
+- **Non-Blocking Telemetry**: Telemetry sent to the TUI must use bounded channels with `try_send` or non-blocking forwarders; recording and WebSocket loops must never block on terminal rendering.
+- **Headless Daemon Detection**: Auto-detect non-TTY environments or `--headless`/`--no-tui` flags to run cleanly as a background daemon.
 
-### 2.6. Configuration & Testing Conventions
-- **TOML Configuration**: Adhere to `settings.toml` (`toml = "1.1"`). Directory format: `[{timestamp}] [{alias}] {streamer} - {title}` (omit `[{alias}]` if none). Sanitize `\/:*?"<>|` and control characters. Display channel alias consistently in TUI without flicker.
-- **Portable Path Resolution**: Resolve relative paths via `app_path::resolve_path(...)` (prioritizes CWD, falls back to executable directory, avoids `node_modules`).
-- **Resilient Test Ports & Paths**: Use dynamic ephemeral port binding (`127.0.0.1:0`), never hardcoded ports. All test filesystem mutations must operate strictly within `std::env::temp_dir()`.
+### 2.6. Subprocess Hermeticity & Fast Test Seams
+- **Tiered Test Discipline**: Run fast unit and smoke tests first (<1s; see Section 1) during development loops. Reserve heavy async integration suites (`test_engine_events`, taking 20–25s) and full `cargo test -j 2` for the final verification gate before commit.
+- **Subprocess Mock Isolation**: Orchestrator, lifecycle, chat, and uploader integration tests must use shared mock fixtures (`tests/common/mock_ffmpeg.rs`, `tests/common/mock_rclone.rs`), registering temporary build directories with `register_mock_temp_dir` in `tests/common/mod.rs`. Assert domain behavior through public APIs (`run_consolidation`, `upload_file`).
+- **State Machine Invariant Coverage**: Every channel state transition guard, restriction condition, and cancellation behavior in `ChannelLifecycleRegistry` must have a dedicated zero-overhead unit test in `tests/test_channel_lifecycle_registry.rs`.
+- **Ephemeral Isolation**: Tests must bind ephemeral ports (`127.0.0.1:0`) and isolate all filesystem activity within `std::env::temp_dir()`.
 
-### 2.7. Testing & Fast-Feedback Discipline
-- **Tiered Test Execution**: Always run targeted unit and smoke tests first (`cargo test --lib <filter>`, `test_cli_smoke`, `test_channel_lifecycle_registry`, `test_engine_orchestrator_registry`, `test_recorder_watcher`, `test_recorder_ffmpeg`, `test_tui_state`, `test_consolidation_staging`, `test_consolidation_concat`, `test_consolidation_progress`, `test_consolidation_remote`, running in <1s) during tight TDD loops. Use `cargo test --lib <filter>` to test internal module functions directly without incurring the overhead of compiling and linking all 30+ integration test binaries. Batch multiple `--test` flags within a single process invocation (`cargo test --test test_consolidation_staging --test test_consolidation_concat --test test_consolidation_progress --test test_consolidation_remote`) rather than chaining serial invocations to eliminate repeated Cargo lock and linking overhead. Run `cargo check --tests; cargo clippy --tests` immediately after drafting test files to catch mechanical style and unused import issues in <1 second before launching multi-second test suites. Reserve heavy async integration suites (`test_engine_events`, taking 20–25s) and full `cargo test` for the final verification gate before commit.
-- **Subprocess Hermeticity**: Orchestrator, lifecycle, chat, and uploader integration tests must never spawn real external binaries against dummy ports or endpoints. Use shared subprocess mock fixtures (`tests/common/mock_ffmpeg.rs` via `get_mock_ffmpeg_bin()`, which automatically sets `CHZZK_LOAD_FFMPEG_BIN`, and `tests/common/mock_rclone.rs` via `get_mock_rclone_bin()`). When introducing mock binaries, register their temporary build directories with `register_mock_temp_dir` in `tests/common/mod.rs` rather than duplicating C-ABI `atexit` handlers. Real FFmpeg and rclone subprocesses are reserved exclusively for wrapper unit tests (`test_recorder_ffmpeg.rs`, `test_recorder_watcher.rs`). Integration tests must assert domain behaviors through public APIs (`run_consolidation`, `upload_file`), leaving mock CLI syntax tests to dedicated harness suites if needed.
-- **State Machine Invariant Coverage**: Every channel state transition guard, restriction condition, and cancellation behavior in `ChannelLifecycleRegistry` must have a dedicated zero-overhead unit test in `tests/test_channel_lifecycle_registry.rs`. Never rely exclusively on integration suites to catch lifecycle state regressions.
-- **Ephemeral Port & Directory Isolation**: Tests must never bind hardcoded network ports (use `127.0.0.1:0`) and must isolate all filesystem activity inside `std::env::temp_dir()`. Clean up directories upon test completion.
-- **Cross-Platform Shell Compatibility**: Write command snippets using semicolon statement separators `;` or separate lines rather than Bash-only `&&` operators to ensure compatibility with Windows PowerShell and POSIX shells.
-- **Pre-Commit Hook & Command Calibration**: The repository enforces pre-commit hooks via git `core.hooksPath = .githooks` (`cargo fmt`, `cargo check`, `cargo clippy`, and the 9 fast unit test suites). When running `git commit` or executing test suites / chained cargo commands (`test_engine_events`, `test_shutdown_cleanup`, `cargo test -j 2`, `cargo check ...; cargo clippy ...`) via `run_command`, calibrate with `WaitMsBeforeAsync: 20000` to prevent premature backgrounding near the default 10,000ms threshold. Slower suites run only during `cargo test -j 2` as the full verification gate. To prevent OS handle and memory exhaustion (`Insufficient system resources`) when linking 30+ integration test binaries, Cargo jobs are bounded via `.cargo/config.toml` (`[build] jobs = 4`) and manual `-j 2` invocations.
-
-### 2.8. Tool Economy & Async Execution
-- **Reactive Yielding**: Stop calling tools and yield the turn immediately after launching background commands (`run_command`) or subagents (`invoke_subagent`), or when a command exceeds its `WaitMsBeforeAsync` threshold and transitions into the background (`task-XXX`). Rely exclusively on reactive environment wakeup messages on task exit or subagent reply. Never poll or loop over `manage_task(Action='status')` or `manage_subagents(Action='list')`, and never invoke `schedule` timers or shell sleep commands on active background task IDs (`task-XXX`) since the system automatically notifies and wakes upon task completion.
-- **Unique Anchor Targeting**: In `edit_file`, always anchor `Target` blocks with enclosing function signatures, unique comments, or outer scope tokens to prevent multi-site replacement collisions when editing common statements or assertions.
-- **Native Tools over Shell Utilities**: Prioritize native agent tools (e.g., `view_file`) for file inspection. Use `git grep -n <query>` via `run_command` for repository-wide audits when searching for symbols or strings across multiple files. Avoid ad-hoc shell navigation commands (`cat`, `ls`).
-- **Scratch Space for Prototyping**: Do not run brittle, multi-line PowerShell scripts inside a single `run_command` string. Instead, create temporary scripts inside the artifact scratch space (`<appDataDir>\brain\<conversation-id>/scratch/`) using `write_to_file`, then execute them.
-- **Live Network Probes**: When inspecting live endpoints via shell commands, always invoke `curl.exe` (not `curl`), provide a browser User-Agent (`-A "Mozilla/5.0 ..."`), and set a hard timeout (`--max-time 10`) to prevent background tasks from hanging indefinitely on dropped connections.
-- **Conditional Instructions**: Always read conditional documents (like `GLOSSARY.md` or ADRs) when a skill explicitly instructs you to check them.
+### 2.7. Windows Execution & Async Guardrails
+- **Shell Compatibility**: Write command snippets using semicolon statement separators `;` or separate lines to ensure compatibility with Windows PowerShell and POSIX shells.
+- **Async Execution Calibration**: When executing test suites, chained cargo commands, or git pre-commit hooks via `run_command`, calibrate with `WaitMsBeforeAsync: 20000` to prevent premature backgrounding. Stop calling tools and yield the turn immediately after launching background commands or when a command transitions to a task ID.
+- **Network Probes**: When inspecting live endpoints via shell commands, invoke `curl.exe` with a browser User-Agent (`-A "Mozilla/5.0 ..."`) and a hard timeout (`--max-time 10`).
 
 ---
 
-## Agent skills
+## 3. Context Pointers
 
-### Rust tasks
+### Rust Tasks
+Writing, refactoring, or optimizing Rust code, managing Cargo dependencies, or resolving async/lifetime invariants: see [rust-pro](file:///.agents/skills/rust-pro/SKILL.md).
 
-Proactively use the `rust-pro` skill whenever handling Rust-related tasks. See `.agents/skills/rust-pro/SKILL.md`.
+### Coding Standards
+Reviewing pull requests or checking test seams, lifecycle rules, ANSI budgets, or Windows filesystem safety: see [CODING_STANDARDS.md](file:///CODING_STANDARDS.md).
 
-### Issue tracker
+### Domain Glossary
+Naming domain models, validating stream lifecycle terms, or discovering architectural concepts: see [GLOSSARY.md](file:///GLOSSARY.md).
 
-GitHub issues via `gh` CLI. See `docs/agents/issue-tracker.md`.
+### Domain Docs & ADRs
+Exploring codebase architecture, evaluating subsystem trade-offs, or surfacing ADR conflicts: see [domain.md](file:///docs/agents/domain.md).
 
-### Triage labels
+### Issue Tracker
+Creating, viewing, filtering, or resolving GitHub issues, child tickets, and wayfinding maps: see [issue-tracker.md](file:///docs/agents/issue-tracker.md).
 
-Canonical five-role vocabulary. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context (`GLOSSARY.md` + `docs/adr/`). See `docs/agents/domain.md`.
-
-### Coding standards
-
-Authoritative review-stage rules and code smell definitions. See `CODING_STANDARDS.md`.
+### Triage Labels
+Applying or mapping canonical issue triage roles (`needs-triage`, `ready-for-agent`, etc.): see [triage-labels.md](file:///docs/agents/triage-labels.md).

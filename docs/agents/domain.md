@@ -1,51 +1,25 @@
-# Domain Docs
+# Domain Documentation
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+Reference guide for consuming `chzzk-load` domain models and architectural decisions.
 
-## Before exploring, read these
+## Ground in the domain
 
-- **`GLOSSARY.md`** at the repo root, or
-- **`GLOSSARY-MAP.md`** at the repo root if it exists: it points at one `GLOSSARY.md` per context. Read each one relevant to the topic.
-- **`docs/adr/`**: read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+Before planning, refactoring, or naming components:
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
+1. **Consult `GLOSSARY.md`**: Ground all concepts in established repository terminology. Use the defined terms in struct names, module interfaces, test cases, and commit messages; reject synonyms listed under `_Avoid_`.
+2. **Review `docs/adr/`**: Read the ADRs governing the subsystem you touch (e.g., `0001` for lifecycle state, `0003` for upload DLQ, `0008` for custodian directory lifecycle, `0010`–`0012` for consolidation and naming, `0013` for VOD pipeline).
 
-## File structure
+## Domain boundaries
 
-Single-context repo (most repos):
+`chzzk-load` operates as a cohesive single-context architecture:
 
-```
-/
-├── GLOSSARY.md
-├── docs/adr/
-│   ├── 0001-event-sourced-orders.md
-│   └── 0002-postgres-for-write-model.md
-└── src/
-```
+- Root glossary: `GLOSSARY.md`
+- Architectural decisions: `docs/adr/0001-*.md` through `0013-*.md`
 
-Multi-context repo (presence of `GLOSSARY-MAP.md` at the root):
-
-```
-/
-├── GLOSSARY-MAP.md
-├── docs/adr/                          ← system-wide decisions
-└── src/
-    ├── ordering/
-    │   ├── GLOSSARY.md
-    │   └── docs/adr/                  ← context-specific decisions
-    └── billing/
-        ├── GLOSSARY.md
-        └── docs/adr/
-```
-
-## Use the glossary's vocabulary
-
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `GLOSSARY.md`. Don't drift to synonyms the glossary explicitly avoids.
-
-If the concept you need isn't in the glossary yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+If a concept is absent from `GLOSSARY.md`, note the gap for `/domain-modeling` rather than introducing unvetted synonyms.
 
 ## Flag ADR conflicts
 
-If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
+Surface any divergence from an existing ADR explicitly rather than overriding it silently:
 
-> _Contradicts ADR-0007 (event-sourced orders), but worth reopening because…_
+> _Contradicts ADR-0010 (Concat Demuxer Timestamp Normalization), but worth reopening because…_
