@@ -48,7 +48,7 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Multi-Track Process Helper Parameter Bundling**: Functions coordinating concurrent video, chat, and upload pipelines must bundle communication channels, cancel tokens, and flags into cohesive option or context structs to keep parameter counts within Clippy limits ($\le 7$).
   - *Code Smell (Too Many Arguments)*: Accumulating individual per-track sender channels (`video_tx`, `chat_tx`), tokens, and configuration flags as loose function parameters, requiring `#[allow(clippy::too_many_arguments)]`.
   - *Resolution*: Group multi-track communication handles and cancellation controls into dedicated data structures (such as `UploadProgressSenders` or execution options) passed by value or reference.
-- **Strict Container Integrity Verification**: Video container validation prior to promotion (`live_stream.mp4.part` $\to$ `live_stream.mp4`) or upload resume must verify full structural integrity (`validate_mp4_container_integrity`).
+- **Strict Container Integrity Verification**: Video container validation prior to promotion (`livestream.mp4.part` $\to$ `livestream.mp4`) or upload resume must verify full structural integrity (`validate_mp4_container_integrity`).
   - *Hard Violation*: Checking only for the presence of an atom type without verifying container tiling (`offset == file_len`), box cardinality (`moov_count == 1`, `mdat_count >= 1`), and chunk offset boundary alignment.
   - *Resolution*: Validate top-level box sequence, ensure zero trailing unindexed data, and scan `stbl` (`stco`/`co64`) to confirm sample offsets fall strictly within `mdat` media payload ranges.
 
@@ -73,7 +73,7 @@ This document is the authoritative standard for code review under the `/code-rev
 - **Contract Phase Canonicalization**: Upon completing the contract or purge phase of a schema refactoring, internal engine, recorder, and client modules must directly consume canonical type names (`StreamMetadataState`, `MetadataEvent`).
   - *Code Smell (Middle Man / Speculative Generality)*: Retaining transitional version aliases (`*V2`, `*Old`) across internal callers after legacy models have been purged.
   - *Resolution*: Migrate internal imports and usages directly to canonical types; preserve aliases only when required for external library consumers.
-- **Canonical Artifact Path Construction**: Production runtime and validation pipelines must directly target canonical file paths (`live_stream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`).
+- **Canonical Artifact Path Construction**: Production runtime and validation pipelines must directly target canonical file paths (`livestream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`).
   - *Hard Violation*: Adding conditional runtime fallback branches (e.g. `if canonical.exists() ... else if legacy.exists() ...`) or speculative dual cleanup calls in production validation or upload loops to accommodate legacy artifacts.
   - *Resolution*: Directly construct and require canonical artifact paths in production pipelines; ensure production code fails strictly and visibly if required inputs or artifacts are absent.
 - **Explicit Deserialization Aliasing for Acronyms**: When deserializing third-party JSON schemas with uppercase acronyms (e.g. `baseURL`, `mediaId`, `videoId`, `hlsUrl`), declare explicit Serde aliases for both camelCase and uppercase acronym forms.

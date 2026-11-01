@@ -61,7 +61,7 @@ The batch post-processing task that losslessly merges fragmented video chunks an
 _Avoid_: Cloud merge, remote stitch, post-processing script, legacy streaming pipeline
 
 **Staged Local Consolidation Target**:
-The temporary local files (`live_stream.mp4.part`, `live_chat.jsonl.part`) where normalized seekable media is assembled within a bounded disk footprint prior to upload.
+The temporary local files (`livestream.mp4.part`, `live_chat.jsonl.part`) where normalized seekable media is assembled within a bounded disk footprint prior to upload.
 _Avoid_: Temp file, intermediate cache, scratch chunk
 
 **Timestamp Normalization**:
@@ -69,7 +69,7 @@ The batch timeline reconciliation process in Post-Recording Consolidation that r
 _Avoid_: Timestamp reset, clock sync, re-mux timing, timeline patch
 
 **Staged Remote Part**:
-Temporary upload targets (`live_stream.mp4.part`, `live_chat.jsonl.part`) holding in-flight network consolidation streams until full verification, preventing corrupt partial files upon failure.
+Temporary upload targets (`livestream.mp4.part`, `live_chat.jsonl.part`) holding in-flight network consolidation streams until full verification, preventing corrupt partial files upon failure.
 _Avoid_: Temp file, incomplete download, partial upload
 
 **Sliding-Window Chat Deduplication**:
@@ -105,7 +105,7 @@ The secondary ingestion strategy for VODs lacking progressive streams, downloadi
 _Avoid_: Chunk fallback, HLS rip, legacy segmenter
 
 **Live Artifact Triad**:
-The canonical three-file output specification (`live_stream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`) generated during live broadcast recording and post-recording consolidation.
+The canonical three-file output specification (`livestream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`) generated during live broadcast recording and post-recording consolidation.
 _Avoid_: Consolidation bundle, live dump, stream files
 
 **VOD Artifact Triad**:
