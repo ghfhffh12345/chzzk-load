@@ -48,9 +48,12 @@ pub use video::{
 
 /// Re-exported CLI argument model for consolidation operations. Defined in [`crate::cli::ConsolidateArgs`].
 pub use crate::cli::ConsolidateArgs;
-use crate::uploader::{parse_rclone_log_line, unlink_local_file_with_retry};
-use anyhow::Context;
-use tokio::io::AsyncBufReadExt;
+use crate::config::RcloneConfig;
+use crate::uploader::backend::{ProgressCallback, UploadBackend};
+use crate::uploader::rclone::RcloneBackend;
+use crate::uploader::unlink_local_file_with_retry;
+use futures_util::StreamExt;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -92,7 +95,7 @@ pub(crate) fn collect_purgeable_chunks(
 /// using the default deletion concurrency (16).
 ///
 /// Under `TargetLocation::Local`, unlinks files using bounded retry logic handling Windows locks.
-/// Under `TargetLocation::Remote`, deletes files using `rclone deletefile`.
+/// Under `TargetLocation::Remote`, delegates deletion to `UploadBackend::delete_files`.
 ///
 /// Invariant: `live_metadata.jsonl` and `livemetadata.jsonl` are NEVER deleted.
 pub async fn delete_original_chunks(
@@ -155,34 +158,26 @@ pub async fn delete_original_chunks_with_concurrency(
     .await
 }
 
-async fn delete_chunk_task(
-    target: TargetLocation,
-    name: String,
-    bin: Option<String>,
+/// Deletes original chunk files (.ts and .jsonl) using an explicit `UploadBackend`.
+pub async fn delete_original_chunks_with_backend(
+    target: &TargetLocation,
+    video_chunks: &[ConsolidationChunk],
+    chat_chunks: &[ConsolidationChunk],
+    backend: &dyn UploadBackend,
 ) -> anyhow::Result<()> {
-    match target {
-        TargetLocation::Local(ref dir) => {
-            let path = dir.join(&name);
-            match unlink_local_file_with_retry(&path).await {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(anyhow::Error::from(e)
-                    .context(format!("Failed to delete local chunk '{}'", path.display()))),
-            }
-        }
-        TargetLocation::Remote(ref remote_base) => {
-            let path = join_remote_path(remote_base, &name);
-            let bin_str = resolve_rclone_bin(bin.as_deref());
-            delete_remote_file_checked(&bin_str, &path).await
-        }
-    }
+    delete_original_chunks_with_backend_and_progress(
+        target,
+        video_chunks,
+        chat_chunks,
+        DEFAULT_DELETE_CONCURRENCY,
+        Some(backend),
+        None,
+    )
+    .await
 }
 
 /// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded worker limit,
 /// sending progress updates as chunks are successfully deleted.
-///
-/// Throttles task spawning so that only up to `concurrency` tasks are spawned in-flight
-/// in Tokio at any time (bounded worker queue pattern).
 pub async fn delete_original_chunks_with_progress(
     target: &TargetLocation,
     video_chunks: &[ConsolidationChunk],
@@ -191,53 +186,103 @@ pub async fn delete_original_chunks_with_progress(
     rclone_bin: Option<&str>,
     progress_sender: Option<tokio::sync::mpsc::UnboundedSender<PurgeProgressUpdate>>,
 ) -> anyhow::Result<()> {
+    let backend = rclone_bin.map(|bin| RcloneBackend::new(RcloneConfig::default()).with_bin(bin));
+    delete_original_chunks_with_backend_and_progress(
+        target,
+        video_chunks,
+        chat_chunks,
+        concurrency,
+        backend.as_ref().map(|b| b as &dyn UploadBackend),
+        progress_sender,
+    )
+    .await
+}
+
+/// Deletes original chunk files (.ts and .jsonl) concurrently under a bounded worker limit
+/// using an optional `UploadBackend`, sending progress updates as chunks are successfully deleted.
+pub async fn delete_original_chunks_with_backend_and_progress(
+    target: &TargetLocation,
+    video_chunks: &[ConsolidationChunk],
+    chat_chunks: &[ConsolidationChunk],
+    concurrency: usize,
+    backend: Option<&dyn UploadBackend>,
+    progress_sender: Option<tokio::sync::mpsc::UnboundedSender<PurgeProgressUpdate>>,
+) -> anyhow::Result<()> {
     let eligible = collect_purgeable_chunks(video_chunks, chat_chunks);
     if eligible.is_empty() {
         return Ok(());
     }
 
-    let concurrency_limit = concurrency.max(1);
-    let mut join_set = tokio::task::JoinSet::new();
-    let mut chunk_iter = eligible.into_iter();
-
-    // Seed worker queue with up to concurrency_limit in-flight tasks
-    for _ in 0..concurrency_limit {
-        if let Some(name) = chunk_iter.next() {
-            let target = target.clone();
-            let bin = rclone_bin.map(str::to_string);
-            join_set.spawn(delete_chunk_task(target, name, bin));
-        } else {
-            break;
+    // Fast-path for remote purge without live progress updates: batch delete via backend.delete_files
+    if let TargetLocation::Remote(remote_base) = target {
+        if progress_sender.is_none() {
+            let remote_paths: Vec<String> = eligible
+                .iter()
+                .map(|name| join_remote_path(remote_base, name))
+                .collect();
+            let res = if let Some(b) = backend {
+                b.delete_files(&remote_paths).await
+            } else {
+                let default_backend = RcloneBackend::new(RcloneConfig::default());
+                default_backend.delete_files(&remote_paths).await
+            };
+            if let Err(e) = res {
+                let msg = format!("{e:#}");
+                if msg.contains("Failed to delete ") && msg.contains(" remote file(s):") {
+                    let adapted =
+                        msg.replace(" remote file(s):", " chunk(s) during concurrent purge:");
+                    anyhow::bail!("{adapted}");
+                }
+                return Err(e);
+            }
+            return Ok(());
         }
     }
 
+    let concurrency_limit = concurrency.max(1);
     let mut chunks_deleted = 0usize;
     let mut errors = Vec::new();
 
-    // Consume completed tasks and replenish worker queue until all chunks processed
-    while let Some(res) = join_set.join_next().await {
+    let stream = futures_util::stream::iter(eligible.into_iter().map(|name| {
+        let target = target.clone();
+        async move {
+            match target {
+                TargetLocation::Local(ref dir) => {
+                    let path = dir.join(&name);
+                    match unlink_local_file_with_retry(&path).await {
+                        Ok(()) => Ok(()),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(e) => Err(anyhow::Error::from(e)
+                            .context(format!("Failed to delete local chunk '{}'", path.display()))),
+                    }
+                }
+                TargetLocation::Remote(ref remote_base) => {
+                    let path = join_remote_path(remote_base, &name);
+                    if let Some(b) = backend {
+                        b.delete_file(&path).await
+                    } else {
+                        let default_backend = RcloneBackend::new(RcloneConfig::default());
+                        default_backend.delete_file(&path).await
+                    }
+                }
+            }
+        }
+    }))
+    .buffer_unordered(concurrency_limit);
+
+    tokio::pin!(stream);
+
+    while let Some(res) = stream.next().await {
         match res {
-            Ok(Ok(())) => {
+            Ok(()) => {
                 chunks_deleted += 1;
                 if let Some(ref tx) = progress_sender {
                     let _ = tx.send(PurgeProgressUpdate { chunks_deleted });
                 }
             }
-            Ok(Err(err)) => {
+            Err(err) => {
                 errors.push(err);
             }
-            Err(join_err) => {
-                errors.push(anyhow::anyhow!(
-                    "Purge task panicked or aborted: {join_err}"
-                ));
-            }
-        }
-
-        // Replenish worker queue
-        if let Some(name) = chunk_iter.next() {
-            let target = target.clone();
-            let bin = rclone_bin.map(str::to_string);
-            join_set.spawn(delete_chunk_task(target, name, bin));
         }
     }
 
@@ -287,142 +332,8 @@ pub fn build_consolidate_upload_args(extra_args: &[String]) -> Vec<String> {
     args
 }
 
-/// Builds a `tokio::process::Command` configured for high-throughput `rclone copyto`.
-pub fn build_remote_staged_upload_command(
-    bin: &str,
-    local_path: &std::path::Path,
-    remote_dest: &str,
-    extra_args: &[String],
-) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.kill_on_drop(true);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.arg("copyto")
-        .arg(local_path)
-        .arg(remote_dest)
-        .arg("--use-json-log")
-        .arg("--stats")
-        .arg("250ms")
-        .arg("--stats-log-level")
-        .arg("NOTICE");
-    for arg in build_consolidate_upload_args(extra_args) {
-        cmd.arg(arg);
-    }
-    cmd
-}
-
-/// Uploads a local file to a remote destination via `rclone copyto` using default
-/// high-throughput transfer options and optional user-specified extra arguments,
-/// dispatching live progress updates through `progress_tx`.
-pub async fn upload_remote_staged_file_with_progress(
-    bin: &str,
-    local_path: &std::path::Path,
-    remote_dest: &str,
-    extra_args: &[String],
-    progress_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
-) -> anyhow::Result<()> {
-    let file_size = tokio::fs::metadata(local_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-
-    let mut cmd = build_remote_staged_upload_command(bin, local_path, remote_dest, extra_args);
-    let mut child = cmd.spawn().with_context(|| {
-        format!(
-            "Failed to execute '{bin} copyto {} {remote_dest}'",
-            local_path.display()
-        )
-    })?;
-
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("failed to capture stderr from rclone process"))?;
-
-    let mut reader = tokio::io::BufReader::new(stderr).lines();
-    let mut stderr_logs = Vec::new();
-    let mut last_speed = 0.0;
-
-    while let Ok(Some(line)) = reader.next_line().await {
-        if let Some(stats) = parse_rclone_log_line(&line) {
-            let total = if stats.total_bytes > 0 {
-                stats.total_bytes
-            } else {
-                file_size
-            };
-            let speed_mb_s = stats.speed / 1_048_576.0;
-            last_speed = speed_mb_s;
-            if let Some(ref tx) = progress_tx {
-                let _ = tx.send(UploadProgressUpdate {
-                    bytes_uploaded: stats.bytes,
-                    total_bytes: total,
-                    speed_mb_s,
-                });
-            }
-        } else {
-            if stderr_logs.len() >= 30 {
-                stderr_logs.remove(0);
-            }
-            stderr_logs.push(line);
-        }
-    }
-
-    let status = child
-        .wait()
-        .await
-        .with_context(|| "failed to wait for rclone copyto process")?;
-
-    if status.success() {
-        if let Some(ref tx) = progress_tx {
-            let _ = tx.send(UploadProgressUpdate {
-                bytes_uploaded: file_size,
-                total_bytes: file_size,
-                speed_mb_s: last_speed,
-            });
-        }
-        Ok(())
-    } else {
-        let err_msg = stderr_logs.join("\n");
-        let trimmed = err_msg.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!(
-                "rclone copyto for '{}' failed with status {status}",
-                local_path.display()
-            );
-        } else {
-            anyhow::bail!(
-                "rclone copyto for '{}' failed with status {status}: {trimmed}",
-                local_path.display()
-            );
-        }
-    }
-}
-
-/// Uploads a local file to a remote destination via `rclone copyto` using default
-/// high-throughput transfer options and optional user-specified extra arguments.
-pub async fn upload_remote_staged_file_with_args(
-    bin: &str,
-    local_path: &std::path::Path,
-    remote_dest: &str,
-    extra_args: &[String],
-) -> anyhow::Result<()> {
-    upload_remote_staged_file_with_progress(bin, local_path, remote_dest, extra_args, None).await
-}
-
-/// Uploads a local file to a remote destination via `rclone copyto` using default
-/// high-throughput transfer options.
-pub async fn upload_remote_staged_file(
-    bin: &str,
-    local_path: &std::path::Path,
-    remote_dest: &str,
-) -> anyhow::Result<()> {
-    upload_remote_staged_file_with_args(bin, local_path, remote_dest, &[]).await
-}
-
 /// Concurrently uploads staged media files (`livestream.mp4` and `live_chat.jsonl`) to remote destinations
-/// (`remote_base/livestream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `rclone copyto`,
+/// (`remote_base/livestream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `UploadBackend`,
 /// dispatching live progress telemetry to optional senders.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
@@ -431,16 +342,15 @@ pub async fn upload_remote_staged_file(
 /// Listens to cooperative cancellation via `cancel_token`: if cancelled, active upload
 /// processes are immediately terminated.
 ///
-/// On upload failure or cancellation, remote `.part` files are deleted via `rclone deletefile`
+/// On upload failure or cancellation, remote `.part` files are deleted via `backend.delete_file`
 /// while finalized local staging files are strictly preserved.
 #[allow(clippy::too_many_arguments)]
 pub async fn upload_remote_staged_media_with_progress(
-    bin: &str,
+    backend: &dyn UploadBackend,
     remote_base: &str,
     staging_dir: &std::path::Path,
     has_video: bool,
     has_chat: bool,
-    extra_args: &[String],
     cancel_token: CancellationToken,
     video_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
     chat_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
@@ -455,14 +365,19 @@ pub async fn upload_remote_staged_media_with_progress(
     let video_upload_fut = async {
         if has_video {
             let local_mp4 = staging_dir.join("livestream.mp4");
-            upload_remote_staged_file_with_progress(
-                bin,
-                &local_mp4,
-                &remote_video_part,
-                extra_args,
-                video_tx,
-            )
-            .await
+            let video_cb: Option<ProgressCallback> = video_tx.map(|tx| {
+                Box::new(move |bytes, total, speed| {
+                    let _ = tx.send(UploadProgressUpdate {
+                        bytes_uploaded: bytes,
+                        total_bytes: total,
+                        speed_mb_s: speed,
+                    });
+                }) as ProgressCallback
+            });
+            backend
+                .upload_file_to_dest(&local_mp4, &remote_video_part, video_cb)
+                .await
+                .map(|_| ())
         } else {
             Ok(())
         }
@@ -471,14 +386,19 @@ pub async fn upload_remote_staged_media_with_progress(
     let chat_upload_fut = async {
         if has_chat {
             let local_jsonl = staging_dir.join("live_chat.jsonl");
-            upload_remote_staged_file_with_progress(
-                bin,
-                &local_jsonl,
-                &remote_chat_part,
-                extra_args,
-                chat_tx,
-            )
-            .await
+            let chat_cb: Option<ProgressCallback> = chat_tx.map(|tx| {
+                Box::new(move |bytes, total, speed| {
+                    let _ = tx.send(UploadProgressUpdate {
+                        bytes_uploaded: bytes,
+                        total_bytes: total,
+                        speed_mb_s: speed,
+                    });
+                }) as ProgressCallback
+            });
+            backend
+                .upload_file_to_dest(&local_jsonl, &remote_chat_part, chat_cb)
+                .await
+                .map(|_| ())
         } else {
             Ok(())
         }
@@ -496,12 +416,12 @@ pub async fn upload_remote_staged_media_with_progress(
     };
 
     if let Err(upload_err) = upload_res {
-        // Remote partial cleanup: delete any incomplete remote .part files via rclone deletefile
+        // Remote partial cleanup: delete any incomplete remote .part files via backend.delete_file
         if has_video {
-            delete_remote_file(bin, &remote_video_part).await;
+            let _ = backend.delete_file(&remote_video_part).await;
         }
         if has_chat {
-            delete_remote_file(bin, &remote_chat_part).await;
+            let _ = backend.delete_file(&remote_chat_part).await;
         }
         return Err(upload_err);
     }
@@ -510,7 +430,7 @@ pub async fn upload_remote_staged_media_with_progress(
 }
 
 /// Concurrently uploads staged media files (`livestream.mp4` and `live_chat.jsonl`) to remote destinations
-/// (`remote_base/livestream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `rclone copyto`.
+/// (`remote_base/livestream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `UploadBackend`.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
 /// is promptly aborted and killed (`kill_on_drop`).
@@ -518,24 +438,22 @@ pub async fn upload_remote_staged_media_with_progress(
 /// Listens to cooperative cancellation via `cancel_token`: if cancelled, active upload
 /// processes are immediately terminated.
 ///
-/// On upload failure or cancellation, remote `.part` files are deleted via `rclone deletefile`
+/// On upload failure or cancellation, remote `.part` files are deleted via `backend.delete_file`
 /// while finalized local staging files are strictly preserved.
 pub async fn upload_remote_staged_media(
-    bin: &str,
+    backend: &dyn UploadBackend,
     remote_base: &str,
     staging_dir: &std::path::Path,
     has_video: bool,
     has_chat: bool,
-    extra_args: &[String],
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     upload_remote_staged_media_with_progress(
-        bin,
+        backend,
         remote_base,
         staging_dir,
         has_video,
         has_chat,
-        extra_args,
         cancel_token,
         None,
         None,
@@ -604,12 +522,34 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
     coordinator: ConsolidationProgressCoordinator,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<ConsolidationSummary> {
+    run_consolidation_with_backend_and_cancel(args, coordinator, cancel_token, None).await
+}
+
+/// Runs the post-recording consolidation workflow with a custom progress coordinator,
+/// external cancellation token, and an optional injected `UploadBackend`.
+pub async fn run_consolidation_with_backend_and_cancel(
+    args: ConsolidateArgs,
+    coordinator: ConsolidationProgressCoordinator,
+    cancel_token: CancellationToken,
+    backend: Option<Arc<dyn UploadBackend>>,
+) -> anyhow::Result<ConsolidationSummary> {
     let settings = resolve_consolidation_settings(args.config.as_deref())?;
     let rclone_bin = resolve_rclone_bin_with_config(None, Some(&settings.rclone.rclone_bin));
 
     let target = TargetLocation::parse(&args.path);
     let manifest =
         discover_manifest_with_bin(&target, args.strict, args.overwrite, Some(&rclone_bin)).await?;
+
+    let upload_backend: Arc<dyn UploadBackend> = if manifest.target.is_remote() {
+        if let Some(injected) = backend {
+            injected
+        } else {
+            let rclone_config = settings.rclone.clone();
+            Arc::new(RcloneBackend::for_consolidation(rclone_config).with_bin(rclone_bin.clone()))
+        }
+    } else {
+        Arc::new(RcloneBackend::new(settings.rclone.clone()))
+    };
 
     println!(
         "[INFO] Discovered manifest for '{}': {} video chunk(s), {} chat chunk(s) (metadata: {})",
@@ -887,12 +827,11 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
         );
 
         let upload_res = upload_remote_staged_media_with_progress(
-            &rclone_bin,
+            upload_backend.as_ref(),
             remote_base,
             staging_dir,
             has_video,
             has_chat,
-            &settings.rclone.consolidate_extra_args,
             cancel_token.clone(),
             upload_session.video_sender(),
             upload_session.chat_sender(),
@@ -909,13 +848,13 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             return Err(upload_err);
         }
 
-        // 2. Atomically rename remote .part files via rclone moveto
+        // 2. Atomically rename remote .part files via backend.move_file
         let rename_res = async {
             if has_video {
-                finalize_staged_video(&manifest.target, Some(&rclone_bin)).await?;
+                finalize_staged_video(&manifest.target, Some(upload_backend.as_ref())).await?;
             }
             if has_chat {
-                finalize_staged_chat(&manifest.target, Some(&rclone_bin)).await?;
+                finalize_staged_chat(&manifest.target, Some(upload_backend.as_ref())).await?;
             }
             Ok::<(), anyhow::Error>(())
         }
@@ -925,25 +864,21 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             let _ = cleanup_staged_video_in(
                 &manifest.target,
                 args.temp_dir.as_deref(),
-                Some(&rclone_bin),
+                Some(upload_backend.as_ref()),
             )
             .await;
             let _ = cleanup_staged_chat_in(
                 &manifest.target,
                 args.temp_dir.as_deref(),
-                Some(&rclone_bin),
+                Some(upload_backend.as_ref()),
             )
             .await;
-            delete_remote_file(
-                &rclone_bin,
-                &join_remote_path(remote_base, "livestream.mp4"),
-            )
-            .await;
-            delete_remote_file(
-                &rclone_bin,
-                &join_remote_path(remote_base, "live_chat.jsonl"),
-            )
-            .await;
+            let _ = upload_backend
+                .delete_file(&join_remote_path(remote_base, "livestream.mp4"))
+                .await;
+            let _ = upload_backend
+                .delete_file(&join_remote_path(remote_base, "live_chat.jsonl"))
+                .await;
             eprintln!(
                 "[INFO] Cloud finalization failed, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload.",
                 staging_dir.display()
@@ -991,12 +926,18 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
         let mut purge_session = coordinator.start_purge(total_purge);
         let purge_sender = purge_session.purge_sender();
 
-        let res = delete_original_chunks_with_progress(
+        let purge_backend: Option<&dyn UploadBackend> = if manifest.target.is_remote() {
+            Some(upload_backend.as_ref())
+        } else {
+            None
+        };
+
+        let res = delete_original_chunks_with_backend_and_progress(
             &manifest.target,
             &manifest.video_chunks,
             &manifest.chat_chunks,
             args.delete_concurrency,
-            Some(&rclone_bin),
+            purge_backend,
             purge_sender,
         )
         .await;
@@ -1174,7 +1115,12 @@ mod tests {
         let local_path = std::path::Path::new("local/livestream.mp4");
         let remote_dest = "remote:bucket/livestream.mp4.part";
         let extra = vec!["--checkers".to_string(), "8".to_string()];
-        let cmd = build_remote_staged_upload_command("my_rclone", local_path, remote_dest, &extra);
+        let config = RcloneConfig {
+            consolidate_extra_args: extra,
+            ..Default::default()
+        };
+        let backend = RcloneBackend::for_consolidation(config).with_bin("my_rclone");
+        let cmd = backend.build_copy_command(local_path, remote_dest);
         let std_cmd = cmd.as_std();
         let args: Vec<String> = std_cmd
             .get_args()

@@ -2,9 +2,11 @@ pub use super::loopback::{
     DEFAULT_LOOPBACK_STARTUP_TIMEOUT, EphemeralLoopbackServer, parse_loopback_port,
 };
 pub use super::manifest::join_remote_path;
-use super::manifest::{ConsolidationChunk, TargetLocation, resolve_rclone_bin};
+use super::manifest::{ConsolidationChunk, TargetLocation};
 pub use crate::uploader::worker::rename_local_file_with_retry;
-use crate::uploader::{unlink_local_file_with_retry, unlink_local_file_with_retry_sync};
+use crate::uploader::{
+    UploadBackend, unlink_local_file_with_retry, unlink_local_file_with_retry_sync,
+};
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -401,10 +403,10 @@ pub fn build_remote_concat_ffmpeg_command(
 /// Atomically finalizes the staged `livestream.mp4.part` into `livestream.mp4`.
 ///
 /// In local mode: uses `tokio::fs::rename` with Windows file lock retries.
-/// In remote mode: executes `rclone moveto <staged> <final>`.
+/// In remote mode: delegates to `UploadBackend::move_file`.
 pub async fn finalize_staged_video(
     target: &TargetLocation,
-    rclone_bin: Option<&str>,
+    backend: Option<&dyn UploadBackend>,
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
@@ -425,28 +427,14 @@ pub async fn finalize_staged_video(
         TargetLocation::Remote(remote_base) => {
             let staged = join_remote_path(remote_base, "livestream.mp4.part");
             let finalized = join_remote_path(remote_base, "livestream.mp4");
-            let bin = resolve_rclone_bin(rclone_bin);
 
-            let mut cmd = Command::new(&bin);
-            cmd.kill_on_drop(true);
-            cmd.stdin(Stdio::null());
-            cmd.stdout(Stdio::null());
-            cmd.stderr(Stdio::piped());
-            cmd.arg("moveto").arg(&staged).arg(&finalized);
-
-            let output = cmd.output().await.with_context(|| {
-                format!("Failed to execute '{bin} moveto {staged} {finalized}'")
-            })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!(
-                    "rclone moveto failed with status {}: {}",
-                    output.status,
-                    stderr.trim()
-                );
+            if let Some(backend) = backend {
+                backend.move_file(&staged, &finalized).await
+            } else {
+                let default_backend =
+                    crate::uploader::RcloneBackend::new(crate::config::RcloneConfig::default());
+                default_backend.move_file(&staged, &finalized).await
             }
-            Ok(())
         }
     }
 }
@@ -454,20 +442,20 @@ pub async fn finalize_staged_video(
 /// Deletes the temporary staged `livestream.mp4.part` if present upon error or abort.
 ///
 /// In local mode: unlinks `livestream.mp4.part` (treating NotFound as success).
-/// In remote mode: unlinks local `livestream.mp4.part` and executes `rclone deletefile <staged>` on remote.
+/// In remote mode: unlinks local `livestream.mp4.part` and delegates remote deletion to `UploadBackend::delete_file`.
 /// Finalized `livestream.mp4` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
 pub async fn cleanup_staged_video(
     target: &TargetLocation,
-    rclone_bin: Option<&str>,
+    backend: Option<&dyn UploadBackend>,
 ) -> anyhow::Result<()> {
-    cleanup_staged_video_in(target, None::<&Path>, rclone_bin).await
+    cleanup_staged_video_in(target, None::<&Path>, backend).await
 }
 
 /// Deletes temporary staged video part files with an optional custom staging directory path.
 pub async fn cleanup_staged_video_in<P: AsRef<Path>>(
     target: &TargetLocation,
     custom_temp_dir: Option<P>,
-    rclone_bin: Option<&str>,
+    backend: Option<&dyn UploadBackend>,
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
@@ -483,8 +471,13 @@ pub async fn cleanup_staged_video_in<P: AsRef<Path>>(
             let _ = unlink_local_file_with_retry(&staging_dir.join("live_stream.mp4.part")).await;
 
             let staged = join_remote_path(remote_base, "livestream.mp4.part");
-            let bin = resolve_rclone_bin(rclone_bin);
-            super::chat::delete_remote_file(&bin, &staged).await;
+            if let Some(backend) = backend {
+                let _ = backend.delete_file(&staged).await;
+            } else {
+                let default_backend =
+                    crate::uploader::RcloneBackend::new(crate::config::RcloneConfig::default());
+                let _ = default_backend.delete_file(&staged).await;
+            }
             Ok(())
         }
     }

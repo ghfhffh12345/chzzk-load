@@ -90,6 +90,24 @@ impl RcloneBackend {
         }
     }
 
+    /// Creates a new `RcloneBackend` optimized for post-recording consolidation,
+    /// pre-configuring high-throughput transfer parameters and user-defined consolidation arguments.
+    pub fn for_consolidation(mut config: RcloneConfig) -> Self {
+        let mut extra = Vec::with_capacity(
+            crate::consolidation::HIGH_THROUGHPUT_UPLOAD_ARGS.len()
+                + config.extra_args.len()
+                + config.consolidate_extra_args.len(),
+        );
+        for arg in crate::consolidation::HIGH_THROUGHPUT_UPLOAD_ARGS {
+            extra.push(arg.to_string());
+        }
+        extra.extend(config.extra_args);
+        extra.extend(config.consolidate_extra_args);
+        config.extra_args = extra;
+        config.consolidate_extra_args = Vec::new();
+        Self::new(config)
+    }
+
     /// Sets an explicit rclone binary path for this backend instance.
     pub fn with_bin(mut self, bin: impl Into<String>) -> Self {
         self.custom_bin = Some(bin.into());

@@ -109,6 +109,8 @@ pub struct MockUploadBackend {
     pub uploads: Arc<Mutex<Vec<(PathBuf, String)>>>,
     pub files: Arc<Mutex<HashMap<String, u64>>>,
     pub should_fail: Arc<AtomicBool>,
+    pub fail_patterns: Arc<Mutex<Vec<String>>>,
+    pub hang_patterns: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockUploadBackend {
@@ -127,6 +129,25 @@ impl UploadBackend for MockUploadBackend {
         Box::pin(async move {
             if self.should_fail.load(Ordering::SeqCst) {
                 return Err(anyhow::anyhow!("simulated error"));
+            }
+
+            {
+                let patterns = self.fail_patterns.lock().await;
+                for pat in patterns.iter() {
+                    if remote_dest.contains(pat) || local_path.to_string_lossy().contains(pat) {
+                        return Err(anyhow::anyhow!("simulated error for pattern: {pat}"));
+                    }
+                }
+            }
+
+            {
+                let hangs = self.hang_patterns.lock().await;
+                let should_hang = hangs.iter().any(|pat| {
+                    remote_dest.contains(pat) || local_path.to_string_lossy().contains(pat)
+                });
+                if should_hang {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
             }
 
             let len = if local_path.exists() {

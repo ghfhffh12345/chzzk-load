@@ -648,7 +648,10 @@ async fn test_staged_video_atomic_finalization_remote() {
 
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
     let target = TargetLocation::Remote(format!("mockremfin:{remote_dir_str}"));
-    finalize_staged_video(&target, Some(mock_bin.to_str().unwrap()))
+    let backend =
+        chzzk_load::uploader::RcloneBackend::new(chzzk_load::config::RcloneConfig::default())
+            .with_bin(mock_bin.to_str().unwrap());
+    finalize_staged_video(&target, Some(&backend))
         .await
         .expect("Remote finalization should succeed");
 
@@ -677,7 +680,10 @@ async fn test_staged_video_cleanup_on_abort_remote() {
 
     let remote_dir_str = temp_dir.to_string_lossy().replace('\\', "/");
     let target = TargetLocation::Remote(format!("mockremcln:{remote_dir_str}"));
-    cleanup_staged_video(&target, Some(mock_bin.to_str().unwrap()))
+    let backend =
+        chzzk_load::uploader::RcloneBackend::new(chzzk_load::config::RcloneConfig::default())
+            .with_bin(mock_bin.to_str().unwrap());
+    cleanup_staged_video(&target, Some(&backend))
         .await
         .expect("Remote cleanup should succeed");
 

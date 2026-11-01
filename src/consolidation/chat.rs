@@ -9,7 +9,7 @@ use crate::chzzk::models_chat::RecordedChatMessage;
 use crate::consolidation::manifest::{
     ConsolidationChunk, TargetLocation, join_remote_path, resolve_rclone_bin,
 };
-use crate::uploader::{rename_local_file_with_retry, unlink_local_file_with_retry};
+use crate::uploader::{UploadBackend, rename_local_file_with_retry, unlink_local_file_with_retry};
 use tokio_util::sync::CancellationToken;
 
 use super::progress::ChatProgressUpdate;
@@ -211,10 +211,10 @@ impl ChatDeduplicator {
 /// Atomically finalizes the staged `live_chat.jsonl.part` into `live_chat.jsonl`.
 ///
 /// In local mode: unlinks any pre-existing destination and renames with Windows retry logic.
-/// In remote mode: executes `rclone moveto <staged> <final>`.
+/// In remote mode: delegates to `UploadBackend::move_file`.
 pub async fn finalize_staged_chat(
     target: &TargetLocation,
-    rclone_bin: Option<&str>,
+    backend: Option<&dyn UploadBackend>,
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
@@ -233,33 +233,20 @@ pub async fn finalize_staged_chat(
             Ok(())
         }
         TargetLocation::Remote(remote_base) => {
-            let bin = resolve_rclone_bin(rclone_bin);
             let remote_part_path = join_remote_path(remote_base, "live_chat.jsonl.part");
             let remote_final_path = join_remote_path(remote_base, "live_chat.jsonl");
 
-            let mut move_cmd = tokio::process::Command::new(&bin);
-            move_cmd.kill_on_drop(true);
-            move_cmd.stdin(std::process::Stdio::null());
-            move_cmd.stdout(std::process::Stdio::piped());
-            move_cmd.stderr(std::process::Stdio::piped());
-            move_cmd
-                .arg("moveto")
-                .arg(&remote_part_path)
-                .arg(&remote_final_path);
-
-            let move_output = move_cmd.output().await.with_context(|| {
-                format!("Failed to execute '{bin} moveto {remote_part_path} {remote_final_path}'")
-            })?;
-
-            if !move_output.status.success() {
-                let stderr = String::from_utf8_lossy(&move_output.stderr);
-                anyhow::bail!(
-                    "rclone moveto failed with status {}: {}",
-                    move_output.status,
-                    stderr.trim()
-                );
+            if let Some(backend) = backend {
+                backend
+                    .move_file(&remote_part_path, &remote_final_path)
+                    .await
+            } else {
+                let default_backend =
+                    crate::uploader::RcloneBackend::new(crate::config::RcloneConfig::default());
+                default_backend
+                    .move_file(&remote_part_path, &remote_final_path)
+                    .await
             }
-            Ok(())
         }
     }
 }
@@ -267,20 +254,20 @@ pub async fn finalize_staged_chat(
 /// Deletes the temporary staged `live_chat.jsonl.part` if present upon error or abort.
 ///
 /// In local mode: unlinks `live_chat.jsonl.part` with retry (treating NotFound as success).
-/// In remote mode: unlinks local staged `live_chat.jsonl.part` and executes `rclone deletefile <staged>` on remote.
+/// In remote mode: unlinks local staged `live_chat.jsonl.part` and delegates remote deletion to `UploadBackend::delete_file`.
 /// Finalized `live_chat.jsonl` is preserved to enable resilient upload resume (Ticket #72, ADR 0011).
 pub async fn cleanup_staged_chat(
     target: &TargetLocation,
-    rclone_bin: Option<&str>,
+    backend: Option<&dyn UploadBackend>,
 ) -> anyhow::Result<()> {
-    cleanup_staged_chat_in(target, None::<&Path>, rclone_bin).await
+    cleanup_staged_chat_in(target, None::<&Path>, backend).await
 }
 
 /// Deletes temporary staged chat part files with an optional custom staging directory path.
 pub async fn cleanup_staged_chat_in<P: AsRef<Path>>(
     target: &TargetLocation,
     custom_temp_dir: Option<P>,
-    rclone_bin: Option<&str>,
+    backend: Option<&dyn UploadBackend>,
 ) -> anyhow::Result<()> {
     match target {
         TargetLocation::Local(dir) => {
@@ -294,9 +281,14 @@ pub async fn cleanup_staged_chat_in<P: AsRef<Path>>(
             let staged_local_part = staging_dir.join("live_chat.jsonl.part");
             let _ = unlink_local_file_with_retry(&staged_local_part).await;
 
-            let bin = resolve_rclone_bin(rclone_bin);
             let remote_part_path = join_remote_path(remote_base, "live_chat.jsonl.part");
-            delete_remote_file(&bin, &remote_part_path).await;
+            if let Some(backend) = backend {
+                let _ = backend.delete_file(&remote_part_path).await;
+            } else {
+                let default_backend =
+                    crate::uploader::RcloneBackend::new(crate::config::RcloneConfig::default());
+                let _ = default_backend.delete_file(&remote_part_path).await;
+            }
             Ok(())
         }
     }
@@ -696,40 +688,18 @@ pub async fn consolidate_chat_remote_with_options(
     Ok(deduplicator.into_stats())
 }
 
-/// Safely deletes a remote file via `rclone deletefile`, returning `Ok(())` on success.
+/// Safely deletes a remote file via `UploadBackend::delete_file`, returning `Ok(())` on success.
 ///
 /// Exit code 4 in rclone denotes "directory or object not found", which is
 /// treated as success (identical to local `io::ErrorKind::NotFound`).
 /// Any other non-zero exit code or spawn failure is returned as an `Err`.
 pub async fn delete_remote_file_checked(bin: &str, remote_path: &str) -> anyhow::Result<()> {
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.kill_on_drop(true);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.arg("deletefile").arg(remote_path);
-
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| format!("Failed to execute rclone deletefile for '{remote_path}'"))?;
-
-    if !output.status.success() {
-        if output.status.code() == Some(4) {
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "rclone deletefile for '{}' returned status {}: {}",
-            remote_path,
-            output.status,
-            stderr.trim()
-        );
-    }
-    Ok(())
+    let backend =
+        crate::uploader::RcloneBackend::new(crate::config::RcloneConfig::default()).with_bin(bin);
+    backend.delete_file(remote_path).await
 }
 
-/// Helper function to safely delete a remote file via `rclone deletefile`.
+/// Helper function to safely delete a remote file via `UploadBackend::delete_file`.
 ///
 /// Exit code 4 in rclone denotes "directory or object not found", which is
 /// treated as a silent no-op (identical to local `io::ErrorKind::NotFound`).
