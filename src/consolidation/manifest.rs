@@ -200,7 +200,7 @@ pub fn build_manifest_from_entries(
         }
 
         let name_lower = entry.name.to_ascii_lowercase();
-        if name_lower == "live_stream.mp4" {
+        if name_lower == "livestream.mp4" {
             pre_existing_video = true;
         } else if name_lower == "live_chat.jsonl" {
             pre_existing_chat = true;
@@ -238,7 +238,7 @@ pub fn build_manifest_from_entries(
     // If present and !overwrite, returns an error.
     let mut conflicting_files = Vec::new();
     if !video_chunks.is_empty() && pre_existing_video {
-        conflicting_files.push("live_stream.mp4");
+        conflicting_files.push("livestream.mp4");
     }
     if !chat_chunks.is_empty() && pre_existing_chat {
         conflicting_files.push("live_chat.jsonl");

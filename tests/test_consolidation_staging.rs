@@ -341,13 +341,13 @@ async fn test_invalidate_staging_files() {
 async fn test_cleanup_staged_media_purges_parts_only() {
     let temp_dir = create_temp_test_dir("test_cleanup_staged_media");
 
-    let live_stream_mp4 = temp_dir.join("live_stream.mp4");
+    let livestream_mp4 = temp_dir.join("livestream.mp4");
     let live_chat_jsonl = temp_dir.join("live_chat.jsonl");
-    let video_part = temp_dir.join("live_stream.mp4.part");
+    let video_part = temp_dir.join("livestream.mp4.part");
     let chat_part = temp_dir.join("live_chat.jsonl.part");
     let keep_file = temp_dir.join("other_data.bin");
 
-    std::fs::write(&live_stream_mp4, b"final mp4").unwrap();
+    std::fs::write(&livestream_mp4, b"final mp4").unwrap();
     std::fs::write(&live_chat_jsonl, b"final chat").unwrap();
     std::fs::write(&video_part, b"partial video").unwrap();
     std::fs::write(&chat_part, b"partial chat").unwrap();
@@ -359,7 +359,7 @@ async fn test_cleanup_staged_media_purges_parts_only() {
     // .part files MUST be deleted
     assert!(
         !video_part.exists(),
-        "live_stream.mp4.part must be removed by cleanup_staged_media"
+        "livestream.mp4.part must be removed by cleanup_staged_media"
     );
     assert!(
         !chat_part.exists(),
@@ -368,8 +368,8 @@ async fn test_cleanup_staged_media_purges_parts_only() {
 
     // Final files and other files MUST remain untouched
     assert!(
-        live_stream_mp4.exists(),
-        "final live_stream.mp4 must NOT be removed by cleanup_staged_media"
+        livestream_mp4.exists(),
+        "final livestream.mp4 must NOT be removed by cleanup_staged_media"
     );
     assert!(
         live_chat_jsonl.exists(),
@@ -387,7 +387,7 @@ async fn test_cleanup_staged_media_purges_parts_only() {
 fn test_validate_staging_workspace_valid_and_invalid_scenarios() {
     let temp_dir = create_temp_test_dir("test_validate_workspace");
 
-    let mp4_path = temp_dir.join("live_stream.mp4");
+    let mp4_path = temp_dir.join("livestream.mp4");
     let chat_path = temp_dir.join("live_chat.jsonl");
 
     // 1. Both false -> error

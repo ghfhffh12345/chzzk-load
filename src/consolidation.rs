@@ -421,8 +421,8 @@ pub async fn upload_remote_staged_file(
     upload_remote_staged_file_with_args(bin, local_path, remote_dest, &[]).await
 }
 
-/// Concurrently uploads staged media files (`live_stream.mp4` and `live_chat.jsonl`) to remote destinations
-/// (`remote_base/live_stream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `rclone copyto`,
+/// Concurrently uploads staged media files (`livestream.mp4` and `live_chat.jsonl`) to remote destinations
+/// (`remote_base/livestream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `rclone copyto`,
 /// dispatching live progress telemetry to optional senders.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
@@ -449,12 +449,12 @@ pub async fn upload_remote_staged_media_with_progress(
         return Ok(());
     }
 
-    let remote_video_part = join_remote_path(remote_base, "live_stream.mp4.part");
+    let remote_video_part = join_remote_path(remote_base, "livestream.mp4.part");
     let remote_chat_part = join_remote_path(remote_base, "live_chat.jsonl.part");
 
     let video_upload_fut = async {
         if has_video {
-            let local_mp4 = staging_dir.join("live_stream.mp4");
+            let local_mp4 = staging_dir.join("livestream.mp4");
             upload_remote_staged_file_with_progress(
                 bin,
                 &local_mp4,
@@ -509,8 +509,8 @@ pub async fn upload_remote_staged_media_with_progress(
     Ok(())
 }
 
-/// Concurrently uploads staged media files (`live_stream.mp4` and `live_chat.jsonl`) to remote destinations
-/// (`remote_base/live_stream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `rclone copyto`.
+/// Concurrently uploads staged media files (`livestream.mp4` and `live_chat.jsonl`) to remote destinations
+/// (`remote_base/livestream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `rclone copyto`.
 ///
 /// Implements fail-fast sibling abort: if either upload fails, the sibling upload process
 /// is promptly aborted and killed (`kill_on_drop`).
@@ -688,7 +688,7 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             .expect("staging_dir must be resolved for remote resume");
 
         let resumed_video_result = if has_video {
-            let mp4_path = staging_dir.join("live_stream.mp4");
+            let mp4_path = staging_dir.join("livestream.mp4");
             let bytes_written = std::fs::metadata(&mp4_path).map(|m| m.len()).unwrap_or(0);
             if let Some(v_tx) = media_session.video_sender() {
                 let _ = v_tx.send(VideoProgressUpdate::ChunkFed {
@@ -863,7 +863,7 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
 
         // 1. Two-stage cloud upload: upload local files to remote .part destinations concurrently via rclone copyto
         let video_bytes = if has_video {
-            let mp4_path = staging_dir.join("live_stream.mp4");
+            let mp4_path = staging_dir.join("livestream.mp4");
             tokio::fs::metadata(mp4_path)
                 .await
                 .map(|m| m.len())
@@ -936,7 +936,7 @@ pub async fn run_consolidation_with_coordinator_and_cancel(
             .await;
             delete_remote_file(
                 &rclone_bin,
-                &join_remote_path(remote_base, "live_stream.mp4"),
+                &join_remote_path(remote_base, "livestream.mp4"),
             )
             .await;
             delete_remote_file(
@@ -1171,8 +1171,8 @@ mod tests {
 
     #[test]
     fn test_build_remote_staged_upload_command_structure() {
-        let local_path = std::path::Path::new("local/live_stream.mp4");
-        let remote_dest = "remote:bucket/live_stream.mp4.part";
+        let local_path = std::path::Path::new("local/livestream.mp4");
+        let remote_dest = "remote:bucket/livestream.mp4.part";
         let extra = vec!["--checkers".to_string(), "8".to_string()];
         let cmd = build_remote_staged_upload_command("my_rclone", local_path, remote_dest, &extra);
         let std_cmd = cmd.as_std();

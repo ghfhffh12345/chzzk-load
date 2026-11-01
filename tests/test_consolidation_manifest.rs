@@ -285,19 +285,19 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
             is_dir: false,
         },
         RawManifestEntry {
-            name: "live_stream.mp4".to_string(),
+            name: "livestream.mp4".to_string(),
             size: 5000,
             is_dir: false,
         },
     ];
 
-    // 1. Without overwrite -> error mentioning live_stream.mp4
+    // 1. Without overwrite -> error mentioning livestream.mp4
     let err = build_manifest_from_entries(target.clone(), entries.clone(), false, false)
-        .expect_err("Should error when pre-existing live_stream.mp4 exists without overwrite");
+        .expect_err("Should error when pre-existing livestream.mp4 exists without overwrite");
     let err_str = err.to_string();
     assert!(
-        err_str.contains("live_stream.mp4"),
-        "Error message must cite live_stream.mp4: {err_str}"
+        err_str.contains("livestream.mp4"),
+        "Error message must cite livestream.mp4: {err_str}"
     );
     assert!(err_str.contains("--overwrite"));
 
@@ -335,7 +335,7 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
     assert!(chat_manifest.pre_existing_chat);
     assert_eq!(chat_manifest.chat_chunks.len(), 1);
 
-    // 5. Pre-existing both live_stream.mp4 and live_chat.jsonl without overwrite
+    // 5. Pre-existing both livestream.mp4 and live_chat.jsonl without overwrite
     let both_entries = vec![
         RawManifestEntry {
             name: "chunk_0000.ts".to_string(),
@@ -348,7 +348,7 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
             is_dir: false,
         },
         RawManifestEntry {
-            name: "live_stream.mp4".to_string(),
+            name: "livestream.mp4".to_string(),
             size: 5000,
             is_dir: false,
         },
@@ -359,11 +359,11 @@ fn test_build_manifest_pre_existing_files_overwrite_logic() {
         },
     ];
     let err = build_manifest_from_entries(target.clone(), both_entries.clone(), false, false)
-        .expect_err("Should error when pre-existing live_stream.mp4 and live_chat.jsonl exist without overwrite");
+        .expect_err("Should error when pre-existing livestream.mp4 and live_chat.jsonl exist without overwrite");
     let err_str = err.to_string();
     assert!(
-        err_str.contains("live_stream.mp4, live_chat.jsonl"),
-        "Error message must cite both live_stream.mp4 and live_chat.jsonl: {err_str}"
+        err_str.contains("livestream.mp4, live_chat.jsonl"),
+        "Error message must cite both livestream.mp4 and live_chat.jsonl: {err_str}"
     );
     assert!(err_str.contains("--overwrite"));
 
@@ -522,7 +522,7 @@ async fn test_discover_local_manifest_pre_existing_conflicts() {
 
     let chunk0 = temp_dir.join("chunk_0000.ts");
     let chat0 = temp_dir.join("chat_0000.jsonl");
-    let video_out = temp_dir.join("live_stream.mp4");
+    let video_out = temp_dir.join("livestream.mp4");
     let chat_out = temp_dir.join("live_chat.jsonl");
     let meta = temp_dir.join("live_metadata.jsonl");
 
@@ -534,14 +534,14 @@ async fn test_discover_local_manifest_pre_existing_conflicts() {
 
     let target = TargetLocation::Local(temp_dir.clone());
 
-    // Without overwrite -> fails citing both live_stream.mp4 and live_chat.jsonl
+    // Without overwrite -> fails citing both livestream.mp4 and live_chat.jsonl
     let err = discover_manifest(&target, false, false)
         .await
         .expect_err("Should fail with conflict error");
     let err_msg = err.to_string();
     assert!(
-        err_msg.contains("live_stream.mp4, live_chat.jsonl"),
-        "Error should cite live_stream.mp4 and live_chat.jsonl: {err_msg}"
+        err_msg.contains("livestream.mp4, live_chat.jsonl"),
+        "Error should cite livestream.mp4 and live_chat.jsonl: {err_msg}"
     );
 
     // With overwrite -> succeeds with pre_existing flags true and has_metadata = true
@@ -569,7 +569,7 @@ async fn test_discover_remote_manifest_pre_existing_conflicts_and_metadata() {
 
     let chunk0 = temp_dir.join("chunk_0000.ts");
     let chat0 = temp_dir.join("chat_0000.jsonl");
-    let video_out = temp_dir.join("live_stream.mp4");
+    let video_out = temp_dir.join("livestream.mp4");
     let chat_out = temp_dir.join("live_chat.jsonl");
     let meta = temp_dir.join("live_metadata.jsonl");
 
@@ -581,14 +581,14 @@ async fn test_discover_remote_manifest_pre_existing_conflicts_and_metadata() {
 
     let remote_path = format!("remote:{}", temp_dir.to_string_lossy().replace('\\', "/"));
 
-    // 1. Without overwrite -> fails citing both live_stream.mp4 and live_chat.jsonl
+    // 1. Without overwrite -> fails citing both livestream.mp4 and live_chat.jsonl
     let err = discover_remote_manifest(&remote_path, false, false, Some(&mock_bin))
         .await
         .expect_err("Should fail on remote conflict when overwrite is false");
     let err_msg = err.to_string();
     assert!(
-        err_msg.contains("live_stream.mp4, live_chat.jsonl"),
-        "Remote error should cite live_stream.mp4 and live_chat.jsonl: {err_msg}"
+        err_msg.contains("livestream.mp4, live_chat.jsonl"),
+        "Remote error should cite livestream.mp4 and live_chat.jsonl: {err_msg}"
     );
 
     // 2. With overwrite -> succeeds with pre_existing flags true and has_metadata = true
@@ -721,8 +721,8 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
 
     // Output files exist
     assert!(
-        temp_dir.join("live_stream.mp4").exists(),
-        "live_stream.mp4 must exist"
+        temp_dir.join("livestream.mp4").exists(),
+        "livestream.mp4 must exist"
     );
     assert!(
         temp_dir.join("live_chat.jsonl").exists(),
@@ -819,7 +819,7 @@ async fn test_run_consolidation_single_media_video_only() {
     assert_eq!(summary.chat_chunks_count, 0);
     assert!(summary.video_result.is_some());
     assert!(summary.chat_stats.is_none());
-    assert!(temp_dir.join("live_stream.mp4").exists());
+    assert!(temp_dir.join("livestream.mp4").exists());
     assert!(!temp_dir.join("live_chat.jsonl").exists());
     assert!(!chunk0.exists());
     assert!(meta.exists());
@@ -859,7 +859,7 @@ async fn test_run_consolidation_single_media_chat_only() {
     assert_eq!(summary.chat_chunks_count, 1);
     assert!(summary.video_result.is_none());
     assert!(summary.chat_stats.is_some());
-    assert!(!temp_dir.join("live_stream.mp4").exists());
+    assert!(!temp_dir.join("livestream.mp4").exists());
     assert!(temp_dir.join("live_chat.jsonl").exists());
     assert!(!chat0.exists());
     assert!(meta.exists());

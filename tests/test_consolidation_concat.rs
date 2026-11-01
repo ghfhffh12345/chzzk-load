@@ -352,7 +352,7 @@ async fn test_concat_script_from_relative_path_contains_absolute_forward_slashes
 }
 
 #[tokio::test]
-async fn test_local_consolidation_produces_live_stream_mp4_and_live_chat_jsonl() {
+async fn test_local_consolidation_produces_livestream_mp4_and_live_chat_jsonl() {
     let _ = common::mock_ffmpeg::get_mock_ffmpeg_bin();
 
     let temp_dir = create_temp_test_dir("test_concat_local_artifacts");
@@ -384,12 +384,12 @@ async fn test_local_consolidation_produces_live_stream_mp4_and_live_chat_jsonl()
     assert_eq!(summary.chat_chunks_count, 1);
 
     // Verify canonical Live Artifact Triad filenames
-    let video_out = temp_dir.join("live_stream.mp4");
+    let video_out = temp_dir.join("livestream.mp4");
     let chat_out = temp_dir.join("live_chat.jsonl");
 
     assert!(
         video_out.exists(),
-        "live_stream.mp4 must exist in destination directory"
+        "livestream.mp4 must exist in destination directory"
     );
     assert!(
         chat_out.exists(),
@@ -398,8 +398,8 @@ async fn test_local_consolidation_produces_live_stream_mp4_and_live_chat_jsonl()
 
     // Staged .part files must not linger
     assert!(
-        !temp_dir.join("live_stream.mp4.part").exists(),
-        "live_stream.mp4.part must be promoted"
+        !temp_dir.join("livestream.mp4.part").exists(),
+        "livestream.mp4.part must be promoted"
     );
     assert!(
         !temp_dir.join("live_chat.jsonl.part").exists(),
@@ -408,8 +408,8 @@ async fn test_local_consolidation_produces_live_stream_mp4_and_live_chat_jsonl()
 
     // Legacy filenames must not be created
     assert!(
-        !temp_dir.join("livestream.mp4").exists(),
-        "legacy livestream.mp4 must NOT be created"
+        !temp_dir.join("live_stream.mp4").exists(),
+        "legacy live_stream.mp4 must NOT be created"
     );
     assert!(
         !temp_dir.join("livechat.jsonl").exists(),
@@ -434,7 +434,7 @@ async fn test_local_consolidation_overwrite_flag_replaces_existing_artifacts() {
     )
     .unwrap();
 
-    let video_out = temp_dir.join("live_stream.mp4");
+    let video_out = temp_dir.join("livestream.mp4");
     let chat_out = temp_dir.join("live_chat.jsonl");
 
     // Write pre-existing files
@@ -456,8 +456,8 @@ async fn test_local_consolidation_overwrite_flag_replaces_existing_artifacts() {
         .expect_err("Should error when pre-existing files exist without --overwrite");
     let err_str = err.to_string();
     assert!(
-        err_str.contains("live_stream.mp4") && err_str.contains("live_chat.jsonl"),
-        "Error must cite both live_stream.mp4 and live_chat.jsonl: {err_str}"
+        err_str.contains("livestream.mp4") && err_str.contains("live_chat.jsonl"),
+        "Error must cite both livestream.mp4 and live_chat.jsonl: {err_str}"
     );
 
     // 2. With overwrite -> must succeed and cleanly replace destination files
@@ -479,12 +479,12 @@ async fn test_local_consolidation_overwrite_flag_replaces_existing_artifacts() {
 
     assert!(
         video_out.exists(),
-        "live_stream.mp4 must exist after overwrite"
+        "livestream.mp4 must exist after overwrite"
     );
     let video_content = fs::read(&video_out).unwrap();
     assert_ne!(
         video_content, b"old-pre-existing-video",
-        "live_stream.mp4 must be replaced by new consolidated video"
+        "livestream.mp4 must be replaced by new consolidated video"
     );
 
     assert!(

@@ -469,9 +469,9 @@ pub fn probe_moov_atom(path: &Path) -> bool {
     validate_mp4_container_integrity(path).is_ok()
 }
 
-/// Validates the staging workspace media files (`live_stream.mp4` and `live_chat.jsonl`).
+/// Validates the staging workspace media files (`livestream.mp4` and `live_chat.jsonl`).
 ///
-/// If `has_video` is true, `live_stream.mp4` must exist, be non-empty, and pass full MP4 container integrity verification.
+/// If `has_video` is true, `livestream.mp4` must exist, be non-empty, and pass full MP4 container integrity verification.
 /// If `has_chat` is true, `live_chat.jsonl` must exist and be non-empty (>0 bytes).
 /// If neither video nor chat is requested, returns an error.
 pub fn validate_staging_workspace(
@@ -487,7 +487,7 @@ pub fn validate_staging_workspace(
     }
 
     if has_video {
-        let mp4_path = staging_dir.join("live_stream.mp4");
+        let mp4_path = staging_dir.join("livestream.mp4");
         if !mp4_path.exists() {
             anyhow::bail!(
                 "Staging workspace video file does not exist: '{}'",
@@ -519,16 +519,16 @@ pub fn validate_staging_workspace(
 /// Checks whether existing staging files in `staging_dir` satisfy all integrity criteria
 /// to resume cloud upload directly without re-executing FFmpeg or chat deduplication.
 ///
-/// Supports canonical snake-case identifiers (`live_stream.mp4`, `live_chat.jsonl`)
-/// and backwards-compatible legacy identifiers (`livestream.mp4`, `livechat.jsonl`).
+/// Supports canonical identifiers (`livestream.mp4`, `live_chat.jsonl`)
+/// and backwards-compatible legacy identifiers (`live_stream.mp4`, `livechat.jsonl`).
 pub fn check_staging_resume_readiness(staging_dir: &Path, has_video: bool, has_chat: bool) -> bool {
     if !has_video && !has_chat {
         return false;
     }
 
     if has_video {
-        let canonical_mp4 = staging_dir.join("live_stream.mp4");
-        let legacy_mp4 = staging_dir.join("livestream.mp4");
+        let canonical_mp4 = staging_dir.join("livestream.mp4");
+        let legacy_mp4 = staging_dir.join("live_stream.mp4");
         let valid = (canonical_mp4.exists() && probe_moov_atom(&canonical_mp4))
             || (legacy_mp4.exists() && probe_moov_atom(&legacy_mp4));
         if !valid {
@@ -549,13 +549,13 @@ pub fn check_staging_resume_readiness(staging_dir: &Path, has_video: bool, has_c
     true
 }
 
-/// Purges temporary staged media part files (`live_stream.mp4.part` and `live_chat.jsonl.part`)
+/// Purges temporary staged media part files (`livestream.mp4.part` and `live_chat.jsonl.part`)
 /// from `staging_dir` using retry-backed unlink operations to absorb Windows file locking latencies.
 pub async fn cleanup_staged_media(staging_dir: &Path) -> std::io::Result<()> {
     let part_files = [
+        "livestream.mp4.part",
         "live_stream.mp4.part",
         "live_chat.jsonl.part",
-        "livestream.mp4.part",
         "livechat.jsonl.part",
     ];
     for file in part_files {
