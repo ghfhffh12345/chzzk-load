@@ -1,31 +1,24 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::uploader::rclone::{RcloneBackend, format_destination};
+use crate::uploader::UploadBackend;
+use crate::uploader::rclone::format_destination;
 use crate::uploader::unlink_local_file_with_retry;
 
 /// Verifies remote path accessibility before beginning any long-running downloads.
-pub async fn validate_remote_connection(backend: &RcloneBackend) -> Result<()> {
-    if backend.config.remote_path.trim().is_empty() {
-        bail!("Cannot upload VOD: rclone remote_path is not configured (empty)");
-    }
-    if backend.config.skip_connection_check {
-        return Ok(());
-    }
-    backend.check_connection().await.with_context(|| {
-        format!(
-            "Pre-flight rclone remote connection validation check failed for '{}'",
-            backend.config.remote_path
-        )
-    })?;
+pub async fn validate_remote_connection(backend: &dyn UploadBackend) -> Result<()> {
+    backend
+        .check_connection()
+        .await
+        .context("Pre-flight remote storage connection validation check failed")?;
     Ok(())
 }
 
 /// Local file paths representing the canonical VOD Artifact Triad.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct VodArtifactTriad<'a> {
     pub video_path: &'a Path,
     pub chat_path: Option<&'a Path>,
@@ -34,7 +27,7 @@ pub struct VodArtifactTriad<'a> {
 
 /// Helper function to clean up lingering remote .part files upon upload or promotion failure.
 async fn cleanup_remote_parts(
-    backend: &RcloneBackend,
+    backend: &dyn UploadBackend,
     remote_video_part: &str,
     remote_chat_part: Option<&str>,
     remote_meta_part: &str,
@@ -47,22 +40,21 @@ async fn cleanup_remote_parts(
 }
 
 /// Orchestrates the two-stage remote staging upload of the completed VOD Artifact Triad:
-/// 1. Transmits local artifacts to remote `.part` files via `rclone copyto` bounded by `upload_concurrency`.
-///    Upon failure or cancellation, incomplete remote `.part` files are removed while local
-///    artifacts remain strictly preserved.
-/// 2. Atomically promotes remote `.part` files to final names via `rclone moveto`, rolling back
-///    any partially promoted files if promotion fails.
+/// 1. Transmits local artifacts to remote `.part` files via `UploadBackend::upload_file_to_dest`
+///    bounded by concurrent semaphore permits. Upon failure or cancellation, incomplete remote
+///    `.part` files are removed while local artifacts remain strictly preserved.
+/// 2. Atomically promotes remote `.part` files to final names via `UploadBackend::move_file`,
+///    rolling back any partially promoted files if promotion fails.
 /// 3. If `delete_after_upload` is true, purges local artifact files with lock retry resilience.
 ///    Otherwise, preserves local files intact.
 pub async fn upload_vod_artifacts(
-    backend: &RcloneBackend,
+    backend: &dyn UploadBackend,
+    remote_base: &str,
     folder_name: &str,
-    artifacts: VodArtifactTriad<'_>,
+    artifacts: &VodArtifactTriad<'_>,
     delete_after_upload: bool,
     cancel_token: CancellationToken,
 ) -> Result<()> {
-    let remote_base = &backend.config.remote_path;
-
     let remote_video_part = format_destination(remote_base, folder_name, "vod.mp4.part");
     let remote_video_final = format_destination(remote_base, folder_name, "vod.mp4");
 
@@ -76,9 +68,8 @@ pub async fn upload_vod_artifacts(
     let remote_meta_part = format_destination(remote_base, folder_name, "vod_metadata.jsonl.part");
     let remote_meta_final = format_destination(remote_base, folder_name, "vod_metadata.jsonl");
 
-    // Stage 1: Upload files to remote .part destinations respecting configured concurrency
-    let concurrency = backend.config.upload_concurrency.max(1);
-    let semaphore = Arc::new(Semaphore::new(concurrency));
+    // Stage 1: Upload files to remote .part destinations respecting bounded concurrency
+    let semaphore = Arc::new(Semaphore::new(3));
 
     let video_sem = Arc::clone(&semaphore);
     let video_fut = async {
@@ -142,7 +133,7 @@ pub async fn upload_vod_artifacts(
         return Err(upload_err);
     }
 
-    // Stage 2: Atomically promote remote .part files to final destinations via rclone moveto
+    // Stage 2: Atomically promote remote .part files to final destinations via backend.move_file
     // Video promotion
     if let Err(err) = backend
         .move_file(&remote_video_part, &remote_video_final)

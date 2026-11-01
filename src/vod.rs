@@ -20,6 +20,7 @@ use crate::chzzk::source::VodSource;
 pub use crate::cli::VodArgs;
 use crate::config::Settings;
 use crate::consolidation::staging::{remove_dir_all_with_retry, validate_mp4_container_integrity};
+use crate::uploader::UploadBackend;
 
 pub use aria2c::{
     build_aria2c_segment_args, download_progressive_mp4_with_aria2c, download_segments_with_aria2c,
@@ -72,15 +73,34 @@ pub struct VodArchivalSummary {
 }
 
 /// Optional execution configuration for VOD archival sessions.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct VodOptions {
     pub aria2c_bin: Option<String>,
     pub ffmpeg_bin: Option<String>,
     pub rclone_bin: Option<String>,
     pub rclone_config: Option<crate::config::RcloneConfig>,
+    pub backend: Option<Arc<dyn UploadBackend>>,
     pub temp_dir: Option<PathBuf>,
     pub chat_options: Option<VodChatPaginationOptions>,
     pub coordinator: Option<VodProgressCoordinator>,
+}
+
+impl std::fmt::Debug for VodOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VodOptions")
+            .field("aria2c_bin", &self.aria2c_bin)
+            .field("ffmpeg_bin", &self.ffmpeg_bin)
+            .field("rclone_bin", &self.rclone_bin)
+            .field("rclone_config", &self.rclone_config)
+            .field(
+                "backend",
+                &self.backend.as_ref().map(|_| "Arc<dyn UploadBackend>"),
+            )
+            .field("temp_dir", &self.temp_dir)
+            .field("chat_options", &self.chat_options)
+            .field("coordinator", &self.coordinator)
+            .finish()
+    }
 }
 
 /// Coordinates the end-to-end VOD ingestion pipeline:
@@ -128,22 +148,45 @@ pub async fn run_vod_archival_with_options(
 
     let ffmpeg_bin = resolve_ffmpeg_bin(options.ffmpeg_bin.as_deref());
 
-    // Resolve rclone backend and run pre-flight remote path validation check if --upload is set
-    let rclone_backend = if args.upload {
-        let rclone_config = options
-            .rclone_config
-            .clone()
-            .unwrap_or_else(|| settings.rclone.clone());
-        let rclone_bin = crate::consolidation::manifest::resolve_rclone_bin_with_config(
-            options.rclone_bin.as_deref(),
-            Some(&rclone_config.rclone_bin),
-        );
-        let backend =
-            crate::uploader::rclone::RcloneBackend::new(rclone_config).with_bin(rclone_bin);
-        validate_remote_connection(&backend).await?;
-        Some(backend)
+    // Resolve upload backend and run pre-flight remote path validation check if --upload is set
+    let (upload_backend, remote_base) = if args.upload {
+        let (backend, base): (Arc<dyn UploadBackend>, String) =
+            if let Some(injected) = options.backend.clone() {
+                let base = options
+                    .rclone_config
+                    .as_ref()
+                    .map(|c| c.remote_path.clone())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        if !settings.rclone.remote_path.trim().is_empty() {
+                            settings.rclone.remote_path.clone()
+                        } else {
+                            "remote:".to_string()
+                        }
+                    });
+                (injected, base)
+            } else {
+                let rclone_config = options
+                    .rclone_config
+                    .clone()
+                    .unwrap_or_else(|| settings.rclone.clone());
+                if rclone_config.remote_path.trim().is_empty() {
+                    bail!("Cannot upload VOD: rclone remote_path is not configured (empty)");
+                }
+                let rclone_bin = crate::consolidation::manifest::resolve_rclone_bin_with_config(
+                    options.rclone_bin.as_deref(),
+                    Some(&rclone_config.rclone_bin),
+                );
+                let base = rclone_config.remote_path.clone();
+                let backend = Arc::new(
+                    crate::uploader::rclone::RcloneBackend::new(rclone_config).with_bin(rclone_bin),
+                );
+                (backend, base)
+            };
+        validate_remote_connection(backend.as_ref()).await?;
+        (Some(backend), base)
     } else {
-        None
+        (None, String::new())
     };
 
     if cancel_token.is_cancelled() {
@@ -574,16 +617,17 @@ pub async fn run_vod_archival_with_options(
     let _ = remove_dir_all_with_retry(&staging_dir).await;
 
     // 14. Cloud synchronization if --upload requested
-    if let Some(ref backend) = rclone_backend {
+    if let Some(ref backend) = upload_backend {
         let artifacts = VodArtifactTriad {
             video_path: &finalized_video_path,
             chat_path: final_chat_path.as_deref(),
             metadata_path: &finalized_metadata_path,
         };
         upload_vod_artifacts(
-            backend,
+            backend.as_ref(),
+            &remote_base,
             &folder_name,
-            artifacts,
+            &artifacts,
             args.delete_after_upload,
             cancel_token.clone(),
         )
@@ -601,6 +645,6 @@ pub async fn run_vod_archival_with_options(
         metadata_path: finalized_metadata_path,
         segments_downloaded,
         chat_messages,
-        uploaded: rclone_backend.is_some(),
+        uploaded: upload_backend.is_some(),
     })
 }
