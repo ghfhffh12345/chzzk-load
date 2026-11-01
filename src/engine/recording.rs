@@ -429,6 +429,9 @@ impl RecordingSession {
             let mut watcher = SegmentWatcher::new(session_dir.clone());
             let mut restricted_abort = false;
 
+            let mut seal_interval = tokio::time::interval(Duration::from_secs(1));
+            seal_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
             loop {
                 tokio::select! {
                     event = ffmpeg_session.recv_event() => {
@@ -453,7 +456,7 @@ impl RecordingSession {
                             .await;
                         break;
                     }
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    _ = seal_interval.tick() => {
                         let min_disk = settings.general.min_free_disk_gb;
                         if min_disk > 0.0 {
                             if let Ok(space) = crate::disk::get_disk_space(&session_dir) {

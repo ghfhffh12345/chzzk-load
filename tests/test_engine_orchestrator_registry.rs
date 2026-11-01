@@ -1321,3 +1321,95 @@ async fn test_poll_channels_once_stream_closed_does_not_sweep_unmanaged_dirs() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_recording_session_video_chunks_sealed_during_frequent_ffmpeg_logs() {
+    use chzzk_load::engine::{
+        ActiveSessionState, ChannelLifecycleRegistry, RecordingSession, RecordingSessionParams,
+    };
+    use chzzk_load::uploader::MockUploadBackend;
+    use tokio_util::sync::CancellationToken;
+
+    let mock_bin = get_mock_ffmpeg_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_rs_freq_logs_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let (upload_tx, mut upload_rx) = mpsc::channel(10);
+    let (event_tx, _event_rx) = mpsc::channel::<AppEvent>(100);
+    let registry = ChannelLifecycleRegistry::new();
+    let cancel_token = CancellationToken::new();
+
+    let settings = Settings {
+        general: GeneralConfig {
+            recordings_dir: temp_dir.to_string_lossy().to_string(),
+            record_chat: false,
+            ..Default::default()
+        },
+        channels: vec![ChannelConfig::with_alias("chan_freq_test", "FreqStreamer")],
+        ..Default::default()
+    };
+
+    let chzzk = Arc::new(MockLiveStreamSource::new());
+    let backend = Arc::new(MockUploadBackend::new());
+
+    let info = LiveStreamInfo {
+        channel_id: "chan_freq_test".to_string(),
+        live_id: Some(999111),
+        streamer_name: "FreqStreamer".to_string(),
+        title: "Freq Title".to_string(),
+        hls_url: "http://127.0.0.1:0/frequent_logs.m3u8".to_string(),
+        chat_channel_id: None,
+        metadata: chzzk_load::chzzk::models_metadata::StreamMetadataState {
+            live_title: "Freq Title".to_string(),
+            live_id: Some(999111),
+            ..Default::default()
+        },
+    };
+
+    let params = RecordingSessionParams {
+        channel_id: "chan_freq_test".to_string(),
+        info,
+        upload_tx,
+        settings,
+        backend: Some(backend),
+        chzzk,
+        event_tx,
+        registry: registry.clone(),
+        cancel_token: cancel_token.clone(),
+        ffmpeg_bin: Some(mock_bin.to_string_lossy().to_string()),
+        custodian: Arc::new(SessionCustodian::without_events()),
+    };
+
+    let session_state = ActiveSessionState::new(
+        "2026-10-09_120000".to_string(),
+        "FreqStreamer".to_string(),
+        None,
+        chzzk_load::chzzk::models_metadata::StreamMetadataState::default(),
+    );
+    registry.start_recording("chan_freq_test", session_state, cancel_token.child_token());
+
+    let handle = RecordingSession::spawn(params);
+
+    // Initial metadata snapshot
+    let task_initial = tokio::time::timeout(std::time::Duration::from_secs(2), upload_rx.recv())
+        .await
+        .expect("initial metadata task timed out")
+        .expect("channel closed");
+    assert!(task_initial.is_metadata());
+
+    // Wait up to 2.5s for video chunk 0 to be sealed and enqueued
+    let task_video = tokio::time::timeout(std::time::Duration::from_millis(2500), upload_rx.recv())
+        .await
+        .expect("video chunk task timed out - seal_and_enqueue was starved by frequent ffmpeg stderr logs")
+        .expect("channel closed");
+
+    assert_eq!(task_video.channel_id, "chan_freq_test");
+    assert_eq!(task_video.chunk_name, "chunk_0000.ts");
+    assert!(!task_video.is_metadata());
+    assert!(task_video.delete_on_success);
+
+    cancel_token.cancel();
+    let _ = handle.await;
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

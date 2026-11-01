@@ -39,6 +39,7 @@ fn main() {
     let is_hang = args.iter().any(|a| a.contains("hang"));
     let is_key_error = args.iter().any(|a| a.contains("key_error"));
     let is_logs_and_exit = args.iter().any(|a| a.contains("logs_and_exit"));
+    let is_frequent_logs = args.iter().any(|a| a.contains("frequent_logs"));
     let is_mock_fail = args.iter().any(|a| a.contains("mock_fail") || a.contains("video_error"));
     let mut has_corrupt_input = false;
     if let Some(i_pos) = args.iter().position(|a| a == "-i") {
@@ -86,6 +87,41 @@ fn main() {
         let mut handle = stderr.lock();
         let _ = writeln!(handle, "frame=  100 fps=30 q=-1.0 size=    1024kB");
         let _ = handle.flush();
+        std::process::exit(0);
+    } else if is_frequent_logs {
+        if let Some(pattern) = args.last() {
+            let chunk0 = pattern.replace("%04d", "0000");
+            let _ = std::fs::write(&chunk0, b"mock chunk 0000");
+        }
+        let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_flag_thread = stop_flag.clone();
+        let pattern_clone = args.last().cloned().unwrap_or_default();
+        let log_thread = std::thread::spawn(move || {
+            let stderr = std::io::stderr();
+            let mut count = 0;
+            while !stop_flag_thread.load(std::sync::atomic::Ordering::SeqCst) {
+                count += 1;
+                if count == 2 {
+                    let chunk1 = pattern_clone.replace("%04d", "0001");
+                    let _ = std::fs::write(&chunk1, b"mock chunk 0001");
+                }
+                let mut handle = stderr.lock();
+                let _ = writeln!(handle, "[hls @ 0xmock] Found duplicated MOOV Atom. Skipped it {count}");
+                let _ = handle.flush();
+                drop(handle);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            if let Ok(l) = line {
+                if l.trim() == "q" {
+                    break;
+                }
+            }
+        }
+        stop_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = log_thread.join();
         std::process::exit(0);
     } else if is_mock_fail || has_corrupt_input {
         let stderr = std::io::stderr();
