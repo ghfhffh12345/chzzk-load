@@ -1,6 +1,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 
 use chzzk_load::chzzk::models::ChannelInfo;
@@ -12,8 +13,12 @@ use chzzk_load::chzzk::source::FakeVodSource;
 use chzzk_load::cli::VodArgs;
 use chzzk_load::config::RcloneConfig;
 use chzzk_load::consolidation::staging::{probe_moov_atom, validate_mp4_container_integrity};
+use chzzk_load::uploader::MockUploadBackend;
 use chzzk_load::vod::aria2c::download_progressive_mp4_with_aria2c;
-use chzzk_load::vod::{VodOptions, run_vod_archival, run_vod_archival_with_options};
+use chzzk_load::vod::{
+    VodArtifactTriad, VodOptions, run_vod_archival, run_vod_archival_with_options,
+    upload_vod_artifacts, validate_remote_connection,
+};
 use common::mock_aria2c::get_mock_aria2c_bin;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 use common::mock_rclone::get_mock_rclone_bin;
@@ -2390,6 +2395,357 @@ async fn test_vod_archival_resumes_without_purging_transiently_locked_segments()
     assert_eq!(summary.video_no, video_no);
     assert_eq!(summary.segments_downloaded, 3);
     assert!(summary.video_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_validate_remote_connection_healthy_and_failure() {
+    let mock = MockUploadBackend::new();
+    validate_remote_connection(&mock)
+        .await
+        .expect("Healthy mock connection check should succeed");
+
+    mock.should_fail.store(true, Ordering::SeqCst);
+    let err = validate_remote_connection(&mock)
+        .await
+        .expect_err("Connection check must fail when backend fails");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("Pre-flight remote storage connection validation check failed"),
+        "Error message should contain expected context: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_vod_artifacts_success_atomic_promotion() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_upload_success_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    let video_path = temp_dir.join("vod.mp4");
+    let chat_path = temp_dir.join("vod_chat.jsonl");
+    let metadata_path = temp_dir.join("vod_metadata.jsonl");
+
+    tokio::fs::write(&video_path, b"mock video payload")
+        .await
+        .unwrap();
+    tokio::fs::write(&chat_path, b"mock chat payload\n")
+        .await
+        .unwrap();
+    tokio::fs::write(&metadata_path, b"mock metadata payload\n")
+        .await
+        .unwrap();
+
+    let artifacts = VodArtifactTriad {
+        video_path: &video_path,
+        chat_path: Some(&chat_path),
+        metadata_path: &metadata_path,
+    };
+
+    let mock = MockUploadBackend::new();
+    let remote_base = "remote:backup";
+    let folder_name = "2026-10-01_TestStreamer";
+
+    upload_vod_artifacts(
+        &mock,
+        remote_base,
+        folder_name,
+        &artifacts,
+        false,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("VOD artifact upload and promotion should succeed");
+
+    let files = mock.files.lock().await;
+    let expected_video = format!("{remote_base}/{folder_name}/vod.mp4");
+    let expected_chat = format!("{remote_base}/{folder_name}/vod_chat.jsonl");
+    let expected_meta = format!("{remote_base}/{folder_name}/vod_metadata.jsonl");
+
+    assert!(
+        files.contains_key(&expected_video),
+        "Final vod.mp4 must exist in remote store"
+    );
+    assert!(
+        files.contains_key(&expected_chat),
+        "Final vod_chat.jsonl must exist in remote store"
+    );
+    assert!(
+        files.contains_key(&expected_meta),
+        "Final vod_metadata.jsonl must exist in remote store"
+    );
+
+    // Ensure no .part staging files remain
+    assert!(!files.contains_key(&format!("{remote_base}/{folder_name}/vod.mp4.part")));
+    assert!(!files.contains_key(&format!("{remote_base}/{folder_name}/vod_chat.jsonl.part")));
+    assert!(!files.contains_key(&format!(
+        "{remote_base}/{folder_name}/vod_metadata.jsonl.part"
+    )));
+
+    // When delete_after_upload is false, local files must be retained
+    assert!(video_path.exists());
+    assert!(chat_path.exists());
+    assert!(metadata_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_upload_vod_artifacts_retention_policy_purges_local_when_requested() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_upload_retention_{}",
+        rand::random::<u32>()
+    ));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    let video_path = temp_dir.join("vod.mp4");
+    let chat_path = temp_dir.join("vod_chat.jsonl");
+    let metadata_path = temp_dir.join("vod_metadata.jsonl");
+
+    tokio::fs::write(&video_path, b"mock video payload")
+        .await
+        .unwrap();
+    tokio::fs::write(&chat_path, b"mock chat payload\n")
+        .await
+        .unwrap();
+    tokio::fs::write(&metadata_path, b"mock metadata payload\n")
+        .await
+        .unwrap();
+
+    let artifacts = VodArtifactTriad {
+        video_path: &video_path,
+        chat_path: Some(&chat_path),
+        metadata_path: &metadata_path,
+    };
+
+    let mock = MockUploadBackend::new();
+    let remote_base = "remote:backup";
+    let folder_name = "2026-10-01_TestRetention";
+
+    upload_vod_artifacts(
+        &mock,
+        remote_base,
+        folder_name,
+        &artifacts,
+        true,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("Upload with retention purge should succeed");
+
+    let files = mock.files.lock().await;
+    assert!(files.contains_key(&format!("{remote_base}/{folder_name}/vod.mp4")));
+    assert!(files.contains_key(&format!("{remote_base}/{folder_name}/vod_chat.jsonl")));
+    assert!(files.contains_key(&format!("{remote_base}/{folder_name}/vod_metadata.jsonl")));
+
+    // Local files must be deleted when delete_after_upload is true
+    assert!(!video_path.exists(), "Local video file must be unlinked");
+    assert!(!chat_path.exists(), "Local chat file must be unlinked");
+    assert!(
+        !metadata_path.exists(),
+        "Local metadata file must be unlinked"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_upload_vod_artifacts_failure_cleans_up_remote_parts_and_preserves_local() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_upload_fail_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    let video_path = temp_dir.join("vod.mp4");
+    let chat_path = temp_dir.join("vod_chat.jsonl");
+    let metadata_path = temp_dir.join("vod_metadata.jsonl");
+
+    tokio::fs::write(&video_path, b"mock video payload")
+        .await
+        .unwrap();
+    tokio::fs::write(&chat_path, b"mock chat payload\n")
+        .await
+        .unwrap();
+    tokio::fs::write(&metadata_path, b"mock metadata payload\n")
+        .await
+        .unwrap();
+
+    let artifacts = VodArtifactTriad {
+        video_path: &video_path,
+        chat_path: Some(&chat_path),
+        metadata_path: &metadata_path,
+    };
+
+    let mock = MockUploadBackend::new();
+    mock.should_fail.store(true, Ordering::SeqCst);
+    let remote_base = "remote:backup";
+    let folder_name = "2026-10-01_TestFail";
+
+    let err = upload_vod_artifacts(
+        &mock,
+        remote_base,
+        folder_name,
+        &artifacts,
+        true,
+        CancellationToken::new(),
+    )
+    .await
+    .expect_err("Upload must fail when backend fails");
+
+    let msg = format!("{err:#}");
+    assert!(msg.contains("simulated error") || msg.contains("Failed to upload staged"));
+
+    // Remote store must have no promoted files or remaining part files
+    let files = mock.files.lock().await;
+    assert!(!files.contains_key(&format!("{remote_base}/{folder_name}/vod.mp4")));
+    assert!(!files.contains_key(&format!("{remote_base}/{folder_name}/vod.mp4.part")));
+
+    // Local files must be strictly preserved upon failure even if delete_after_upload was true
+    assert!(
+        video_path.exists(),
+        "Local video must be preserved upon upload error"
+    );
+    assert!(
+        chat_path.exists(),
+        "Local chat must be preserved upon upload error"
+    );
+    assert!(
+        metadata_path.exists(),
+        "Local metadata must be preserved upon upload error"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_upload_vod_artifacts_cancellation_cleans_up_remote_parts_and_preserves_local() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_upload_cancel_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    let video_path = temp_dir.join("vod.mp4");
+    let chat_path = temp_dir.join("vod_chat.jsonl");
+    let metadata_path = temp_dir.join("vod_metadata.jsonl");
+
+    tokio::fs::write(&video_path, b"mock video payload")
+        .await
+        .unwrap();
+    tokio::fs::write(&chat_path, b"mock chat payload\n")
+        .await
+        .unwrap();
+    tokio::fs::write(&metadata_path, b"mock metadata payload\n")
+        .await
+        .unwrap();
+
+    let artifacts = VodArtifactTriad {
+        video_path: &video_path,
+        chat_path: Some(&chat_path),
+        metadata_path: &metadata_path,
+    };
+
+    let mock = MockUploadBackend::new();
+    let remote_base = "remote:backup";
+    let folder_name = "2026-10-01_TestCancel";
+
+    let cancel_token = CancellationToken::new();
+    cancel_token.cancel();
+
+    let err = upload_vod_artifacts(
+        &mock,
+        remote_base,
+        folder_name,
+        &artifacts,
+        true,
+        cancel_token,
+    )
+    .await
+    .expect_err("Upload must fail when cancelled");
+
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("cancelled by cancellation token"),
+        "Error message should reflect cancellation: {msg}"
+    );
+
+    // Remote store must have no promoted files or remaining part files
+    let files = mock.files.lock().await;
+    assert!(!files.contains_key(&format!("{remote_base}/{folder_name}/vod.mp4")));
+    assert!(!files.contains_key(&format!("{remote_base}/{folder_name}/vod.mp4.part")));
+
+    // Local files must be preserved
+    assert!(video_path.exists());
+    assert!(chat_path.exists());
+    assert!(metadata_path.exists());
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_with_injected_mock_upload_backend() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_injected_mock_upload_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 9991122;
+    let video_id = "mock_injected_vid";
+    let in_key = "key_injected_mock";
+    let progressive_url = "https://cdn.example.com/vod/monolithic_1080p.mp4";
+    let source = Arc::new(create_fake_vod_source_with_progressive(
+        video_no,
+        video_id,
+        in_key,
+        progressive_url,
+    ));
+
+    let args = VodArgs {
+        target: format!("https://chzzk.naver.com/video/{video_no}"),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: true,
+        config: None,
+        upload: true,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+    };
+
+    let mock_backend = Arc::new(MockUploadBackend::new());
+    let options = VodOptions {
+        backend: Some(mock_backend.clone()),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect("run_vod_archival_with_options should succeed with MockUploadBackend");
+
+    assert!(summary.uploaded);
+    assert_eq!(summary.video_no, video_no);
+    assert!(summary.video_path.exists());
+    assert!(summary.metadata_path.exists());
+    if let Some(chat_path) = summary.chat_path {
+        assert!(chat_path.exists());
+    }
+
+    // Verify files were recorded in MockUploadBackend
+    let files = mock_backend.files.lock().await;
+    assert!(
+        files.keys().any(|k| k.ends_with("/vod.mp4")),
+        "Mock backend must contain uploaded vod.mp4: {files:?}"
+    );
+    assert!(
+        files.keys().any(|k| k.ends_with("/vod_metadata.jsonl")),
+        "Mock backend must contain uploaded vod_metadata.jsonl: {files:?}"
+    );
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
