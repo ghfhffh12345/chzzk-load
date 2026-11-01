@@ -26,8 +26,8 @@ pub use progress::{
 pub use chat::{
     ChatConsolidationOptions, ChatConsolidationStats, ChatDeduplicator, ChatMessageKey,
     DEFAULT_CHAT_DEDUP_WINDOW_MS, cleanup_staged_chat, cleanup_staged_chat_in, consolidate_chat,
-    consolidate_chat_local, consolidate_chat_remote, consolidate_chat_with_options,
-    delete_remote_file, delete_remote_file_checked, finalize_staged_chat,
+    consolidate_chat_with_options, delete_remote_file, delete_remote_file_checked,
+    finalize_staged_chat,
 };
 pub use manifest::{
     ChunkGap, ConsolidationChunk, ConsolidationManifest, RawManifestEntry, TargetLocation,
@@ -303,34 +303,7 @@ pub async fn delete_original_chunks_with_backend_and_progress(
     Ok(())
 }
 
-/// Default rclone flags applied to consolidation remote uploads for large-file throughput optimization.
-pub const HIGH_THROUGHPUT_UPLOAD_ARGS: &[&str] = &[
-    "--drive-chunk-size",
-    "128M",
-    "--s3-chunk-size",
-    "64M",
-    "--s3-upload-concurrency",
-    "4",
-    "--buffer-size",
-    "64M",
-    "--multi-thread-streams",
-    "4",
-    "--multi-thread-cutoff",
-    "250M",
-];
-
-/// Builds command arguments for high-throughput consolidation staged file upload,
-/// appending any user-defined `consolidate_extra_args`.
-pub fn build_consolidate_upload_args(extra_args: &[String]) -> Vec<String> {
-    let mut args: Vec<String> = HIGH_THROUGHPUT_UPLOAD_ARGS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    for extra in extra_args {
-        args.push(extra.clone());
-    }
-    args
-}
+pub use crate::uploader::rclone::{HIGH_THROUGHPUT_UPLOAD_ARGS, build_consolidate_upload_args};
 
 /// Concurrently uploads staged media files (`livestream.mp4` and `live_chat.jsonl`) to remote destinations
 /// (`remote_base/livestream.mp4.part` and `remote_base/live_chat.jsonl.part`) via `UploadBackend`,
@@ -689,10 +662,18 @@ pub async fn run_consolidation_with_backend_and_cancel(
             (Err(v_err), Ok(_)) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ =
-                    cleanup_staged_video_in(&manifest.target, args.temp_dir.as_deref(), None).await;
-                let _ =
-                    cleanup_staged_chat_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                let _ = cleanup_staged_video_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
+                let _ = cleanup_staged_chat_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
                 if let Some(ref dir) = staging_dir {
                     let _ = invalidate_staging_files(dir).await;
                 }
@@ -701,10 +682,18 @@ pub async fn run_consolidation_with_backend_and_cancel(
             (Ok(_), Err(c_err)) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ =
-                    cleanup_staged_video_in(&manifest.target, args.temp_dir.as_deref(), None).await;
-                let _ =
-                    cleanup_staged_chat_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                let _ = cleanup_staged_video_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
+                let _ = cleanup_staged_chat_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
                 if let Some(ref dir) = staging_dir {
                     let _ = invalidate_staging_files(dir).await;
                 }
@@ -713,10 +702,18 @@ pub async fn run_consolidation_with_backend_and_cancel(
             (Err(v_err), Err(c_err)) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ =
-                    cleanup_staged_video_in(&manifest.target, args.temp_dir.as_deref(), None).await;
-                let _ =
-                    cleanup_staged_chat_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                let _ = cleanup_staged_video_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
+                let _ = cleanup_staged_chat_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
                 if let Some(ref dir) = staging_dir {
                     let _ = invalidate_staging_files(dir).await;
                 }
@@ -751,8 +748,12 @@ pub async fn run_consolidation_with_backend_and_cancel(
             Err(err) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ =
-                    cleanup_staged_video_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                let _ = cleanup_staged_video_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
                 if let Some(ref dir) = staging_dir {
                     let _ = invalidate_staging_files(dir).await;
                 }
@@ -777,8 +778,12 @@ pub async fn run_consolidation_with_backend_and_cancel(
             Err(err) => {
                 cancel_token.cancel();
                 media_session.finish(false).await;
-                let _ =
-                    cleanup_staged_chat_in(&manifest.target, args.temp_dir.as_deref(), None).await;
+                let _ = cleanup_staged_chat_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
                 if let Some(ref dir) = staging_dir {
                     let _ = invalidate_staging_files(dir).await;
                 }

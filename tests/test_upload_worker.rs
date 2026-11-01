@@ -74,6 +74,49 @@ impl FlexibleMockBackend {
 }
 
 impl UploadBackend for FlexibleMockBackend {
+    fn upload_file_to_dest<'a>(
+        &'a self,
+        local_path: &'a Path,
+        remote_dest: &'a str,
+        on_progress: Option<ProgressCallback>,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(async move {
+            let file_name = local_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let attempt = {
+                let mut attempts = self.attempts.lock().unwrap();
+                let count = attempts.entry(file_name.clone()).or_insert(0);
+                *count += 1;
+                *count
+            };
+
+            if (self.fail_predicate)(local_path, attempt) {
+                anyhow::bail!("Simulated failure for {file_name} on attempt {attempt}");
+            }
+
+            let len = if local_path.exists() {
+                let bytes = std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
+                if let Some(cb) = on_progress {
+                    cb(bytes, bytes, 10.0);
+                }
+                bytes
+            } else {
+                1024
+            };
+
+            self.uploads
+                .lock()
+                .unwrap()
+                .push((local_path.to_path_buf(), remote_dest.to_string()));
+
+            Ok(len)
+        })
+    }
+
     fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,

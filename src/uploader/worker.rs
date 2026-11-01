@@ -899,6 +899,33 @@ mod tests {
     }
 
     impl UploadBackend for MockUploadBackend {
+        fn upload_file_to_dest<'a>(
+            &'a self,
+            local_path: &'a Path,
+            remote_dest: &'a str,
+            on_progress: Option<ProgressCallback>,
+        ) -> crate::uploader::backend::BoxFuture<'a, anyhow::Result<u64>> {
+            Box::pin(async move {
+                if self.should_fail.load(Ordering::SeqCst) {
+                    anyhow::bail!("Simulated upload failure");
+                }
+                let bytes = if local_path.exists() {
+                    let len = std::fs::metadata(local_path).map(|m| m.len()).unwrap_or(0);
+                    if let Some(cb) = on_progress {
+                        cb(len, len, 10.0);
+                    }
+                    len
+                } else {
+                    1024
+                };
+                self.uploads
+                    .lock()
+                    .unwrap()
+                    .push((local_path.to_path_buf(), remote_dest.to_string()));
+                Ok(bytes)
+            })
+        }
+
         fn upload_file<'a>(
             &'a self,
             local_path: &'a Path,
@@ -1099,6 +1126,17 @@ mod tests {
 
     struct PanickingBackend;
     impl UploadBackend for PanickingBackend {
+        fn upload_file_to_dest<'a>(
+            &'a self,
+            _local_path: &'a Path,
+            _remote_dest: &'a str,
+            _on_progress: Option<ProgressCallback>,
+        ) -> crate::uploader::backend::BoxFuture<'a, anyhow::Result<u64>> {
+            Box::pin(async move {
+                panic!("Simulated critical backend failure!");
+            })
+        }
+
         fn upload_file<'a>(
             &'a self,
             _local_path: &'a Path,

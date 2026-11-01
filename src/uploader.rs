@@ -5,7 +5,10 @@ pub mod rclone;
 pub mod worker;
 
 pub use backend::{BoxFuture, MockUploadBackend, ProgressCallback, UploadBackend};
-pub use rclone::{RcloneBackend, RcloneStats, format_destination, parse_rclone_log_line};
+pub use rclone::{
+    HIGH_THROUGHPUT_UPLOAD_ARGS, RcloneBackend, RcloneStats, build_consolidate_upload_args,
+    format_destination, parse_rclone_log_line,
+};
 pub use worker::{
     DiskSpaceProvider, DlqConfig, PairedChunkPaths, UploadWorker, is_transient_lock_error,
     lock_backoff_delay, rename_local_file_with_retry, resolve_paired_paths,

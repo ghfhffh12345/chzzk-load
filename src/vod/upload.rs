@@ -8,6 +8,9 @@ use crate::uploader::UploadBackend;
 use crate::uploader::rclone::format_destination;
 use crate::uploader::unlink_local_file_with_retry;
 
+/// Default concurrency limit for uploading VOD artifact files.
+pub const DEFAULT_VOD_UPLOAD_CONCURRENCY: usize = 3;
+
 /// Verifies remote path accessibility before beginning any long-running downloads.
 pub async fn validate_remote_connection(backend: &dyn UploadBackend) -> Result<()> {
     backend
@@ -69,7 +72,7 @@ pub async fn upload_vod_artifacts(
     let remote_meta_final = format_destination(remote_base, folder_name, "vod_metadata.jsonl");
 
     // Stage 1: Upload files to remote .part destinations respecting bounded concurrency
-    let semaphore = Arc::new(Semaphore::new(3));
+    let semaphore = Arc::new(Semaphore::new(DEFAULT_VOD_UPLOAD_CONCURRENCY));
 
     let video_sem = Arc::clone(&semaphore);
     let video_fut = async {

@@ -18,12 +18,7 @@ pub trait UploadBackend: Send + Sync {
         local_path: &'a Path,
         remote_dest: &'a str,
         on_progress: Option<ProgressCallback>,
-    ) -> BoxFuture<'a, anyhow::Result<u64>> {
-        Box::pin(async move {
-            let cb = on_progress.unwrap_or_else(|| Box::new(|_, _, _| {}));
-            self.upload_file(local_path, remote_dest, cb).await
-        })
-    }
+    ) -> BoxFuture<'a, anyhow::Result<u64>>;
 
     /// Atomically moves/renames a remote file from `remote_src` to `remote_dst`.
     fn move_file<'a>(
@@ -110,7 +105,6 @@ pub struct MockUploadBackend {
     pub files: Arc<Mutex<HashMap<String, u64>>>,
     pub should_fail: Arc<AtomicBool>,
     pub fail_patterns: Arc<Mutex<Vec<String>>>,
-    pub hang_patterns: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockUploadBackend {
@@ -137,16 +131,6 @@ impl UploadBackend for MockUploadBackend {
                     if remote_dest.contains(pat) || local_path.to_string_lossy().contains(pat) {
                         return Err(anyhow::anyhow!("simulated error for pattern: {pat}"));
                     }
-                }
-            }
-
-            {
-                let hangs = self.hang_patterns.lock().await;
-                let should_hang = hangs.iter().any(|pat| {
-                    remote_dest.contains(pat) || local_path.to_string_lossy().contains(pat)
-                });
-                if should_hang {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             }
 

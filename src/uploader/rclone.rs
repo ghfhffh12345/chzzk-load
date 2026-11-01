@@ -81,6 +81,35 @@ pub struct RcloneBackend {
     custom_bin: Option<String>,
 }
 
+/// Default rclone flags applied to consolidation remote uploads for large-file throughput optimization.
+pub const HIGH_THROUGHPUT_UPLOAD_ARGS: &[&str] = &[
+    "--drive-chunk-size",
+    "128M",
+    "--s3-chunk-size",
+    "64M",
+    "--s3-upload-concurrency",
+    "4",
+    "--buffer-size",
+    "64M",
+    "--multi-thread-streams",
+    "4",
+    "--multi-thread-cutoff",
+    "250M",
+];
+
+/// Builds command arguments for high-throughput consolidation staged file upload,
+/// appending any user-defined `consolidate_extra_args`.
+pub fn build_consolidate_upload_args(extra_args: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = HIGH_THROUGHPUT_UPLOAD_ARGS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for extra in extra_args {
+        args.push(extra.clone());
+    }
+    args
+}
+
 impl RcloneBackend {
     /// Creates a new `RcloneBackend` from configuration.
     pub fn new(config: RcloneConfig) -> Self {
@@ -94,11 +123,11 @@ impl RcloneBackend {
     /// pre-configuring high-throughput transfer parameters and user-defined consolidation arguments.
     pub fn for_consolidation(mut config: RcloneConfig) -> Self {
         let mut extra = Vec::with_capacity(
-            crate::consolidation::HIGH_THROUGHPUT_UPLOAD_ARGS.len()
+            HIGH_THROUGHPUT_UPLOAD_ARGS.len()
                 + config.extra_args.len()
                 + config.consolidate_extra_args.len(),
         );
-        for arg in crate::consolidation::HIGH_THROUGHPUT_UPLOAD_ARGS {
+        for arg in HIGH_THROUGHPUT_UPLOAD_ARGS {
             extra.push(arg.to_string());
         }
         extra.extend(config.extra_args);

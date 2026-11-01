@@ -108,6 +108,54 @@ fn test_rclone_backend_command_builder() {
 }
 
 #[test]
+fn test_rclone_backend_build_copy_command_includes_high_throughput_flags() {
+    let local_file = Path::new("local.txt");
+    let remote_dest = "mock_remote:remote.txt";
+    let extra_args = vec![
+        "--low-level-retries".to_string(),
+        "10".to_string(),
+        "--fast-list".to_string(),
+    ];
+
+    let config = RcloneConfig {
+        consolidate_extra_args: extra_args,
+        ..Default::default()
+    };
+    let backend = RcloneBackend::for_consolidation(config).with_bin("mock_rclone");
+
+    let cmd = backend.build_copy_command(local_file, remote_dest);
+    let std_cmd = cmd.as_std();
+    let args: Vec<String> = std_cmd
+        .get_args()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
+
+    assert_eq!(args[0], "copyto");
+    assert_eq!(args[1], local_file.to_string_lossy().to_string());
+    assert_eq!(args[2], remote_dest);
+    assert!(args.contains(&"--use-json-log".to_string()));
+    assert!(args.contains(&"--stats".to_string()));
+    assert!(args.contains(&"250ms".to_string()));
+    assert!(args.contains(&"--stats-log-level".to_string()));
+    assert!(args.contains(&"NOTICE".to_string()));
+    assert!(args.contains(&"--drive-chunk-size".to_string()));
+    assert!(args.contains(&"128M".to_string()));
+    assert!(args.contains(&"--s3-chunk-size".to_string()));
+    assert!(args.contains(&"64M".to_string()));
+    assert!(args.contains(&"--s3-upload-concurrency".to_string()));
+    assert!(args.contains(&"4".to_string()));
+    assert!(args.contains(&"--buffer-size".to_string()));
+    assert!(args.contains(&"64M".to_string()));
+    assert!(args.contains(&"--multi-thread-streams".to_string()));
+    assert!(args.contains(&"4".to_string()));
+    assert!(args.contains(&"--multi-thread-cutoff".to_string()));
+    assert!(args.contains(&"250M".to_string()));
+    assert!(args.contains(&"--low-level-retries".to_string()));
+    assert!(args.contains(&"10".to_string()));
+    assert!(args.contains(&"--fast-list".to_string()));
+}
+
+#[test]
 fn test_rclone_backend_bin_resolution() {
     let config = RcloneConfig {
         remote_path: "gdrive:Test".to_string(),

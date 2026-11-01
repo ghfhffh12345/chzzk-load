@@ -356,39 +356,6 @@ pub async fn consolidate_chat(
     .await
 }
 
-/// Consolidates chat chunks with optional progress telemetry reporting.
-pub async fn consolidate_chat_with_progress(
-    target: &TargetLocation,
-    chat_chunks: &[ConsolidationChunk],
-    strict: bool,
-    rclone_bin: Option<&str>,
-    cancel_token: CancellationToken,
-    progress_sender: Option<tokio::sync::mpsc::UnboundedSender<ChatProgressUpdate>>,
-) -> anyhow::Result<ChatConsolidationStats> {
-    consolidate_chat_with_options(
-        target,
-        chat_chunks,
-        strict,
-        &ChatConsolidationOptions {
-            rclone_bin: rclone_bin.map(str::to_string),
-            staging_dir: None,
-            progress_sender,
-        },
-        cancel_token,
-    )
-    .await
-}
-
-/// Consolidates local chat chunks into staged `live_chat.jsonl.part`.
-pub async fn consolidate_chat_local(
-    dir: &Path,
-    chat_chunks: &[ConsolidationChunk],
-    strict: bool,
-    cancel_token: CancellationToken,
-) -> anyhow::Result<ChatConsolidationStats> {
-    consolidate_chat_local_with_progress(dir, chat_chunks, strict, cancel_token, None).await
-}
-
 /// Consolidates local chat chunks into staged `live_chat.jsonl.part` with progress telemetry.
 pub async fn consolidate_chat_local_with_progress(
     dir: &Path,
@@ -482,52 +449,6 @@ pub async fn consolidate_chat_local_with_progress(
     // Do NOT rename to live_chat.jsonl here!
     // Staged output is retained in live_chat.jsonl.part for atomic two-stage finalization.
     Ok(deduplicator.into_stats())
-}
-
-/// Consolidates remote chat chunks via local staging into staged `live_chat.jsonl.part` and
-/// atomically finalizes to `live_chat.jsonl` upon zero-exit completion.
-pub async fn consolidate_chat_remote(
-    remote_base: &str,
-    chat_chunks: &[ConsolidationChunk],
-    strict: bool,
-    rclone_bin: Option<&str>,
-    cancel_token: CancellationToken,
-) -> anyhow::Result<ChatConsolidationStats> {
-    consolidate_chat_remote_with_options(
-        remote_base,
-        chat_chunks,
-        strict,
-        &ChatConsolidationOptions {
-            rclone_bin: rclone_bin.map(str::to_string),
-            staging_dir: None,
-            progress_sender: None,
-        },
-        cancel_token,
-    )
-    .await
-}
-
-/// Consolidates remote chat chunks with progress telemetry reporting.
-pub async fn consolidate_chat_remote_with_progress(
-    remote_base: &str,
-    chat_chunks: &[ConsolidationChunk],
-    strict: bool,
-    rclone_bin: Option<&str>,
-    cancel_token: CancellationToken,
-    progress_sender: Option<tokio::sync::mpsc::UnboundedSender<ChatProgressUpdate>>,
-) -> anyhow::Result<ChatConsolidationStats> {
-    consolidate_chat_remote_with_options(
-        remote_base,
-        chat_chunks,
-        strict,
-        &ChatConsolidationOptions {
-            rclone_bin: rclone_bin.map(str::to_string),
-            staging_dir: None,
-            progress_sender,
-        },
-        cancel_token,
-    )
-    .await
 }
 
 /// Consolidates remote chat chunks into local staging `live_chat.jsonl.part` and
