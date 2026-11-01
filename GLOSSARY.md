@@ -52,6 +52,10 @@ _Avoid_: Disk quota, auto-delete, purge strategy
 The per-task lifecycle rule (`delete_on_success`) governing whether local files are unlinked post-upload or retained locally.
 _Avoid_: File deleter, delete flag, cleanup policy
 
+**Remote Storage Backend**:
+The unified cloud storage abstraction seam (`UploadBackend`) that standardizes file uploads, atomic promotion, idempotent deletions, and progress telemetry across live recording, VOD archival, and post-recording consolidation.
+_Avoid_: Rclone wrapper, cloud sync client, upload helper, file transfer service
+
 **Strict Directory Emptiness**:
 The invariant requiring a session folder to contain exactly zero filesystem entries before removal, eliminating heuristic file-name sniffing.
 _Avoid_: Empty check, heuristic delete, metadata purge

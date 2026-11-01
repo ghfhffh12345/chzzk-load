@@ -357,7 +357,10 @@ async fn test_consolidate_chat_remote_pipeline_success() {
     // Test remote finalization via finalize_staged_chat using a staged remote file
     let remote_part = temp_dir.join("live_chat.jsonl.part");
     fs::write(&remote_part, &final_content).unwrap();
-    finalize_staged_chat(&remote_target, Some(&mock_bin))
+    let backend =
+        chzzk_load::uploader::RcloneBackend::new(chzzk_load::config::RcloneConfig::default())
+            .with_bin(&mock_bin);
+    finalize_staged_chat(&remote_target, Some(&backend))
         .await
         .expect("Remote finalize_staged_chat should succeed");
 

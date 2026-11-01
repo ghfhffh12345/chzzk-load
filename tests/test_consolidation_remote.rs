@@ -1,18 +1,22 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 mod common;
 use common::mock_ffmpeg::get_mock_ffmpeg_bin;
 use common::mock_rclone::get_mock_rclone_bin;
 
 use chzzk_load::cli::ConsolidateArgs;
+use chzzk_load::config::RcloneConfig;
 use chzzk_load::consolidation::{
-    ConsolidationProgressCoordinator, CoordinatorOutput, UploadProgressUpdate,
-    build_remote_staged_upload_command, run_consolidation, run_consolidation_with_cancel,
-    run_consolidation_with_coordinator_and_cancel, upload_remote_staged_file,
-    upload_remote_staged_file_with_args, upload_remote_staged_file_with_progress,
-    upload_remote_staged_media, upload_remote_staged_media_with_progress,
+    ConsolidationChunk, ConsolidationProgressCoordinator, CoordinatorOutput, UploadProgressUpdate,
+    delete_original_chunks_with_backend, finalize_staged_chat, finalize_staged_video,
+    run_consolidation, run_consolidation_with_backend_and_cancel, run_consolidation_with_cancel,
+    run_consolidation_with_coordinator_and_cancel, upload_remote_staged_media,
+    upload_remote_staged_media_with_progress,
 };
+use chzzk_load::uploader::backend::{MockUploadBackend, UploadBackend};
+use chzzk_load::uploader::rclone::RcloneBackend;
 use tokio_util::sync::CancellationToken;
 
 fn create_temp_test_dir(prefix: &str) -> PathBuf {
@@ -68,9 +72,13 @@ async fn test_upload_remote_staged_file_success_and_failure() {
         remote_dest_file.to_string_lossy().replace('\\', "/")
     );
 
+    let backend =
+        RcloneBackend::new(RcloneConfig::default()).with_bin(mock_rclone.to_str().unwrap());
+
     // 1. Success
-    let res =
-        upload_remote_staged_file(mock_rclone.to_str().unwrap(), &local_file, &remote_dest).await;
+    let res = backend
+        .upload_file_to_dest(&local_file, &remote_dest, None)
+        .await;
     assert!(res.is_ok(), "Upload should succeed: {:?}", res.err());
     assert_eq!(
         fs::read_to_string(&remote_dest_file).unwrap(),
@@ -85,8 +93,9 @@ async fn test_upload_remote_staged_file_success_and_failure() {
             .to_string_lossy()
             .replace('\\', "/")
     );
-    let fail_res =
-        upload_remote_staged_file(mock_rclone.to_str().unwrap(), &local_file, &fail_dest).await;
+    let fail_res = backend
+        .upload_file_to_dest(&local_file, &fail_dest, None)
+        .await;
     assert!(fail_res.is_err(), "fail_copy should cause error");
 }
 
@@ -716,51 +725,16 @@ async fn test_remote_staged_upload_high_throughput_args_and_custom_extra_args() 
         "--fast-list".to_string(),
     ];
 
-    // 1. Verify command construction via public Command builder
-    let cmd = build_remote_staged_upload_command(
-        mock_rclone.to_str().unwrap(),
-        &local_file,
-        &remote_dest,
-        &extra_args,
-    );
-    let std_cmd = cmd.as_std();
-    let args: Vec<String> = std_cmd
-        .get_args()
-        .map(|s| s.to_string_lossy().to_string())
-        .collect();
+    let config = RcloneConfig {
+        consolidate_extra_args: extra_args,
+        ..Default::default()
+    };
+    let backend = RcloneBackend::for_consolidation(config).with_bin(mock_rclone.to_str().unwrap());
 
-    assert_eq!(args[0], "copyto");
-    assert_eq!(args[1], local_file.to_string_lossy().to_string());
-    assert_eq!(args[2], remote_dest);
-    assert!(args.contains(&"--use-json-log".to_string()));
-    assert!(args.contains(&"--stats".to_string()));
-    assert!(args.contains(&"250ms".to_string()));
-    assert!(args.contains(&"--stats-log-level".to_string()));
-    assert!(args.contains(&"NOTICE".to_string()));
-    assert!(args.contains(&"--drive-chunk-size".to_string()));
-    assert!(args.contains(&"128M".to_string()));
-    assert!(args.contains(&"--s3-chunk-size".to_string()));
-    assert!(args.contains(&"64M".to_string()));
-    assert!(args.contains(&"--s3-upload-concurrency".to_string()));
-    assert!(args.contains(&"4".to_string()));
-    assert!(args.contains(&"--buffer-size".to_string()));
-    assert!(args.contains(&"64M".to_string()));
-    assert!(args.contains(&"--multi-thread-streams".to_string()));
-    assert!(args.contains(&"4".to_string()));
-    assert!(args.contains(&"--multi-thread-cutoff".to_string()));
-    assert!(args.contains(&"250M".to_string()));
-    assert!(args.contains(&"--low-level-retries".to_string()));
-    assert!(args.contains(&"10".to_string()));
-    assert!(args.contains(&"--fast-list".to_string()));
-
-    // 2. Verify domain execution with mock rclone
-    let res = upload_remote_staged_file_with_args(
-        mock_rclone.to_str().unwrap(),
-        &local_file,
-        &remote_dest,
-        &extra_args,
-    )
-    .await;
+    // Verify domain execution with mock rclone
+    let res = backend
+        .upload_file_to_dest(&local_file, &remote_dest, None)
+        .await;
 
     assert!(res.is_ok(), "Upload should succeed: {:?}", res.err());
     assert_eq!(
@@ -1138,14 +1112,15 @@ async fn test_upload_remote_staged_media_seam_success_and_concurrency() {
         remote_dest_dir.to_string_lossy().replace('\\', "/")
     );
 
+    let backend =
+        RcloneBackend::new(RcloneConfig::default()).with_bin(mock_rclone.to_str().unwrap());
     let cancel_token = CancellationToken::new();
     let res = upload_remote_staged_media(
-        mock_rclone.to_str().unwrap(),
+        &backend,
         &remote_base,
         &staging_dir,
         true,
         true,
-        &[],
         cancel_token,
     )
     .await;
@@ -1185,15 +1160,16 @@ async fn test_upload_remote_staged_media_seam_sibling_abort_and_remote_cleanup()
         remote_dest_dir.to_string_lossy().replace('\\', "/")
     );
 
+    let backend =
+        RcloneBackend::new(RcloneConfig::default()).with_bin(mock_rclone.to_str().unwrap());
     let cancel_token = CancellationToken::new();
     let start = std::time::Instant::now();
     let res = upload_remote_staged_media(
-        mock_rclone.to_str().unwrap(),
+        &backend,
         &remote_base,
         &staging_dir,
         true,
         true,
-        &[],
         cancel_token,
     )
     .await;
@@ -1235,6 +1211,8 @@ async fn test_upload_remote_staged_media_seam_cancellation_and_remote_cleanup() 
         remote_dest_dir.to_string_lossy().replace('\\', "/")
     );
 
+    let backend =
+        RcloneBackend::new(RcloneConfig::default()).with_bin(mock_rclone.to_str().unwrap());
     let cancel_token = CancellationToken::new();
     let trigger = cancel_token.clone();
     tokio::spawn(async move {
@@ -1244,12 +1222,11 @@ async fn test_upload_remote_staged_media_seam_cancellation_and_remote_cleanup() 
 
     let start = std::time::Instant::now();
     let res = upload_remote_staged_media(
-        mock_rclone.to_str().unwrap(),
+        &backend,
         &remote_base,
         &staging_dir,
         true,
         true,
-        &[],
         cancel_token,
     )
     .await;
@@ -1286,14 +1263,18 @@ async fn test_upload_remote_staged_file_with_progress_telemetry() {
     );
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UploadProgressUpdate>();
-    let res = upload_remote_staged_file_with_progress(
-        mock_rclone.to_str().unwrap(),
-        &local_file,
-        &remote_dest,
-        &[],
-        Some(tx),
-    )
-    .await;
+    let progress_cb = Box::new(move |bytes, total, speed| {
+        let _ = tx.send(UploadProgressUpdate {
+            bytes_uploaded: bytes,
+            total_bytes: total,
+            speed_mb_s: speed,
+        });
+    });
+    let backend =
+        RcloneBackend::new(RcloneConfig::default()).with_bin(mock_rclone.to_str().unwrap());
+    let res = backend
+        .upload_file_to_dest(&local_file, &remote_dest, Some(progress_cb))
+        .await;
 
     assert!(res.is_ok(), "Upload should succeed: {:?}", res.err());
     assert_eq!(fs::metadata(&remote_dest_file).unwrap().len(), 10_000);
@@ -1336,13 +1317,14 @@ async fn test_upload_remote_staged_media_with_progress_telemetry() {
     let (v_tx, mut v_rx) = tokio::sync::mpsc::unbounded_channel::<UploadProgressUpdate>();
     let (c_tx, mut c_rx) = tokio::sync::mpsc::unbounded_channel::<UploadProgressUpdate>();
 
+    let backend =
+        RcloneBackend::new(RcloneConfig::default()).with_bin(mock_rclone.to_str().unwrap());
     let res = upload_remote_staged_media_with_progress(
-        mock_rclone.to_str().unwrap(),
+        &backend,
         &remote_base,
         &staging_dir,
         true,
         true,
-        &[],
         CancellationToken::new(),
         Some(v_tx),
         Some(c_tx),
@@ -1367,6 +1349,241 @@ async fn test_upload_remote_staged_media_with_progress_telemetry() {
     assert_eq!(
         c_updates.last().unwrap().bytes_uploaded,
         b"chat lines\n".len() as u64
+    );
+}
+
+#[tokio::test]
+async fn test_upload_remote_staged_media_with_mock_backend_and_progress_channels() {
+    let mock = MockUploadBackend::new();
+    let temp_dir = create_temp_test_dir("test_mock_upload_media_progress");
+    let staging_dir = temp_dir.join("staging");
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let local_mp4 = staging_dir.join("livestream.mp4");
+    let local_jsonl = staging_dir.join("live_chat.jsonl");
+    fs::write(&local_mp4, vec![0u8; 15_000]).unwrap();
+    fs::write(&local_jsonl, vec![0u8; 3_000]).unwrap();
+
+    let remote_base = "mock_remote:archives/session_101";
+
+    let (v_tx, mut v_rx) = tokio::sync::mpsc::unbounded_channel::<UploadProgressUpdate>();
+    let (c_tx, mut c_rx) = tokio::sync::mpsc::unbounded_channel::<UploadProgressUpdate>();
+
+    let res = upload_remote_staged_media_with_progress(
+        &mock,
+        remote_base,
+        &staging_dir,
+        true,
+        true,
+        CancellationToken::new(),
+        Some(v_tx),
+        Some(c_tx),
+    )
+    .await;
+
+    assert!(
+        res.is_ok(),
+        "Mock backend upload should succeed: {:?}",
+        res.err()
+    );
+
+    let mut v_updates = Vec::new();
+    while let Ok(upd) = v_rx.try_recv() {
+        v_updates.push(upd);
+    }
+    let mut c_updates = Vec::new();
+    while let Ok(upd) = c_rx.try_recv() {
+        c_updates.push(upd);
+    }
+
+    assert!(
+        !v_updates.is_empty(),
+        "Video progress channel should receive updates"
+    );
+    assert!(
+        !c_updates.is_empty(),
+        "Chat progress channel should receive updates"
+    );
+    assert_eq!(v_updates.last().unwrap().bytes_uploaded, 15_000);
+    assert_eq!(c_updates.last().unwrap().bytes_uploaded, 3_000);
+
+    // Verify virtual files map in mock backend
+    let files = mock.files.lock().await;
+    assert_eq!(
+        files.get("mock_remote:archives/session_101/livestream.mp4.part"),
+        Some(&15_000)
+    );
+    assert_eq!(
+        files.get("mock_remote:archives/session_101/live_chat.jsonl.part"),
+        Some(&3_000)
+    );
+}
+
+#[tokio::test]
+async fn test_upload_remote_staged_media_mock_backend_sibling_abort_and_remote_cleanup() {
+    let mock = MockUploadBackend::new();
+    let temp_dir = create_temp_test_dir("test_mock_sibling_abort");
+    let staging_dir = temp_dir.join("staging");
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let local_mp4 = staging_dir.join("livestream.mp4");
+    let local_jsonl = staging_dir.join("live_chat.jsonl");
+    fs::write(&local_mp4, vec![0u8; 10_000]).unwrap();
+    fs::write(&local_jsonl, vec![0u8; 2_000]).unwrap();
+
+    let remote_base = "mock_remote:archives/session_sibling";
+
+    // Simulate chat failing
+    mock.fail_patterns
+        .lock()
+        .await
+        .push("live_chat.jsonl".to_string());
+
+    let start = std::time::Instant::now();
+    let res = upload_remote_staged_media(
+        &mock,
+        remote_base,
+        &staging_dir,
+        true,
+        true,
+        CancellationToken::new(),
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_err(), "Must return error when chat upload fails");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "Sibling failure must be reported promptly, took {:?}",
+        elapsed
+    );
+
+    // Remote .part files must be cleaned up via delete_file
+    let files = mock.files.lock().await;
+    assert!(!files.contains_key("mock_remote:archives/session_sibling/livestream.mp4.part"));
+    assert!(!files.contains_key("mock_remote:archives/session_sibling/live_chat.jsonl.part"));
+
+    // Local files preserved
+    assert!(local_mp4.exists());
+    assert!(local_jsonl.exists());
+}
+
+#[tokio::test]
+async fn test_upload_remote_staged_media_mock_backend_cancellation_and_remote_cleanup() {
+    let mock = MockUploadBackend::new();
+    let temp_dir = create_temp_test_dir("test_mock_cancel");
+    let staging_dir = temp_dir.join("staging");
+    fs::create_dir_all(&staging_dir).unwrap();
+
+    let local_mp4 = staging_dir.join("livestream.mp4");
+    let local_jsonl = staging_dir.join("live_chat.jsonl");
+    fs::write(&local_mp4, vec![0u8; 10_000]).unwrap();
+    fs::write(&local_jsonl, vec![0u8; 2_000]).unwrap();
+
+    let remote_base = "mock_remote:archives/session_cancel";
+
+    let cancel_token = CancellationToken::new();
+    cancel_token.cancel(); // Standard cooperative cancellation via pre-cancelled CancellationToken
+
+    let start = std::time::Instant::now();
+    let res =
+        upload_remote_staged_media(&mock, remote_base, &staging_dir, true, true, cancel_token)
+            .await;
+    let elapsed = start.elapsed();
+
+    assert!(res.is_err(), "Must return cancellation error");
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "Upload must abort promptly upon cancellation, took {:?}",
+        elapsed
+    );
+
+    let files = mock.files.lock().await;
+    assert!(!files.contains_key("mock_remote:archives/session_cancel/livestream.mp4.part"));
+    assert!(!files.contains_key("mock_remote:archives/session_cancel/live_chat.jsonl.part"));
+}
+
+#[tokio::test]
+async fn test_consolidation_atomic_promotion_via_mock_backend_move_file() {
+    let mock = MockUploadBackend::new();
+    let remote_base = "mock_remote:archives/session_promote";
+
+    // Seed mock remote store with .part files
+    {
+        let mut files = mock.files.lock().await;
+        files.insert(format!("{remote_base}/livestream.mp4.part"), 100_000);
+        files.insert(format!("{remote_base}/live_chat.jsonl.part"), 20_000);
+    }
+
+    let target =
+        chzzk_load::consolidation::manifest::TargetLocation::Remote(remote_base.to_string());
+
+    finalize_staged_video(&target, Some(&mock))
+        .await
+        .expect("finalize_staged_video with mock backend should succeed");
+    finalize_staged_chat(&target, Some(&mock))
+        .await
+        .expect("finalize_staged_chat with mock backend should succeed");
+
+    let files = mock.files.lock().await;
+    assert!(!files.contains_key(&format!("{remote_base}/livestream.mp4.part")));
+    assert!(!files.contains_key(&format!("{remote_base}/live_chat.jsonl.part")));
+    assert_eq!(
+        files.get(&format!("{remote_base}/livestream.mp4")),
+        Some(&100_000)
+    );
+    assert_eq!(
+        files.get(&format!("{remote_base}/live_chat.jsonl")),
+        Some(&20_000)
+    );
+}
+
+#[tokio::test]
+async fn test_consolidation_chunk_purging_via_mock_backend_delete_files() {
+    let mock = MockUploadBackend::new();
+    let remote_base = "mock_remote:archives/session_purge";
+
+    // Seed mock remote store with chunks and metadata
+    let mut v_chunks = Vec::new();
+    let mut c_chunks = Vec::new();
+    {
+        let mut files = mock.files.lock().await;
+        for i in 0..5 {
+            let v_name = format!("chunk_{i:04}.ts");
+            let c_name = format!("chat_{i:04}.jsonl");
+            files.insert(format!("{remote_base}/{v_name}"), 50_000);
+            files.insert(format!("{remote_base}/{c_name}"), 5_000);
+            v_chunks.push(ConsolidationChunk {
+                name: v_name,
+                index: i,
+                size: 50_000,
+            });
+            c_chunks.push(ConsolidationChunk {
+                name: c_name,
+                index: i,
+                size: 5_000,
+            });
+        }
+        // Critical: live_metadata.jsonl must never be deleted
+        files.insert(format!("{remote_base}/live_metadata.jsonl"), 1_000);
+    }
+
+    let target =
+        chzzk_load::consolidation::manifest::TargetLocation::Remote(remote_base.to_string());
+
+    delete_original_chunks_with_backend(&target, &v_chunks, &c_chunks, &mock)
+        .await
+        .expect("delete_original_chunks_with_backend should succeed");
+
+    let files = mock.files.lock().await;
+    for i in 0..5 {
+        assert!(!files.contains_key(&format!("{remote_base}/chunk_{i:04}.ts")));
+        assert!(!files.contains_key(&format!("{remote_base}/chat_{i:04}.jsonl")));
+    }
+    assert_eq!(
+        files.get(&format!("{remote_base}/live_metadata.jsonl")),
+        Some(&1_000),
+        "live_metadata.jsonl must strictly be preserved"
     );
 }
 
@@ -1483,5 +1700,73 @@ async fn test_remote_consolidation_non_interactive_upload_telemetry() {
     assert!(
         text.contains("[INFO] [UP C] Upload progress:"),
         "Must contain non-interactive UP C milestone: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_run_consolidation_with_injected_mock_backend() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_injected_backend");
+    let staging_parent = create_temp_test_dir("test_remote_injected_staging");
+
+    let chunk0 = remote_dir.join("chunk_0000.ts");
+    let chat0 = remote_dir.join("chat_0000.jsonl");
+    let meta = remote_dir.join("livemetadata.jsonl");
+    fs::write(&chunk0, b"mock_video_payload").unwrap();
+    let line1 = make_chat_line(10_000, "user1", "msg1");
+    fs::write(&chat0, format!("{line1}\n")).unwrap();
+    fs::write(&meta, r#"{"type":"SESSION_START","stream_offset_ms":0}"#).unwrap();
+
+    let (output, _buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let remote_target = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+    let args = ConsolidateArgs {
+        path: remote_target.clone(),
+        temp_dir: Some(staging_parent),
+        config: None,
+        overwrite: false,
+        strict: false,
+        keep_original: false,
+        delete_concurrency: 4,
+    };
+
+    let mock = Arc::new(MockUploadBackend::new());
+
+    let summary = run_consolidation_with_backend_and_cancel(
+        args,
+        coordinator,
+        CancellationToken::new(),
+        Some(mock.clone() as Arc<dyn UploadBackend>),
+    )
+    .await
+    .expect("Consolidation with injected mock backend should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify mock backend was used for upload, finalization (move_file), and chunk purge
+    let files = mock.files.lock().await;
+    assert!(
+        files.contains_key(&format!("{remote_target}/livestream.mp4")),
+        "livestream.mp4 must exist in mock store after promotion"
+    );
+    assert!(
+        files.contains_key(&format!("{remote_target}/live_chat.jsonl")),
+        "live_chat.jsonl must exist in mock store after promotion"
+    );
+    assert!(
+        !files.contains_key(&format!("{remote_target}/livestream.mp4.part")),
+        ".part file must be removed after promotion"
+    );
+    assert!(
+        !files.contains_key(&format!("{remote_target}/live_chat.jsonl.part")),
+        ".part file must be removed after promotion"
     );
 }

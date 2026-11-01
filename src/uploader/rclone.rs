@@ -81,6 +81,35 @@ pub struct RcloneBackend {
     custom_bin: Option<String>,
 }
 
+/// Default rclone flags applied to consolidation remote uploads for large-file throughput optimization.
+pub const HIGH_THROUGHPUT_UPLOAD_ARGS: &[&str] = &[
+    "--drive-chunk-size",
+    "128M",
+    "--s3-chunk-size",
+    "64M",
+    "--s3-upload-concurrency",
+    "4",
+    "--buffer-size",
+    "64M",
+    "--multi-thread-streams",
+    "4",
+    "--multi-thread-cutoff",
+    "250M",
+];
+
+/// Builds command arguments for high-throughput consolidation staged file upload,
+/// appending any user-defined `consolidate_extra_args`.
+pub fn build_consolidate_upload_args(extra_args: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = HIGH_THROUGHPUT_UPLOAD_ARGS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    for extra in extra_args {
+        args.push(extra.clone());
+    }
+    args
+}
+
 impl RcloneBackend {
     /// Creates a new `RcloneBackend` from configuration.
     pub fn new(config: RcloneConfig) -> Self {
@@ -88,6 +117,24 @@ impl RcloneBackend {
             config,
             custom_bin: None,
         }
+    }
+
+    /// Creates a new `RcloneBackend` optimized for post-recording consolidation,
+    /// pre-configuring high-throughput transfer parameters and user-defined consolidation arguments.
+    pub fn for_consolidation(mut config: RcloneConfig) -> Self {
+        let mut extra = Vec::with_capacity(
+            HIGH_THROUGHPUT_UPLOAD_ARGS.len()
+                + config.extra_args.len()
+                + config.consolidate_extra_args.len(),
+        );
+        for arg in HIGH_THROUGHPUT_UPLOAD_ARGS {
+            extra.push(arg.to_string());
+        }
+        extra.extend(config.extra_args);
+        extra.extend(config.consolidate_extra_args);
+        config.extra_args = extra;
+        config.consolidate_extra_args = Vec::new();
+        Self::new(config)
     }
 
     /// Sets an explicit rclone binary path for this backend instance.
@@ -232,7 +279,7 @@ impl RcloneBackend {
         &self,
         local_path: &Path,
         remote_dest: &str,
-        on_progress: ProgressCallback,
+        on_progress: Option<ProgressCallback>,
     ) -> anyhow::Result<u64> {
         let metadata = tokio::fs::metadata(local_path)
             .await
@@ -263,7 +310,9 @@ impl RcloneBackend {
                 };
                 let speed_mb_s = stats.speed / 1_048_576.0;
                 last_speed = speed_mb_s;
-                on_progress(stats.bytes, total, speed_mb_s);
+                if let Some(ref cb) = on_progress {
+                    cb(stats.bytes, total, speed_mb_s);
+                }
             } else {
                 if stderr_logs.len() >= 30 {
                     stderr_logs.remove(0);
@@ -277,7 +326,9 @@ impl RcloneBackend {
             .await
             .with_context(|| "failed to wait for rclone copyto process")?;
         if status.success() {
-            on_progress(file_size, file_size, last_speed);
+            if let Some(ref cb) = on_progress {
+                cb(file_size, file_size, last_speed);
+            }
             Ok(file_size)
         } else {
             let err_msg = stderr_logs.join("\n");
@@ -289,9 +340,72 @@ impl RcloneBackend {
             }
         }
     }
+
+    /// Deletes multiple remote files concurrently under a bounded concurrency limit.
+    pub async fn delete_files(&self, remote_paths: &[String]) -> anyhow::Result<()> {
+        UploadBackend::delete_files(self, remote_paths).await
+    }
+
+    /// Verifies connectivity to the configured storage backend.
+    ///
+    /// Skips the remote connection check if `skip_connection_check` is enabled
+    /// or if `remote_path` is unconfigured/empty.
+    pub async fn check_connection(&self) -> anyhow::Result<()> {
+        if self.config.skip_connection_check || self.config.remote_path.trim().is_empty() {
+            return Ok(());
+        }
+        let bin = self.resolve_bin();
+        let mut cmd = self.build_check_command();
+        let output = cmd
+            .output()
+            .await
+            .with_context(|| format!("failed to execute rclone check from '{bin}'"))?;
+        let status = output.status;
+        let remote_path = &self.config.remote_path;
+        if status.success() {
+            Ok(())
+        } else {
+            let stderr_str = String::from_utf8_lossy(&output.stderr);
+            let trimmed = stderr_str.trim();
+            if trimmed.is_empty() {
+                Err(anyhow::anyhow!(
+                    "rclone connection check failed for '{remote_path}' with status {status}"
+                ))
+            } else {
+                Err(anyhow::anyhow!(
+                    "rclone connection check failed for '{remote_path}' with status {status}: {trimmed}"
+                ))
+            }
+        }
+    }
 }
 
 impl UploadBackend for RcloneBackend {
+    fn upload_file_to_dest<'a>(
+        &'a self,
+        local_path: &'a Path,
+        remote_dest: &'a str,
+        on_progress: Option<ProgressCallback>,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(self.upload_file_to_dest(local_path, remote_dest, on_progress))
+    }
+
+    fn move_file<'a>(
+        &'a self,
+        remote_src: &'a str,
+        remote_dst: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(self.move_file(remote_src, remote_dst))
+    }
+
+    fn delete_file<'a>(&'a self, remote_path: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(self.delete_file(remote_path))
+    }
+
+    fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(self.check_connection())
+    }
+
     fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,
@@ -304,36 +418,8 @@ impl UploadBackend for RcloneBackend {
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| anyhow::anyhow!("invalid local file path: {local_path:?}"))?;
             let remote_dest = format_destination(&self.config.remote_path, remote_dir, file_name);
-            self.upload_file_to_dest(local_path, &remote_dest, on_progress)
+            self.upload_file_to_dest(local_path, &remote_dest, Some(on_progress))
                 .await
-        })
-    }
-
-    fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move {
-            let bin = self.resolve_bin();
-            let mut cmd = self.build_check_command();
-            let output = cmd
-                .output()
-                .await
-                .with_context(|| format!("failed to execute rclone check from '{bin}'"))?;
-            let status = output.status;
-            let remote_path = &self.config.remote_path;
-            if status.success() {
-                Ok(())
-            } else {
-                let stderr_str = String::from_utf8_lossy(&output.stderr);
-                let trimmed = stderr_str.trim();
-                if trimmed.is_empty() {
-                    Err(anyhow::anyhow!(
-                        "rclone connection check failed for '{remote_path}' with status {status}"
-                    ))
-                } else {
-                    Err(anyhow::anyhow!(
-                        "rclone connection check failed for '{remote_path}' with status {status}: {trimmed}"
-                    ))
-                }
-            }
         })
     }
 }

@@ -38,6 +38,28 @@ struct ConcurrencyMockBackend {
 }
 
 impl UploadBackend for ConcurrencyMockBackend {
+    fn upload_file_to_dest<'a>(
+        &'a self,
+        local_path: &'a Path,
+        _remote_dest: &'a str,
+        _on_progress: Option<ProgressCallback>,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(async move {
+            let file_name = local_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if file_name.contains("chan2") {
+                let _ = self.task2_started_tx.send(()).await;
+            } else if file_name.contains("chan1") {
+                let mut rx = self.allow_task1_finish_rx.lock().await;
+                let _ = rx.recv().await;
+            }
+            let len = tokio::fs::metadata(local_path).await?.len();
+            Ok(len)
+        })
+    }
+
     fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,
@@ -73,6 +95,35 @@ struct SerialMockBackend {
 }
 
 impl UploadBackend for SerialMockBackend {
+    fn upload_file_to_dest<'a>(
+        &'a self,
+        local_path: &'a Path,
+        _remote_dest: &'a str,
+        _on_progress: Option<ProgressCallback>,
+    ) -> BoxFuture<'a, anyhow::Result<u64>> {
+        Box::pin(async move {
+            let file_name = local_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if file_name.contains("0001") {
+                if self.task1_in_flight.load(Ordering::SeqCst) {
+                    let _ = self.task2_unexpected_started_tx.send(()).await;
+                }
+            } else if file_name.contains("0000") {
+                self.task1_in_flight.store(true, Ordering::SeqCst);
+                if let Some(ref tx) = self.task1_started_tx {
+                    let _ = tx.send(()).await;
+                }
+                let mut rx = self.allow_task1_finish_rx.lock().await;
+                let _ = rx.recv().await;
+                self.task1_in_flight.store(false, Ordering::SeqCst);
+            }
+            let len = tokio::fs::metadata(local_path).await?.len();
+            Ok(len)
+        })
+    }
+
     fn upload_file<'a>(
         &'a self,
         local_path: &'a Path,
