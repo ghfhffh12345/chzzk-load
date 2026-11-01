@@ -136,7 +136,7 @@ impl UploadBackend for ControlledRcloneBackend {
     }
 
     fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
-        self.inner.check_connection()
+        Box::pin(self.inner.check_connection())
     }
 }
 

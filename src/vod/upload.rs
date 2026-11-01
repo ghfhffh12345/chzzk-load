@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::uploader::backend::UploadBackend;
 use crate::uploader::rclone::{RcloneBackend, format_destination};
 use crate::uploader::unlink_local_file_with_retry;
 
@@ -88,11 +87,7 @@ pub async fn upload_vod_artifacts(
             .await
             .map_err(|e| anyhow!("Failed to acquire upload concurrency permit: {e}"))?;
         backend
-            .upload_file_to_dest(
-                artifacts.video_path,
-                &remote_video_part,
-                Box::new(|_, _, _| {}),
-            )
+            .upload_file_to_dest(artifacts.video_path, &remote_video_part, None)
             .await
             .with_context(|| format!("Failed to upload staged video to '{remote_video_part}'"))
     };
@@ -105,7 +100,7 @@ pub async fn upload_vod_artifacts(
                 .await
                 .map_err(|e| anyhow!("Failed to acquire upload concurrency permit: {e}"))?;
             backend
-                .upload_file_to_dest(chat_path, chat_part_dest, Box::new(|_, _, _| {}))
+                .upload_file_to_dest(chat_path, chat_part_dest, None)
                 .await
                 .with_context(|| format!("Failed to upload staged chat to '{chat_part_dest}'"))?;
         }
@@ -119,11 +114,7 @@ pub async fn upload_vod_artifacts(
             .await
             .map_err(|e| anyhow!("Failed to acquire upload concurrency permit: {e}"))?;
         backend
-            .upload_file_to_dest(
-                artifacts.metadata_path,
-                &remote_meta_part,
-                Box::new(|_, _, _| {}),
-            )
+            .upload_file_to_dest(artifacts.metadata_path, &remote_meta_part, None)
             .await
             .with_context(|| format!("Failed to upload staged metadata to '{remote_meta_part}'"))
     };

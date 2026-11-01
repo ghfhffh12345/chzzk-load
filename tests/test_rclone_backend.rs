@@ -1,8 +1,9 @@
 use chzzk_load::config::RcloneConfig;
-use chzzk_load::uploader::backend::UploadBackend;
+use chzzk_load::uploader::backend::{MockUploadBackend, UploadBackend};
 use chzzk_load::uploader::rclone::{RcloneBackend, format_destination, parse_rclone_log_line};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 mod common;
 use common::mock_rclone::get_mock_rclone_bin;
@@ -312,9 +313,9 @@ async fn test_rclone_backend_upload_file_to_dest() {
         .upload_file_to_dest(
             &local_file,
             &remote_dest_str,
-            Box::new(move |_uploaded, _total, _speed| {
+            Some(Box::new(move |_uploaded, _total, _speed| {
                 progress_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-            }),
+            })),
         )
         .await
         .expect("upload_file_to_dest should succeed");
@@ -326,6 +327,307 @@ async fn test_rclone_backend_upload_file_to_dest() {
         remote_dest.exists(),
         "remote file must be created at remote_dest"
     );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_mock_upload_backend_virtual_remote_store() {
+    let temp_dir = std::env::temp_dir().join(format!("test_mock_vstore_{}", rand::random::<u32>()));
+    tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+
+    let local_file = temp_dir.join("vod.mp4.part");
+    tokio::fs::write(&local_file, b"test virtual store payload 12345")
+        .await
+        .unwrap();
+    let file_len = tokio::fs::metadata(&local_file).await.unwrap().len();
+
+    let mock = MockUploadBackend::new();
+    let progress_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_clone = progress_called.clone();
+
+    // 1. Upload to explicit dest
+    let uploaded_bytes = mock
+        .upload_file_to_dest(
+            &local_file,
+            "remote:archive/vod.mp4.part",
+            Some(Box::new(move |bytes, total, speed| {
+                assert_eq!(bytes, file_len);
+                assert_eq!(total, file_len);
+                assert!(speed > 0.0);
+                progress_clone.store(true, Ordering::SeqCst);
+            })),
+        )
+        .await
+        .expect("upload_file_to_dest should succeed");
+
+    assert_eq!(uploaded_bytes, file_len);
+    assert!(progress_called.load(Ordering::SeqCst));
+
+    // Verify virtual store state
+    {
+        let files = mock.files.lock().await;
+        assert_eq!(files.get("remote:archive/vod.mp4.part"), Some(&file_len));
+    }
+    {
+        let uploads = mock.uploads.lock().await;
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(
+            uploads[0],
+            (
+                local_file.clone(),
+                "remote:archive/vod.mp4.part".to_string()
+            )
+        );
+    }
+
+    // 2. Move file (atomic promotion)
+    mock.move_file("remote:archive/vod.mp4.part", "remote:archive/vod.mp4")
+        .await
+        .expect("move_file should succeed");
+
+    {
+        let files = mock.files.lock().await;
+        assert!(!files.contains_key("remote:archive/vod.mp4.part"));
+        assert_eq!(files.get("remote:archive/vod.mp4"), Some(&file_len));
+    }
+
+    // Move non-existent source must fail
+    let err = mock
+        .move_file("remote:archive/nonexistent.mp4", "remote:archive/dst.mp4")
+        .await
+        .expect_err("moving absent file must fail");
+    assert!(format!("{err:#}").contains("not found"));
+
+    // 3. Delete file
+    mock.delete_file("remote:archive/vod.mp4")
+        .await
+        .expect("delete_file should succeed");
+    {
+        let files = mock.files.lock().await;
+        assert!(!files.contains_key("remote:archive/vod.mp4"));
+    }
+
+    // 4. Idempotent deletion (deleting absent file succeeds)
+    mock.delete_file("remote:archive/vod.mp4")
+        .await
+        .expect("repeated delete_file must be idempotent");
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_mock_upload_backend_delete_files_concurrent() {
+    let mock = MockUploadBackend::new();
+
+    // Populate virtual store directly
+    {
+        let mut files = mock.files.lock().await;
+        for i in 0..20 {
+            files.insert(format!("remote:bucket/chunks/chunk_{i:04}.ts"), 1024);
+        }
+        assert_eq!(files.len(), 20);
+    }
+
+    // Delete a subset
+    let to_delete: Vec<String> = (0..10)
+        .map(|i| format!("remote:bucket/chunks/chunk_{i:04}.ts"))
+        .collect();
+
+    mock.delete_files(&to_delete)
+        .await
+        .expect("delete_files should succeed");
+
+    {
+        let files = mock.files.lock().await;
+        assert_eq!(files.len(), 10);
+        for i in 0..10 {
+            assert!(!files.contains_key(&format!("remote:bucket/chunks/chunk_{i:04}.ts")));
+        }
+        for i in 10..20 {
+            assert!(files.contains_key(&format!("remote:bucket/chunks/chunk_{i:04}.ts")));
+        }
+    }
+
+    // Deleting empty slice is a no-op Ok(())
+    mock.delete_files(&[])
+        .await
+        .expect("delete_files on empty slice must succeed");
+
+    // Deleting already deleted files is strictly idempotent
+    mock.delete_files(&to_delete)
+        .await
+        .expect("delete_files on absent files must succeed idempotently");
+}
+
+#[tokio::test]
+async fn test_mock_upload_backend_failure_injection() {
+    let mock = MockUploadBackend::new();
+    mock.should_fail.store(true, Ordering::SeqCst);
+
+    let dummy_path = Path::new("test.ts");
+
+    assert!(
+        mock.upload_file_to_dest(dummy_path, "remote:dst.ts", None)
+            .await
+            .is_err()
+    );
+    assert!(
+        mock.move_file("remote:src.ts", "remote:dst.ts")
+            .await
+            .is_err()
+    );
+    assert!(mock.delete_file("remote:dst.ts").await.is_err());
+    assert!(
+        mock.delete_files(&["remote:dst.ts".to_string()])
+            .await
+            .is_err()
+    );
+    assert!(mock.check_connection().await.is_err());
+    assert!(
+        mock.upload_file(dummy_path, "remote_dir", Box::new(|_, _, _| {}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn test_rclone_backend_optional_progress_none() {
+    let _mock_bin = get_mock_rclone_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_rclone_no_cb_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let local_file = temp_dir.join("vod_no_cb.mp4");
+    std::fs::write(&local_file, b"sample mp4 video data without callback").unwrap();
+    let remote_dest = temp_dir.join("remote").join("vod_no_cb.mp4");
+    let remote_dest_str = remote_dest.to_string_lossy().to_string();
+
+    let config = RcloneConfig {
+        remote_path: "remote:bucket".to_string(),
+        upload_concurrency: 1,
+        rclone_bin: "rclone".to_string(),
+        extra_args: vec![],
+        consolidate_extra_args: vec![],
+        skip_connection_check: false,
+    };
+    let backend = RcloneBackend::new(config);
+
+    // Call with None progress callback
+    let bytes = backend
+        .upload_file_to_dest(&local_file, &remote_dest_str, None)
+        .await
+        .expect("upload_file_to_dest with None callback should succeed");
+
+    assert!(bytes > 0);
+    assert!(remote_dest.exists());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_rclone_backend_check_connection_skip_and_empty() {
+    // 1. skip_connection_check: true bypasses subprocess check
+    let skip_config = RcloneConfig {
+        remote_path: "remote:fail_conn_bucket".to_string(),
+        upload_concurrency: 1,
+        rclone_bin: "nonexistent_rclone_binary".to_string(),
+        extra_args: vec![],
+        consolidate_extra_args: vec![],
+        skip_connection_check: true,
+    };
+    let backend = RcloneBackend::new(skip_config);
+    assert!(
+        backend.check_connection().await.is_ok(),
+        "check_connection must succeed when skip_connection_check is true"
+    );
+
+    // 2. empty remote_path bypasses subprocess check
+    let empty_config = RcloneConfig {
+        remote_path: "   ".to_string(),
+        upload_concurrency: 1,
+        rclone_bin: "nonexistent_rclone_binary".to_string(),
+        extra_args: vec![],
+        consolidate_extra_args: vec![],
+        skip_connection_check: false,
+    };
+    let empty_backend = RcloneBackend::new(empty_config);
+    assert!(
+        empty_backend.check_connection().await.is_ok(),
+        "check_connection must succeed when remote_path is empty"
+    );
+}
+
+#[tokio::test]
+async fn test_rclone_backend_trait_dispatch_and_idempotent_delete() {
+    let _mock_bin = get_mock_rclone_bin();
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_rclone_trait_{}", rand::random::<u32>()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let local_file = temp_dir.join("chunk.ts");
+    std::fs::write(&local_file, b"test chunk content").unwrap();
+
+    let staged_file = temp_dir.join("remote").join("chunk.ts.part");
+    let final_file = temp_dir.join("remote").join("chunk.ts");
+
+    let staged_str = staged_file.to_string_lossy().to_string();
+    let final_str = final_file.to_string_lossy().to_string();
+
+    let config = RcloneConfig {
+        remote_path: "remote:bucket".to_string(),
+        upload_concurrency: 2,
+        rclone_bin: "rclone".to_string(),
+        extra_args: vec![],
+        consolidate_extra_args: vec![],
+        skip_connection_check: false,
+    };
+    let backend: Arc<dyn UploadBackend> = Arc::new(RcloneBackend::new(config));
+
+    // 1. upload_file_to_dest via trait
+    backend
+        .upload_file_to_dest(&local_file, &staged_str, None)
+        .await
+        .expect("trait upload_file_to_dest should succeed");
+    assert!(staged_file.exists());
+
+    // 2. move_file via trait
+    backend
+        .move_file(&staged_str, &final_str)
+        .await
+        .expect("trait move_file should succeed");
+    assert!(!staged_file.exists());
+    assert!(final_file.exists());
+
+    // 3. delete_file via trait
+    backend
+        .delete_file(&final_str)
+        .await
+        .expect("trait delete_file should succeed");
+    assert!(!final_file.exists());
+
+    // 4. delete_file idempotency via trait (target absent, mock returns code 4)
+    backend
+        .delete_file(&final_str)
+        .await
+        .expect("trait delete_file on absent target must succeed idempotently");
+
+    // 5. delete_files via trait
+    let file_a = temp_dir.join("remote").join("a.ts");
+    let file_b = temp_dir.join("remote").join("b.ts");
+    std::fs::write(&file_a, b"a").unwrap();
+    std::fs::write(&file_b, b"b").unwrap();
+    let paths = vec![
+        file_a.to_string_lossy().to_string(),
+        file_b.to_string_lossy().to_string(),
+        final_str, // already absent, must also succeed
+    ];
+    backend
+        .delete_files(&paths)
+        .await
+        .expect("trait delete_files should succeed");
+    assert!(!file_a.exists());
+    assert!(!file_b.exists());
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
