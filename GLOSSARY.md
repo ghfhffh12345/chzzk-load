@@ -52,6 +52,14 @@ _Avoid_: Disk quota, auto-delete, purge strategy
 The per-task lifecycle rule (`delete_on_success`) governing whether local files are unlinked post-upload or retained locally.
 _Avoid_: File deleter, delete flag, cleanup policy
 
+**Artifact Upload Policy**:
+The opt-in synchronization contract (`--upload`) governing whether consolidated or archived artifact triads are transferred to remote cloud storage or retained exclusively on local disk, paired with `--delete-after-upload` for post-transfer local reclamation.
+_Avoid_: Cloud copy, upload flag, post-processing upload
+
+**Source Chunk Retention**:
+The lifecycle policy governing whether raw recording chunks (`chunk_%04d.ts`, `chat_%04d.jsonl`) are preserved by default or deleted post-consolidation via opt-in chunk purge (`--delete-chunks`).
+_Avoid_: Keep flag, raw file cleanup, delete original
+
 **Remote Storage Backend**:
 The unified cloud storage abstraction seam (`UploadBackend`) that standardizes file uploads, atomic promotion, idempotent deletions, and progress telemetry across live recording, VOD archival, and post-recording consolidation.
 _Avoid_: Rclone wrapper, cloud sync client, upload helper, file transfer service
@@ -81,7 +89,7 @@ The bounded time-window algorithm that identifies and eliminates duplicate live 
 _Avoid_: Chat filter, message dedup cache, hash set
 
 **Concurrent Chunk Purge**:
-The post-consolidation cleanup process that deletes original video and chat chunks concurrently under a bounded limit, rapidly reclaiming storage.
+The opt-in post-consolidation cleanup process (`--delete-chunks`) that concurrently deletes original video and chat chunks under a bounded worker limit, rapidly reclaiming local or remote storage while strictly preserving stream metadata.
 _Avoid_: Parallel deleter, batch wipe, chunk cleaner
 
 **Consolidation Progress Telemetry**:
