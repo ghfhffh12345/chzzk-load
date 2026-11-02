@@ -7,9 +7,9 @@
 [![CI](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml/badge.svg)](https://github.com/ghfhffh12345/chzzk-load/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A high-performance, standalone tool for automated Naver Chzzk live stream recording, real-time live chat archiving, post-recording media consolidation, and cloud storage syncing (via [rclone](https://rclone.org/)), featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
+A high-performance, standalone tool for automated Naver Chzzk live stream recording, real-time live chat archiving, post-recording media consolidation, high-throughput VOD archival, and cloud storage syncing (via [rclone](https://rclone.org/)), featuring an interactive Terminal User Interface (TUI) powered by [Ratatui](https://github.com/ratatui/ratatui).
 
-`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat_%04d.jsonl`), concurrently uploads completed chunks and logs to cloud storage via rclone (or keeps them locally in local-only mode), and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint. It also includes an offline post-recording consolidation pipeline (`chzzk-load consolidate`) that losslessly remuxes recorded chunks into normalized, seekable MP4 files (`livestream.mp4`) with centralized seek tables (`+faststart`) and deduplicates chat logs (`live_chat.jsonl`).
+`chzzk-load` monitors live broadcasts, losslessly segments video streams into MPEG-TS chunks via FFmpeg stream-copy (`-c copy`), concurrently archives live chat via WebSocket into structured JSON Lines (`chat_%04d.jsonl`), concurrently uploads completed chunks and logs to cloud storage via rclone (or keeps them locally in local-only mode), and immediately deletes local files upon confirmed upload to maintain a strictly bounded disk footprint. It also includes an on-demand VOD archival pipeline (`chzzk-load vod`) powered by multi-connection `aria2c` acceleration, and an offline post-recording consolidation pipeline (`chzzk-load consolidate`) that losslessly remuxes recorded chunks into normalized, seekable MP4 files (`livestream.mp4`) with centralized seek tables (`+faststart`), deduplicates chat logs (`live_chat.jsonl`), and preserves canonical broadcast metadata (`live_metadata.jsonl`).
 
 ![chzzk-load TUI Dashboard](assets/tui-preview.png)
 
@@ -24,8 +24,9 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 - 📊 **Stream Metadata Event Tracking (`live_metadata.jsonl`)**: Tracks essential broadcast state transitions (title, category, tags, access tier, and playback/chat policy flags) using a lean JSON Lines snapshot format (v2) with millisecond-accurate video synchronization, synchronized in real time via the unified non-blocking upload pipeline.
 - 💾 **Strictly Bounded Disk Footprint & Disk Space Guarding**: Only 1–2 video segments and at most 1 chat chunk reside on disk simultaneously per active stream. Chunks are permanently deleted immediately upon verified cloud upload. An active cross-platform circuit breaker (`min_free_disk_gb`) gracefully pauses recordings and actively evicts the oldest failed chunks in the Dead-Letter Queue (DLQ) while strictly safeguarding metadata timelines if disk space falls below safe limits.
 - 🛡️ **N+1 Segment Boundary Safety**: Explicit numeric sequence parsing (`chunk_%04d.ts`) ensures chunk $N$ is sealed and uploaded only when chunk $N+1$ exists on disk with size $> 0$, preventing partial or corrupted uploads.
-- 🎬 **Post-Recording Consolidation (`chzzk-load consolidate`)**: Losslessly merges and remuxes fragmented video segments (`chunk_%04d.ts`) into a seekable, timeline-normalized MP4 (`livestream.mp4` with `+faststart`) and deduplicates chat logs into `live_chat.jsonl`. Supports both local recording directories and cloud storage remotes (`remote:path`) with a strictly bounded 1× local disk footprint by streaming remote chunks on demand through an ephemeral read-only HTTP loopback server (`rclone serve http`).
-- 🚀 **High-Throughput Concurrent Cloud Upload & Resilient Staging**: Concurrently uploads consolidated `livestream.mp4` and `live_chat.jsonl` using two-stage atomic staging (`.part` files renamed via `rclone moveto`), tuned with large-file transfer optimizations (`--drive-chunk-size 128M`, multi-threading). Features sibling process abort on failure, container structural sanity probing (`moov` atom validation) for instant upload resumption, and pre-flight disk capacity checks ($1.15\times$ required space).
+- 🎬 **Post-Recording Consolidation (`chzzk-load consolidate`)**: Losslessly merges and remuxes fragmented video segments (`chunk_%04d.ts`) into a seekable, timeline-normalized MP4 (`livestream.mp4` with `+faststart`), deduplicates chat logs into `live_chat.jsonl`, and guarantees canonical Live Artifact Triad completeness (`live_metadata.jsonl`). Safely preserves raw source chunks by default on both local and cloud storage, with opt-in `--delete-chunks` chunk purge. Symmetrically supports offline local consolidation, remote-to-local downloading without re-uploading, and direct cloud uploads (`--upload`) with a strictly bounded 1× local disk footprint via ephemeral HTTP loopback streaming (`rclone serve http`).
+- 📥 **High-Throughput VOD Archival (`chzzk-load vod`)**: Downloads archived broadcasts at line-speed using external `aria2c` multi-socket acceleration (`-x 16 -s 16 -k 1M`) with automatic progressive MP4 stream selection and segmented HLS fallback. Concurrently paginates live chat history into time-aligned JSON Lines (`vod_chat.jsonl`), generates dual-event metadata snapshots (`vod_metadata.jsonl`), enforces `--overwrite` collision protection, and symmetrically integrates with the cloud storage upload pipeline (`--upload`).
+- 🚀 **High-Throughput Concurrent Cloud Upload & Resilient Staging**: Concurrently uploads consolidated artifacts or VOD files using two-stage atomic staging (`.part` files renamed via `rclone moveto`), tuned with large-file transfer optimizations (`--drive-chunk-size 128M`, multi-threading). Features sibling process abort on failure, container structural sanity probing (`moov` atom validation) for instant upload resumption, and pre-flight disk capacity checks ($1.15\times$ required space).
 - 📊 **Responsive Consolidation Telemetry**: Real-time dual-track ANSI progress bars (`VID`, `CHAT`, `UP V`, `UP C`, `DEL`) with a 10 Hz dirty render loop for remuxing, cloud uploading, and concurrent chunk purging, automatically falling back to 20% milestone boundaries and 30-second heartbeats in non-interactive/headless environments.
 - 📬 **Non-Blocking Dead-Letter Queue (DLQ)**: Upload failures never block subsequent chunks or metadata snapshots. Failed tasks transfer to a background DLQ with exponential backoff (initial 2s, capped at 5m, infinite retries, capped at 20 tasks/channel in RAM), maintaining uplink progress and disk reclamation while preserving stream metadata.
 - 🔄 **Startup Crash Reconciliation & Tail Chunk Quarantine**: Reconciles orphaned session folders from prior crashes or system reboots, validating contiguous sealed chunks and lingering `live_metadata.jsonl` files, re-injecting them into the Dead-Letter Queue (DLQ) for cloud upload while safely quarantining unfinalized tail segments (`.quarantine`).
@@ -41,10 +42,12 @@ A high-performance, standalone tool for automated Naver Chzzk live stream record
 
 - **FFmpeg**: Must be installed and accessible on your system's `PATH` (or configured via the `CHZZK_LOAD_FFMPEG_BIN` environment variable).
 - **Rclone**: (Optional for local-only mode, required for cloud upload) Must be installed and accessible on your system's `PATH` (or configured via `settings.toml` `rclone.rclone_bin` or the `CHZZK_LOAD_RCLONE_BIN` environment variable).
+- **Aria2**: (Required for the `vod` subcommand) Must be installed and accessible on your system's `PATH` (or configured via `settings.toml` `aria2c.aria2c_bin` or the `CHZZK_LOAD_ARIA2C_BIN` environment variable).
 
 ```bash
 ffmpeg -version
 rclone version
+aria2c --version
 ```
 
 ---
@@ -60,13 +63,13 @@ npm install -g chzzk-load
 Start the application:
 
 ```bash
-# Run with default settings (automatically creates settings.toml if missing)
+# Run real-time stream monitor with default settings (creates settings.toml if missing)
 chzzk-load
 
-# Or specify a custom configuration file
+# Specify a custom configuration file
 chzzk-load --config /path/to/my-settings.toml
 
-# Or bypass remote connection check at startup
+# Bypass remote connection check at startup
 chzzk-load --skip-rclone-check
 
 # Run in headless console mode (ideal for background systemd/Docker services)
@@ -75,8 +78,17 @@ chzzk-load --headless
 # Consolidate a local recording session
 chzzk-load consolidate recordings/[2026-09-30_140000]\ [StreamerAlias]\ StreamerName\ -\ Live\ Stream\ Title
 
-# Consolidate a remote recording session stored in cloud storage
+# Consolidate a remote recording session into local storage (offline archival)
 chzzk-load consolidate remote:chzzk/[2026-09-30_140000]\ [StreamerAlias]\ StreamerName\ -\ Live\ Stream\ Title
+
+# Consolidate a local recording session and upload to cloud storage
+chzzk-load consolidate recordings/... --upload
+
+# Download an archived broadcast VOD
+chzzk-load vod 12345678
+
+# Download a VOD and upload to cloud storage
+chzzk-load vod 12345678 --upload
 ```
 
 On first startup, `chzzk-load` generates a default `settings.toml` template in the current working directory if one does not exist.
@@ -85,17 +97,23 @@ On first startup, `chzzk-load` generates a default `settings.toml` template in t
 
 ## Post-Recording Consolidation (`chzzk-load consolidate`)
 
-Following a recording session, stream archives consist of fragmented video chunks (`chunk_%04d.ts`), chunked chat logs (`chat_%04d.jsonl`), and stream metadata (`live_metadata.jsonl`). The `consolidate` subcommand losslessly merges and remuxes these fragments into normalized, seekable container files (`livestream.mp4` and `live_chat.jsonl`) with a strictly bounded local disk footprint.
+Following a recording session, stream archives consist of fragmented video chunks (`chunk_%04d.ts`), chunked chat logs (`chat_%04d.jsonl`), and stream metadata (`live_metadata.jsonl`). The `consolidate` subcommand losslessly merges and remuxes these fragments into normalized, seekable container files (`livestream.mp4` and `live_chat.jsonl`) while preserving canonical broadcast metadata (`live_metadata.jsonl`) across all storage boundaries.
 
 ```bash
-# Consolidate a local recording session directory
+# Consolidate a local recording session directory (in-place)
 chzzk-load consolidate recordings/[2026-09-30_140000]\ [StreamerAlias]\ StreamerName\ -\ Live\ Stream\ Title
 
-# Consolidate a remote recording session stored in cloud storage
-chzzk-load consolidate remote:chzzk/[2026-09-30_140000]\ [StreamerAlias]\ StreamerName\ -\ Live\ Stream\ Title
+# Consolidate a remote recording session into local storage (offline archival)
+chzzk-load consolidate remote:chzzk/[2026-09-30_140000]\ [StreamerAlias]\ StreamerName\ -\ Live\ Stream\ Title -o /mnt/media/chzzk
 
-# Retain original video and chat chunks (skips automatic post-consolidation chunk purge)
-chzzk-load consolidate recordings/... --keep-original
+# Consolidate a local recording session and upload the Live Artifact Triad to cloud storage
+chzzk-load consolidate recordings/... --upload
+
+# Consolidate, upload to cloud storage, and unlink local output files post-upload
+chzzk-load consolidate recordings/... --upload --delete-after-upload
+
+# Purge original video and chat chunks (safe-by-default: chunks preserved unless --delete-chunks is specified)
+chzzk-load consolidate recordings/... --delete-chunks
 
 # Overwrite existing livestream.mp4 or live_chat.jsonl if already present
 chzzk-load consolidate recordings/... --overwrite
@@ -107,10 +125,10 @@ chzzk-load consolidate recordings/... --strict
 chzzk-load consolidate remote:chzzk/... --temp-dir /mnt/fast-nvme/staging
 
 # Custom deletion concurrency when purging original chunks
-chzzk-load consolidate remote:chzzk/... --delete-concurrency 32
+chzzk-load consolidate remote:chzzk/... --delete-chunks --delete-concurrency 32
 
 # Run consolidation in headless mode (milestone logging for scripts/cron)
-chzzk-load --headless consolidate recordings/...
+chzzk-load consolidate recordings/... --headless
 ```
 
 ### Consolidation CLI Options
@@ -118,12 +136,17 @@ chzzk-load --headless consolidate recordings/...
 | Option | Default | Description |
 | :--- | :--- | :--- |
 | `<PATH>` | *(Required)* | Local directory path or remote rclone path (`<remote>:<path>`) to the recording session. |
-| `--keep-original` | `false` | Retain original video and chat chunks after successful consolidation. When omitted, original chunks are automatically purged after verified consolidation. |
-| `--overwrite` | `false` | Overwrite existing `livestream.mp4` or `live_chat.jsonl` files in the target directory. |
+| `-o`, `--output-dir <DIR>` | Auto-resolved | Output directory for consolidated artifacts (defaults to source directory for local, or `<recordings_dir>/<folder>` for remote). |
+| `--upload` | `false` | Upload consolidated Live Artifact Triad to remote cloud storage via rclone. |
+| `--remote-path <PATH>` | Auto-resolved | Custom remote destination path for cloud upload (requires `--upload`). |
+| `--delete-after-upload` | `false` | Delete local consolidated files after successful cloud upload (requires `--upload`). |
+| `--delete-chunks` | `false` | Purge original video and chat chunks after successful consolidation. Original chunks are safely preserved by default. |
+| `--overwrite` | `false` | Overwrite existing `livestream.mp4` or `live_chat.jsonl` files in the destination directory. |
 | `--strict` | `false` | Abort consolidation if chunk sequence gaps (e.g. missing `chunk_0002.ts`) or malformed entries are encountered. |
-| `--delete-concurrency <N>` | `16` | Maximum concurrent deletion tasks when purging original chunks. |
+| `--delete-concurrency <N>` | `16` | Maximum concurrent deletion tasks when purging original chunks via `--delete-chunks`. |
 | `--temp-dir <PATH>` | System temp | Custom staging directory for temporary consolidation files (`livestream.mp4.part`, `live_chat.jsonl.part`). |
-| `-c`, `--config <PATH>` | Auto-detect | Path to dedicated `settings.toml` configuration file (used to resolve rclone binary, remote path, and `consolidate_extra_args`). |
+| `-c`, `--config <PATH>` | Auto-detect | Path to dedicated `settings.toml` configuration file (resolves rclone binary, remote path, and `consolidate_extra_args`). |
+| `--headless` *(alias: `--no-tui`)* | `false` | Run in headless console mode without interactive ANSI progress bars. |
 
 ### Architecture & Safety Highlights
 
@@ -131,11 +154,75 @@ chzzk-load --headless consolidate recordings/...
 - **Timestamp Normalization & Monotonic DTS**: Applies `-avoid_negative_ts make_zero` so playback starts strictly at 0.0s, eliminating initial playback freezes and audio/video desync. Monotonic bitstream filters (`VIDEO_MONOTONIC_DTS_BSF`, `AUDIO_MONOTONIC_DTS_BSF` / `aac_adtstoasc`) resolve chunk seam DTS collisions without video transcoding.
 - **Desktop-Friendly Faststart Seek Table (`+faststart`)**: Places the `moov` atom header at the beginning of `livestream.mp4`, enabling instant duration indexing and smooth scrubbing in desktop media players (VLC, QuickTime, Windows Media Player) and browsers.
 - **Bounded 1× Disk Footprint (Zero Local Chunk Download)**: In remote consolidation, chunks stream on demand into memory through an ephemeral read-only HTTP loopback server (`rclone serve http`) while writing seekable output directly to a local staging file (`livestream.mp4.part`), bounding local disk consumption strictly to 1× the stream size.
+- **Safe-by-Default Chunk Retention**: Raw video segments (`chunk_%04d.ts`) and chat chunks (`chat_%04d.jsonl`) are strictly preserved by default on both local and cloud storage. Original chunks are only deleted when `--delete-chunks` is explicitly specified and consolidation completes with zero errors.
+- **Canonical Live Artifact Triad Synchronization**: Guarantees that the complete canonical Live Artifact Triad (`livestream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`) is present at the final destination. In remote-to-local offline consolidation, `live_metadata.jsonl` is downloaded from cloud storage; in cloud upload workflows, it is uploaded alongside the media files.
 - **Pre-flight Capacity Verification**: Checks staging disk space prior to remuxing, requiring at least $1.15\times$ total video bytes. Fails fast with actionable guidance if capacity is insufficient.
 - **Container Structural Integrity Validation**: Probes MP4 container structural integrity (`validate_mp4_container_integrity`) before promoting staged `.part` files or resuming uploads: verifies a single `moov` atom, at least one `mdat` atom, complete file coverage without trailing unindexed garbage, and ensures sample chunk offsets (`stco`/`co64`) point strictly within `mdat`.
 - **Concurrent Cloud Upload & Sibling Abort**: Concurrently uploads `livestream.mp4` and `live_chat.jsonl` with tuned large-file flags (`--drive-chunk-size 128M`, multi-threading). If any upload fails, sibling transfers are immediately aborted and remote `.part` files are removed while local staging files are preserved for instant resume.
 - **Sliding-Window Chat Deduplication**: Deduplicates chat records concurrently with video remuxing into `live_chat.jsonl`, preserving chronological message order with $O(1)$ memory consumption.
 - **Concurrent Chunk Purge**: Rapidly purges original `.ts` and `.jsonl` files in parallel (`--delete-concurrency 16`) after verified consolidation and upload, keeping storage clean.
+
+---
+
+## On-Demand VOD Archival (`chzzk-load vod`)
+
+`chzzk-load vod` provides high-throughput, multi-connection downloading for completed Naver Chzzk VOD broadcasts. Backed by `aria2c` multi-socket acceleration, it downloads video streams at line speed, paginates chat history in parallel, and packages output into the canonical VOD Artifact Triad (`vod.mp4`, `vod_chat.jsonl`, `vod_metadata.jsonl`).
+
+```bash
+# Download a VOD archive at best quality (saved to settings.general.recordings_dir)
+chzzk-load vod 12345678
+
+# Download with specific quality and custom output directory
+chzzk-load vod 12345678 -q 1080p -o /mnt/media/vods
+
+# Download VOD and upload resulting artifacts to remote cloud storage
+chzzk-load vod 12345678 --upload
+
+# Download, upload to cloud, and delete local output files
+chzzk-load vod 12345678 --upload --delete-after-upload
+
+# Download to a custom remote path override
+chzzk-load vod 12345678 --upload --remote-path "remote:chzzk/vod_archive"
+
+# Overwrite existing VOD files in destination directory
+chzzk-load vod 12345678 --overwrite
+
+# Skip chat history pagination and archive only video and metadata
+chzzk-load vod 12345678 --no-chat
+
+# Pass Naver session cookies for age-restricted or subscriber-only VODs
+chzzk-load vod 12345678 --nid-aut "..." --nid-ses "..."
+
+# Run in headless mode without ANSI progress bars
+chzzk-load vod 12345678 --headless
+```
+
+### VOD CLI Options
+
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `<VIDEO_ID>` | *(Required)* | Numeric Chzzk VOD video identifier. |
+| `-q`, `--quality <QUALITY>` | `"best"` | Target video stream quality (`"best"`, `"1080p"`, `"720p"`, `"480p"`, etc.). |
+| `-o`, `--output-dir <DIR>` | Auto-resolved | Output directory for VOD archive (defaults to `settings.general.recordings_dir/[<date>] [<alias>] <streamer> - <title>`). |
+| `--upload` | `false` | Upload completed VOD artifacts to remote cloud storage via rclone. |
+| `--remote-path <PATH>` | Auto-resolved | Custom remote destination path for cloud upload (requires `--upload`). |
+| `--delete-after-upload` | `false` | Delete local VOD files after successful cloud upload (requires `--upload`). |
+| `--overwrite` | `false` | Overwrite existing VOD archive files (`vod.mp4`, `vod_chat.jsonl`, `vod_metadata.jsonl`). |
+| `--no-chat` | `false` | Skip chat history pagination and archiving entirely. |
+| `--temp-dir <DIR>` | Staging folder | Custom staging directory for temporary download files (defaults to `.vod_staging_<video_id>` in output directory). |
+| `--nid-aut <STR>` | `""` | Naver session cookie `NID_AUT` override for age-restricted or subscriber VODs. |
+| `--nid-ses <STR>` | `""` | Naver session cookie `NID_SES` override for age-restricted or subscriber VODs. |
+| `--max-segments <N>` | - | Maximum video segments to download (useful for quick verification or smoke-testing). |
+| `-c`, `--config <PATH>` | Auto-detect | Path to dedicated `settings.toml` configuration file. |
+| `--headless` *(alias: `--no-tui`)* | `false` | Run in headless console mode without interactive ANSI progress bars. |
+
+### Architecture & Safety Highlights
+
+- **Dual Ingestion Pipeline**: Prioritizes monolithic progressive MP4 streams via 16 concurrent byte-range connections (`aria2c -x 16 -s 16 -k 1M`) to saturate multi-gigabit connections. Seamlessly falls back to parallel segmented HLS ingestion and FFmpeg concat demuxer remuxing when progressive streams are unavailable.
+- **Cursor-Resumable Staging**: Interrupted downloads preserve staging state using `.aria2` control files and cursor-resumable chat checkpoint files (`vod_chat.jsonl.part`), resuming seamlessly without re-downloading existing data.
+- **Canonical VOD Artifact Triad**: Consistently produces `vod.mp4`, `vod_chat.jsonl`, and `vod_metadata.jsonl` staged under two-stage atomic promotion, anchored chronologically by the broadcast's original `liveOpenDate`.
+- **Overwrite Protection**: Safely prevents accidental clobbering of existing VOD archives unless `--overwrite` is explicitly specified.
+- **Responsive Telemetry**: Real-time 10 Hz dual-track progress bars (`[VID]` and `[CHAT]`) report active transfer rates and completion percentages, automatically falling back to milestone heartbeats in headless environments.
 
 ---
 
@@ -247,14 +334,24 @@ recordings/
     └── live_metadata.jsonl    # Broadcast state transitions & sync timeline
 ```
 
-After running `chzzk-load consolidate`, original chunks are purged (unless `--keep-original` is specified) and replaced with consolidated, seekable files:
+After running `chzzk-load consolidate`, the destination directory contains the canonical Live Artifact Triad (`livestream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`). Original recording chunks are safely preserved by default, or purged if `--delete-chunks` is explicitly passed:
 
 ```
 recordings/
 └── [2026-09-30_140000] [StreamerAlias] StreamerName - Live Stream Title/
     ├── livestream.mp4        # Consolidated seekable MP4 video (normalized timestamps, +faststart moov atom)
-    ├── live_chat.jsonl        # Consolidated & deduplicated chat log (JSON Lines)
-    └── live_metadata.jsonl    # Broadcast state transitions & sync timeline
+    ├── live_chat.jsonl       # Consolidated & deduplicated chat log (JSON Lines)
+    └── live_metadata.jsonl   # Broadcast state transitions & sync timeline
+```
+
+When archiving on-demand broadcasts via `chzzk-load vod`, the destination directory contains the canonical VOD Artifact Triad:
+
+```
+recordings/
+└── [2026-09-30_140000] [StreamerAlias] StreamerName - Live Stream Title/
+    ├── vod.mp4               # Downloaded seekable MP4 video (+faststart moov atom)
+    ├── vod_chat.jsonl        # Timeline-synchronized VOD chat history (JSON Lines)
+    └── vod_metadata.jsonl    # Dual-event boundary broadcast metadata (JSON Lines)
 ```
 
 ---
@@ -427,6 +524,7 @@ Running `chzzk-load consolidate` merges fragmented stream archives into two stan
 | :--- | :--- |
 | `CHZZK_LOAD_FFMPEG_BIN` | Custom path to the FFmpeg executable (defaults to `ffmpeg` on `PATH`). |
 | `CHZZK_LOAD_RCLONE_BIN` | Custom path to the rclone executable (overrides `rclone.rclone_bin` and system `PATH`). |
+| `CHZZK_LOAD_ARIA2C_BIN` | Custom path to the aria2c executable (overrides `aria2c.aria2c_bin` and system `PATH`). |
 | `CHZZK_LOAD_BIN` | Path override for the native `chzzk-load` binary when running via the npm launcher. |
 
 ---

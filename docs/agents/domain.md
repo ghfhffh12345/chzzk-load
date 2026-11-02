@@ -14,7 +14,7 @@ Before planning, refactoring, or naming components:
 `chzzk-load` operates as a cohesive single-context architecture:
 
 - Root glossary: `GLOSSARY.md`
-- Architectural decisions: `docs/adr/0001-*.md` through `0014-*.md`
+- Architectural decisions: `docs/adr/0001-*.md` through `0015-*.md`
 
 If a concept is absent from `GLOSSARY.md`, note the gap for `/domain-modeling` rather than introducing unvetted synonyms.
 
