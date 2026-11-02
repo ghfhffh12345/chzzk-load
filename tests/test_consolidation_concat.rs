@@ -502,3 +502,193 @@ async fn test_local_consolidation_overwrite_flag_replaces_existing_artifacts() {
 
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[tokio::test]
+async fn test_local_consolidation_default_chunk_retention_preserves_source_chunks_and_metadata() {
+    let _ = common::mock_ffmpeg::get_mock_ffmpeg_bin();
+
+    let temp_dir = create_temp_test_dir("test_concat_retention_default");
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    fs::write(&chunk1, vec![2u8; 150]).unwrap();
+
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    let chat1 = temp_dir.join("chat_0001.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+    fs::write(
+        &chat1,
+        b"{\"time_ms\":2000,\"datetime\":\"2026-10-08 20:00:01\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user2\",\"content\":\"world\",\"raw\":{}}\n",
+    )
+    .unwrap();
+
+    let metadata_path = temp_dir.join("live_metadata.jsonl");
+    fs::write(
+        &metadata_path,
+        b"{\"event\":\"SESSION_START\",\"channel_id\":\"test_chan\",\"live_id\":\"live_001\",\"stream_offset_ms\":0}\n",
+    )
+    .unwrap();
+    let legacy_metadata_path = temp_dir.join("livemetadata.jsonl");
+    fs::write(
+        &legacy_metadata_path,
+        b"{\"event\":\"SESSION_START_LEGACY\",\"stream_offset_ms\":0}\n",
+    )
+    .unwrap();
+
+    // Default arguments without --delete-chunks
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    assert!(
+        !args.delete_chunks,
+        "delete_chunks must default to false for safe-by-default retention"
+    );
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("run_consolidation should succeed with default retention");
+
+    assert_eq!(summary.video_chunks_count, 2);
+    assert_eq!(summary.chat_chunks_count, 2);
+    assert!(summary.has_metadata);
+
+    // Verify consolidated destination artifacts exist
+    assert!(
+        temp_dir.join("livestream.mp4").exists(),
+        "livestream.mp4 must be created"
+    );
+    assert!(
+        temp_dir.join("live_chat.jsonl").exists(),
+        "live_chat.jsonl must be created"
+    );
+
+    // Verify raw source chunks are preserved by default
+    assert!(
+        chunk0.exists(),
+        "chunk_0000.ts must be preserved by default upon consolidation"
+    );
+    assert!(
+        chunk1.exists(),
+        "chunk_0001.ts must be preserved by default upon consolidation"
+    );
+    assert!(
+        chat0.exists(),
+        "chat_0000.jsonl must be preserved by default upon consolidation"
+    );
+    assert!(
+        chat1.exists(),
+        "chat_0001.jsonl must be preserved by default upon consolidation"
+    );
+
+    // Stream metadata (canonical and legacy) must strictly be preserved
+    assert!(
+        metadata_path.exists(),
+        "live_metadata.jsonl must strictly remain intact"
+    );
+    assert!(
+        legacy_metadata_path.exists(),
+        "legacy livemetadata.jsonl must strictly remain intact"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_local_consolidation_delete_chunks_purges_chunks_and_preserves_metadata() {
+    let _ = common::mock_ffmpeg::get_mock_ffmpeg_bin();
+
+    let temp_dir = create_temp_test_dir("test_concat_opt_in_delete");
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    fs::write(&chunk1, vec![2u8; 150]).unwrap();
+
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    let chat1 = temp_dir.join("chat_0001.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+    fs::write(
+        &chat1,
+        b"{\"time_ms\":2000,\"datetime\":\"2026-10-08 20:00:01\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user2\",\"content\":\"world\",\"raw\":{}}\n",
+    )
+    .unwrap();
+
+    let metadata_path = temp_dir.join("live_metadata.jsonl");
+    fs::write(
+        &metadata_path,
+        b"{\"event\":\"SESSION_START\",\"channel_id\":\"test_chan\",\"live_id\":\"live_001\",\"stream_offset_ms\":0}\n",
+    )
+    .unwrap();
+    let legacy_metadata_path = temp_dir.join("livemetadata.jsonl");
+    fs::write(
+        &legacy_metadata_path,
+        b"{\"event\":\"SESSION_START_LEGACY\",\"stream_offset_ms\":0}\n",
+    )
+    .unwrap();
+
+    // Explicit opt-in --delete-chunks
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        delete_chunks: true,
+        delete_concurrency: 4,
+        ..Default::default()
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("run_consolidation should succeed with --delete-chunks");
+
+    assert_eq!(summary.video_chunks_count, 2);
+    assert_eq!(summary.chat_chunks_count, 2);
+    assert!(summary.has_metadata);
+
+    // Verify consolidated destination artifacts exist
+    assert!(
+        temp_dir.join("livestream.mp4").exists(),
+        "livestream.mp4 must be created"
+    );
+    assert!(
+        temp_dir.join("live_chat.jsonl").exists(),
+        "live_chat.jsonl must be created"
+    );
+
+    // Verify original source chunks are purged when --delete-chunks is passed
+    assert!(
+        !chunk0.exists(),
+        "chunk_0000.ts must be purged when delete_chunks is true"
+    );
+    assert!(
+        !chunk1.exists(),
+        "chunk_0001.ts must be purged when delete_chunks is true"
+    );
+    assert!(
+        !chat0.exists(),
+        "chat_0000.jsonl must be purged when delete_chunks is true"
+    );
+    assert!(
+        !chat1.exists(),
+        "chat_0001.jsonl must be purged when delete_chunks is true"
+    );
+
+    // Stream metadata (canonical and legacy) must strictly remain intact even with --delete-chunks
+    assert!(
+        metadata_path.exists(),
+        "live_metadata.jsonl must strictly remain intact when delete_chunks is true"
+    );
+    assert!(
+        legacy_metadata_path.exists(),
+        "legacy livemetadata.jsonl must strictly remain intact when delete_chunks is true"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}

@@ -73,9 +73,10 @@ pub const DEFAULT_DELETE_CONCURRENCY: usize = 16;
 
 /// Returns true if a chunk is eligible for post-consolidation purging (.ts or .jsonl, strictly excluding live_metadata.jsonl and livemetadata.jsonl).
 pub(crate) fn is_purgeable_chunk(chunk: &ConsolidationChunk) -> bool {
-    chunk.name != "live_metadata.jsonl"
-        && chunk.name != "livemetadata.jsonl"
-        && (chunk.name.ends_with(".ts") || chunk.name.ends_with(".jsonl"))
+    let lower = chunk.name.to_ascii_lowercase();
+    lower != "live_metadata.jsonl"
+        && lower != "livemetadata.jsonl"
+        && (lower.ends_with(".ts") || lower.ends_with(".jsonl"))
 }
 
 /// Collects chunk names eligible for post-consolidation purging from video and chat manifests.
@@ -1002,6 +1003,13 @@ mod tests {
             size: 100,
         };
         assert!(!is_purgeable_chunk(&meta_canonical));
+
+        let meta_upper = ConsolidationChunk {
+            name: "LIVE_METADATA.JSONL".to_string(),
+            index: 0,
+            size: 100,
+        };
+        assert!(!is_purgeable_chunk(&meta_upper));
 
         let meta = ConsolidationChunk {
             name: "livemetadata.jsonl".to_string(),

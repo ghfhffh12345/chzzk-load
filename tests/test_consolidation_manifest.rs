@@ -789,6 +789,155 @@ async fn test_run_consolidation_delete_chunks_false_preserves_chunks() {
 }
 
 #[tokio::test]
+async fn test_run_consolidation_default_args_preserves_chunks_and_canonical_metadata() {
+    let _ = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_run_cons_default_keep_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    fs::write(&chunk1, vec![1u8; 100]).unwrap();
+
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    let chat1 = temp_dir.join("chat_0001.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+    fs::write(
+        &chat1,
+        b"{\"time_ms\":2000,\"datetime\":\"2026-10-08 20:00:01\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user2\",\"content\":\"world\",\"raw\":{}}\n",
+    )
+    .unwrap();
+
+    let meta = temp_dir.join("live_metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\",\"stream_offset_ms\":0}\n").unwrap();
+
+    // Default arguments without --delete-chunks
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    assert!(!args.delete_chunks, "delete_chunks must default to false");
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("run_consolidation should succeed");
+
+    assert_eq!(summary.video_chunks_count, 2);
+    assert_eq!(summary.chat_chunks_count, 2);
+    assert!(summary.has_metadata);
+
+    // Chunks and canonical metadata must strictly remain intact
+    assert!(
+        chunk0.exists(),
+        "chunk_0000.ts must be preserved by default"
+    );
+    assert!(
+        chunk1.exists(),
+        "chunk_0001.ts must be preserved by default"
+    );
+    assert!(
+        chat0.exists(),
+        "chat_0000.jsonl must be preserved by default"
+    );
+    assert!(
+        chat1.exists(),
+        "chat_0001.jsonl must be preserved by default"
+    );
+    assert!(
+        meta.exists(),
+        "live_metadata.jsonl must strictly remain intact"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
+async fn test_run_consolidation_delete_chunks_true_purges_chunks_and_preserves_canonical_metadata()
+{
+    let _ = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_run_cons_purge_meta_{}",
+        rand::random::<u32>()
+    ));
+    fs::create_dir_all(&temp_dir).unwrap();
+
+    let chunk0 = temp_dir.join("chunk_0000.ts");
+    let chunk1 = temp_dir.join("chunk_0001.ts");
+    fs::write(&chunk0, vec![1u8; 100]).unwrap();
+    fs::write(&chunk1, vec![1u8; 100]).unwrap();
+
+    let chat0 = temp_dir.join("chat_0000.jsonl");
+    let chat1 = temp_dir.join("chat_0001.jsonl");
+    fs::write(
+        &chat0,
+        b"{\"time_ms\":1000,\"datetime\":\"2026-10-08 20:00:00\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user1\",\"content\":\"hello\",\"raw\":{}}\n",
+    )
+    .unwrap();
+    fs::write(
+        &chat1,
+        b"{\"time_ms\":2000,\"datetime\":\"2026-10-08 20:00:01\",\"msg_type\":\"COMMERCE\",\"nickname\":\"user2\",\"content\":\"world\",\"raw\":{}}\n",
+    )
+    .unwrap();
+
+    let meta = temp_dir.join("live_metadata.jsonl");
+    fs::write(&meta, b"{\"event\":\"start\",\"stream_offset_ms\":0}\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: temp_dir.to_string_lossy().to_string(),
+        delete_chunks: true,
+        delete_concurrency: 4,
+        ..Default::default()
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("run_consolidation should succeed");
+
+    assert_eq!(summary.video_chunks_count, 2);
+    assert_eq!(summary.chat_chunks_count, 2);
+    assert!(summary.has_metadata);
+
+    // Output files exist
+    assert!(temp_dir.join("livestream.mp4").exists());
+    assert!(temp_dir.join("live_chat.jsonl").exists());
+
+    // Chunks must be deleted
+    assert!(
+        !chunk0.exists(),
+        "chunk_0000.ts must be purged when delete_chunks is true"
+    );
+    assert!(
+        !chunk1.exists(),
+        "chunk_0001.ts must be purged when delete_chunks is true"
+    );
+    assert!(
+        !chat0.exists(),
+        "chat_0000.jsonl must be purged when delete_chunks is true"
+    );
+    assert!(
+        !chat1.exists(),
+        "chat_0001.jsonl must be purged when delete_chunks is true"
+    );
+
+    // Canonical live_metadata.jsonl must strictly remain intact
+    assert!(
+        meta.exists(),
+        "live_metadata.jsonl must strictly remain intact"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[tokio::test]
 async fn test_run_consolidation_single_media_video_only() {
     let mock_bin = get_mock_ffmpeg_bin();
     unsafe {
