@@ -9,7 +9,7 @@ use chzzk_load::chzzk::models_vod::{
     VodAdaptationSet, VodDetail, VodEncodingOption, VodOtherAttributes, VodPeriod, VodPlaybackInfo,
     VodPlaybackMedia, VodRepresentation,
 };
-use chzzk_load::chzzk::source::FakeVodSource;
+use chzzk_load::chzzk::source::{FakeVodSource, VodSource};
 use chzzk_load::cli::VodArgs;
 use chzzk_load::config::RcloneConfig;
 use chzzk_load::consolidation::staging::{probe_moov_atom, validate_mp4_container_integrity};
@@ -1906,7 +1906,7 @@ async fn test_vod_archival_fallback_to_hls_when_progressive_absent_or_segregated
     let args_1 = VodArgs {
         target: format!("https://chzzk.naver.com/video/{video_no_1}"),
         quality: "1080p".to_string(),
-        output_dir: Some(temp_dir.clone()),
+        output_dir: Some(temp_dir.join("case1")),
         temp_dir: None,
         no_chat: true,
         headless: true,
@@ -1991,7 +1991,7 @@ async fn test_vod_archival_fallback_to_hls_when_progressive_absent_or_segregated
     let args_2 = VodArgs {
         target: format!("https://chzzk.naver.com/video/{video_no_2}"),
         quality: "1080p".to_string(),
-        output_dir: Some(temp_dir.clone()),
+        output_dir: Some(temp_dir.join("case2")),
         temp_dir: None,
         no_chat: true,
         headless: true,
@@ -2776,6 +2776,369 @@ async fn test_vod_archival_with_injected_mock_upload_backend() {
     assert!(
         files.keys().any(|k| k.ends_with("/vod_metadata.jsonl")),
         "Mock backend must contain uploaded vod_metadata.jsonl: {files:?}"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_fails_when_destination_files_exist_without_overwrite() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_overwrite_fail_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 998877;
+    let video_id = "neon_vid_existing";
+    let in_key = "key_existing";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    // Pre-create output directory with pre-existing vod.mp4
+    let detail = source.get_video_detail(video_no).await.unwrap();
+    let folder_name = chzzk_load::vod::resolve_vod_folder_name(&detail, None);
+    let output_folder = temp_dir.join(folder_name);
+    std::fs::create_dir_all(&output_folder).unwrap();
+    let pre_existing_vod = output_folder.join("vod.mp4");
+    std::fs::write(&pre_existing_vod, b"EXISTING_VOD_DATA").unwrap();
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+        overwrite: false,
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let result = run_vod_archival(args, source, cancel_token).await;
+
+    assert!(
+        result.is_err(),
+        "run_vod_archival must fail when vod.mp4 exists and overwrite is false"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Target VOD archive already exists")
+            || err_msg.contains("pass --overwrite to replace"),
+        "Error message must inform user that archive exists and require --overwrite: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("vod.mp4"),
+        "Error message must specify conflicting file vod.mp4: {err_msg}"
+    );
+
+    // Verify existing file was preserved and untouched
+    let file_content = std::fs::read(&pre_existing_vod).unwrap();
+    assert_eq!(file_content, b"EXISTING_VOD_DATA");
+
+    // Verify staging directory was NOT created
+    let staging_dir = output_folder.join(format!(".vod_staging_{video_id}"));
+    assert!(
+        !staging_dir.exists(),
+        "Staging directory must not be created on pre-flight collision"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_fails_when_chat_or_metadata_exist_without_overwrite() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_chat_meta_fail_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 887766;
+    let video_id = "neon_vid_chat_meta";
+    let in_key = "key_chat_meta";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let detail = source.get_video_detail(video_no).await.unwrap();
+    let folder_name = chzzk_load::vod::resolve_vod_folder_name(&detail, None);
+    let output_folder = temp_dir.join(folder_name);
+    std::fs::create_dir_all(&output_folder).unwrap();
+
+    // Only create vod_chat.jsonl and vod_metadata.jsonl (no vod.mp4)
+    std::fs::write(output_folder.join("vod_chat.jsonl"), b"EXISTING_CHAT").unwrap();
+    std::fs::write(output_folder.join("vod_metadata.jsonl"), b"EXISTING_META").unwrap();
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+        overwrite: false,
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let result = run_vod_archival(args, source, cancel_token).await;
+
+    assert!(
+        result.is_err(),
+        "Must fail when vod_chat.jsonl and vod_metadata.jsonl exist"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("pass --overwrite to replace"));
+    assert!(err_msg.contains("vod_chat.jsonl"));
+    assert!(err_msg.contains("vod_metadata.jsonl"));
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_succeeds_with_overwrite_and_invalidates_staging_dir() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_overwrite_succ_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 554433;
+    let video_id = "neon_vid_overwrite";
+    let in_key = "key_overwrite";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    // Pre-create output directory with old triad files
+    let detail = source.get_video_detail(video_no).await.unwrap();
+    let folder_name = chzzk_load::vod::resolve_vod_folder_name(&detail, None);
+    let output_folder = temp_dir.join(folder_name);
+    std::fs::create_dir_all(&output_folder).unwrap();
+
+    let old_video = output_folder.join("vod.mp4");
+    let old_chat = output_folder.join("vod_chat.jsonl");
+    let old_meta = output_folder.join("vod_metadata.jsonl");
+    std::fs::write(&old_video, b"OLD_VIDEO_CONTENT").unwrap();
+    std::fs::write(&old_chat, b"OLD_CHAT_CONTENT\n").unwrap();
+    std::fs::write(&old_meta, b"OLD_META_CONTENT\n").unwrap();
+
+    // Pre-create stale staging directory with stale data
+    let staging_dir = output_folder.join(format!(".vod_staging_{video_id}"));
+    std::fs::create_dir_all(&staging_dir).unwrap();
+    let stale_chunk = staging_dir.join("stale_corrupted_chunk.ts");
+    std::fs::write(&stale_chunk, b"CORRUPTED_LEFTOVER_SEGMENT").unwrap();
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        temp_dir: None,
+        no_chat: false,
+        headless: true,
+        config: None,
+        upload: false,
+        delete_after_upload: false,
+        nid_aut: None,
+        nid_ses: None,
+        max_segments: None,
+        overwrite: true,
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival(args, source, cancel_token)
+        .await
+        .expect("run_vod_archival with overwrite must succeed");
+
+    assert_eq!(summary.video_no, video_no);
+    assert!(summary.video_path.exists());
+    assert!(summary.metadata_path.exists());
+    assert!(summary.chat_path.as_ref().unwrap().exists());
+
+    // Verify destination files were overwritten with new content
+    let new_video_bytes = std::fs::read(&summary.video_path).unwrap();
+    let new_chat_bytes = std::fs::read(summary.chat_path.as_ref().unwrap()).unwrap();
+    let new_meta_bytes = std::fs::read(&summary.metadata_path).unwrap();
+
+    assert_ne!(
+        new_video_bytes, b"OLD_VIDEO_CONTENT",
+        "vod.mp4 must be replaced"
+    );
+    assert_ne!(
+        new_chat_bytes, b"OLD_CHAT_CONTENT\n",
+        "vod_chat.jsonl must be replaced"
+    );
+    assert_ne!(
+        new_meta_bytes, b"OLD_META_CONTENT\n",
+        "vod_metadata.jsonl must be replaced"
+    );
+
+    // Verify staging directory and stale files were cleaned up
+    assert!(
+        !staging_dir.exists(),
+        "Staging directory must be cleaned up post-archival"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_upload_with_remote_path_override() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "test_vod_up_rem_override_{}",
+        rand::random::<u32>()
+    ));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let video_no = 776655;
+    let video_id = "neon_vid_custom_remote";
+    let in_key = "key_custom_remote";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        upload: true,
+        remote_path: Some("remote:custom/target_vod_archive".to_string()),
+        ..Default::default()
+    };
+
+    let mock_backend = Arc::new(MockUploadBackend::new());
+    let options = VodOptions {
+        backend: Some(mock_backend.clone()),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect("run_vod_archival_with_options with custom remote_path should succeed");
+
+    assert!(summary.uploaded, "summary.uploaded must be true");
+
+    // Verify artifacts were uploaded directly to the custom remote_path
+    let files = mock_backend.files.lock().await;
+    assert!(
+        files.contains_key("remote:custom/target_vod_archive/vod.mp4"),
+        "Mock backend must contain 'remote:custom/target_vod_archive/vod.mp4': {files:?}"
+    );
+    assert!(
+        files.contains_key("remote:custom/target_vod_archive/vod_chat.jsonl"),
+        "Mock backend must contain 'remote:custom/target_vod_archive/vod_chat.jsonl': {files:?}"
+    );
+    assert!(
+        files.contains_key("remote:custom/target_vod_archive/vod_metadata.jsonl"),
+        "Mock backend must contain 'remote:custom/target_vod_archive/vod_metadata.jsonl': {files:?}"
+    );
+
+    // Verify that the default folder_name was NOT appended to remote_path
+    let detail = summary.output_dir.file_name().unwrap().to_string_lossy();
+    let unwanted_nested_key = format!("remote:custom/target_vod_archive/{detail}/vod.mp4");
+    assert!(
+        !files.contains_key(&unwanted_nested_key),
+        "Mock backend must not nest folder_name inside custom remote_path: {files:?}"
+    );
+
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+}
+
+#[tokio::test]
+async fn test_vod_archival_upload_with_remote_path_override_rclone_backend() {
+    let _mock_aria2c = get_mock_aria2c_bin();
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("test_vod_up_rclone_rem_{}", rand::random::<u32>()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let remote_storage = temp_dir.join("custom_cloud_vod_dir");
+    std::fs::create_dir_all(&remote_storage).unwrap();
+
+    let video_no = 334455;
+    let video_id = "neon_vid_rclone_rem";
+    let in_key = "key_rclone_rem";
+    let source = Arc::new(create_fake_vod_source(video_no, video_id, in_key));
+
+    let remote_path_str = format!("remote:{}", remote_storage.to_string_lossy());
+
+    let args = VodArgs {
+        target: video_no.to_string(),
+        quality: "best".to_string(),
+        output_dir: Some(temp_dir.clone()),
+        upload: true,
+        remote_path: Some(remote_path_str),
+        ..Default::default()
+    };
+
+    // Rclone config has EMPTY remote_path, proving --remote-path overrides and satisfies validation
+    let options = VodOptions {
+        rclone_config: Some(RcloneConfig {
+            remote_path: String::new(),
+            upload_concurrency: 1,
+            rclone_bin: "rclone".to_string(),
+            extra_args: vec![],
+            consolidate_extra_args: vec![],
+            skip_connection_check: false,
+        }),
+        ..Default::default()
+    };
+
+    let cancel_token = CancellationToken::new();
+    let summary = run_vod_archival_with_options(args, source, options, cancel_token)
+        .await
+        .expect(
+            "run_vod_archival_with_options with rclone backend and --remote-path should succeed",
+        );
+
+    assert!(summary.uploaded, "summary.uploaded must be true");
+
+    // Verify files were promoted to the designated custom remote path root
+    let remote_video = remote_storage.join("vod.mp4");
+    let remote_chat = remote_storage.join("vod_chat.jsonl");
+    let remote_metadata = remote_storage.join("vod_metadata.jsonl");
+
+    assert!(
+        remote_video.exists(),
+        "Custom remote vod.mp4 must exist at root"
+    );
+    assert!(
+        remote_chat.exists(),
+        "Custom remote vod_chat.jsonl must exist at root"
+    );
+    assert!(
+        remote_metadata.exists(),
+        "Custom remote vod_metadata.jsonl must exist at root"
+    );
+
+    // Verify remote .part files were promoted and cleaned up
+    assert!(
+        !remote_storage.join("vod.mp4.part").exists(),
+        "Remote vod.mp4.part must be promoted"
+    );
+    assert!(
+        !remote_storage.join("vod_chat.jsonl.part").exists(),
+        "Remote vod_chat.jsonl.part must be promoted"
+    );
+    assert!(
+        !remote_storage.join("vod_metadata.jsonl.part").exists(),
+        "Remote vod_metadata.jsonl.part must be promoted"
     );
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;

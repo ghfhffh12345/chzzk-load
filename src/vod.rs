@@ -150,13 +150,23 @@ pub async fn run_vod_archival_with_options(
 
     // Resolve upload backend and run pre-flight remote path validation check if --upload is set
     let (upload_backend, remote_base) = if args.upload {
+        let custom_remote = args
+            .remote_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
         let (backend, base): (Arc<dyn UploadBackend>, String) =
             if let Some(injected) = options.backend.clone() {
-                let base = options
-                    .rclone_config
-                    .as_ref()
-                    .map(|c| c.remote_path.clone())
-                    .filter(|s| !s.trim().is_empty())
+                let base = custom_remote
+                    .map(ToString::to_string)
+                    .or_else(|| {
+                        options
+                            .rclone_config
+                            .as_ref()
+                            .map(|c| c.remote_path.clone())
+                            .filter(|s| !s.trim().is_empty())
+                    })
                     .unwrap_or_else(|| {
                         if !settings.rclone.remote_path.trim().is_empty() {
                             settings.rclone.remote_path.clone()
@@ -166,18 +176,24 @@ pub async fn run_vod_archival_with_options(
                     });
                 (injected, base)
             } else {
-                let rclone_config = options
+                let mut rclone_config = options
                     .rclone_config
                     .clone()
                     .unwrap_or_else(|| settings.rclone.clone());
+
+                if let Some(custom) = custom_remote {
+                    rclone_config.remote_path = custom.to_string();
+                }
+
                 if rclone_config.remote_path.trim().is_empty() {
                     bail!("Cannot upload VOD: rclone remote_path is not configured (empty)");
                 }
+
+                let base = rclone_config.remote_path.clone();
                 let rclone_bin = crate::consolidation::manifest::resolve_rclone_bin_with_config(
                     options.rclone_bin.as_deref(),
                     Some(&rclone_config.rclone_bin),
                 );
-                let base = rclone_config.remote_path.clone();
                 let backend = Arc::new(
                     crate::uploader::rclone::RcloneBackend::new(rclone_config).with_bin(rclone_bin),
                 );
@@ -198,6 +214,38 @@ pub async fn run_vod_archival_with_options(
         .get_video_detail(video_no)
         .await
         .with_context(|| format!("Failed to retrieve video details for video #{video_no}"))?;
+
+    // Resolve canonical output directory early for pre-flight collision checks
+    let base_recordings_dir = args
+        .output_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&settings.general.recordings_dir));
+    let base_dir = resolve_path(&base_recordings_dir);
+
+    let alias = settings
+        .channels
+        .iter()
+        .find(|c| c.id == detail.channel.channel_id)
+        .and_then(|c| c.alias.clone());
+
+    let folder_name = resolve_vod_folder_name(&detail, alias.as_deref());
+    let output_dir = base_dir.join(&folder_name);
+
+    // Pre-flight overwrite collision check:
+    // If target artifact triad files exist in output_dir and !overwrite, cleanly abort.
+    let conflicting_files: Vec<&'static str> = ["vod.mp4", "vod_chat.jsonl", "vod_metadata.jsonl"]
+        .into_iter()
+        .filter(|name| output_dir.join(name).is_file())
+        .collect();
+
+    if !conflicting_files.is_empty() && !args.overwrite {
+        bail!(
+            "Target VOD archive already exists in '{}' (found: {}); pass --overwrite to replace",
+            output_dir.display(),
+            conflicting_files.join(", ")
+        );
+    }
 
     // 3. Query NeonPlayer playback info or live rewind playback info
     let playback_info = if let Some(in_key) =
@@ -275,21 +323,7 @@ pub async fn run_vod_archival_with_options(
         (None, Vec::new())
     };
 
-    // 5. Resolve canonical output directory
-    let base_recordings_dir = args
-        .output_dir
-        .unwrap_or_else(|| PathBuf::from(&settings.general.recordings_dir));
-    let base_dir = resolve_path(&base_recordings_dir);
-
-    let alias = settings
-        .channels
-        .iter()
-        .find(|c| c.id == detail.channel.channel_id)
-        .and_then(|c| c.alias.clone());
-
-    let folder_name = resolve_vod_folder_name(&detail, alias.as_deref());
-    let output_dir = base_dir.join(&folder_name);
-
+    // 5. Ensure canonical output directory exists
     tokio::fs::create_dir_all(&output_dir)
         .await
         .with_context(|| {
@@ -306,6 +340,16 @@ pub async fn run_vod_archival_with_options(
         &detail.video_id,
         temp_dir_override.map(|p| p.as_path()),
     );
+    if args.overwrite && staging_dir.exists() {
+        remove_dir_all_with_retry(&staging_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to invalidate staging directory '{}'",
+                    staging_dir.display()
+                )
+            })?;
+    }
     tokio::fs::create_dir_all(&staging_dir)
         .await
         .with_context(|| {
@@ -348,6 +392,9 @@ pub async fn run_vod_archival_with_options(
         let mut chat_options = options.chat_options.clone().unwrap_or_default();
         if chat_options.progress_sender.is_none() {
             chat_options.progress_sender = chat_tx;
+        }
+        if args.overwrite {
+            chat_options.overwrite = true;
         }
         let anchor_time_ms = parse_broadcast_anchor_timestamp_ms(
             detail.live_open_date.as_deref(),
@@ -575,6 +622,9 @@ pub async fn run_vod_archival_with_options(
     // 11. Two-Stage Atomic Promotion at orchestrator seam:
     // Only promote staged files after all concurrent futures succeed with zero-exit status
     let finalized_video_path = output_dir.join("vod.mp4");
+    if args.overwrite {
+        let _ = crate::uploader::unlink_local_file_with_retry(&finalized_video_path).await;
+    }
     if let Err(err) =
         crate::uploader::rename_local_file_with_retry(&staged_path, &finalized_video_path).await
     {
@@ -586,6 +636,9 @@ pub async fn run_vod_archival_with_options(
 
     let (final_chat_path, chat_messages) = if let Some(chat) = chat_summary {
         if chat.part_path != chat.final_path {
+            if args.overwrite {
+                let _ = crate::uploader::unlink_local_file_with_retry(&chat.final_path).await;
+            }
             if let Err(err) = promote_vod_chat(&chat.part_path, &chat.final_path).await {
                 if let Some(mut s) = progress_session {
                     s.finish(false).await;
@@ -599,6 +652,9 @@ pub async fn run_vod_archival_with_options(
     };
 
     let finalized_metadata_path = metadata_target.final_path.clone();
+    if args.overwrite {
+        let _ = crate::uploader::unlink_local_file_with_retry(&finalized_metadata_path).await;
+    }
     if let Err(err) =
         promote_vod_metadata(&metadata_target.part_path, &finalized_metadata_path).await
     {
@@ -623,10 +679,20 @@ pub async fn run_vod_archival_with_options(
             chat_path: final_chat_path.as_deref(),
             metadata_path: &finalized_metadata_path,
         };
+        let custom_remote_active = args
+            .remote_path
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty());
+        let (upload_base, upload_folder) = if custom_remote_active {
+            (remote_base.as_str(), "")
+        } else {
+            (remote_base.as_str(), folder_name.as_str())
+        };
         upload_vod_artifacts(
             backend.as_ref(),
-            &remote_base,
-            &folder_name,
+            upload_base,
+            upload_folder,
             &artifacts,
             args.delete_after_upload,
             cancel_token.clone(),

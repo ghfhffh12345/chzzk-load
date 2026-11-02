@@ -43,6 +43,7 @@ pub struct VodChatPaginationOptions {
     pub max_retries_per_page: usize,
     pub progress_sender:
         Option<tokio::sync::mpsc::UnboundedSender<crate::vod::progress::VodChatProgressUpdate>>,
+    pub overwrite: bool,
 }
 
 impl Default for VodChatPaginationOptions {
@@ -53,6 +54,7 @@ impl Default for VodChatPaginationOptions {
             max_backoff: Duration::from_secs(30),
             max_retries_per_page: 10,
             progress_sender: None,
+            overwrite: false,
         }
     }
 }
@@ -290,14 +292,18 @@ pub async fn paginate_vod_chat_to_staged(
     let final_path = target.output_dir.join("vod_chat.jsonl");
     let part_path = target.output_dir.join("vod_chat.jsonl.part");
 
-    // If final file already exists, verify and return early
-    if tokio::fs::try_exists(&final_path).await.unwrap_or(false) {
+    // If final file already exists and overwrite is not requested, verify and return early
+    if !options.overwrite && tokio::fs::try_exists(&final_path).await.unwrap_or(false) {
         let count = count_lines_in_file(&final_path).await.unwrap_or(0);
         return Ok(VodChatStagedSummary {
             part_path: final_path.clone(),
             final_path,
             message_count: count,
         });
+    }
+
+    if options.overwrite {
+        let _ = crate::uploader::unlink_local_file_with_retry(&part_path).await;
     }
 
     // Cursor-resumable staging: probe last recorded offset from .part file
@@ -894,6 +900,7 @@ mod tests {
             max_backoff: Duration::from_millis(50),
             max_retries_per_page: 3,
             progress_sender: None,
+            ..Default::default()
         };
         let cancel = CancellationToken::new();
 
