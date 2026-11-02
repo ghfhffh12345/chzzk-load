@@ -124,7 +124,7 @@ jobs:
 
   build-macos:
     name: Build macOS (x86_64 & aarch64 darwin)
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

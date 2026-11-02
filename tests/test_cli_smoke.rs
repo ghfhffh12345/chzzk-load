@@ -814,3 +814,66 @@ fn test_cli_root_accepts_nid_aut_and_nid_ses() {
     assert_eq!(cli.nid_aut.as_deref(), Some("root_aut"));
     assert_eq!(cli.nid_ses.as_deref(), Some("root_ses"));
 }
+
+#[test]
+fn test_workflow_runner_images_are_supported() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workflows_dir = manifest_dir.join(".github").join("workflows");
+    assert!(workflows_dir.exists(), "Workflows directory must exist");
+
+    let deprecated_runner_patterns = [
+        (
+            "macos-14",
+            "macOS 14 runner images retired on November 2, 2026 (actions/runner-images/issues/13518). Migrate to macos-15 or macos-latest.",
+        ),
+        (
+            "macos-13",
+            "macOS 13 runner images are retired. Migrate to macos-15 or macos-latest.",
+        ),
+        (
+            "macos-12",
+            "macOS 12 runner images are retired. Migrate to macos-15 or macos-latest.",
+        ),
+        (
+            "ubuntu-20.04",
+            "Ubuntu 20.04 runner images are retired. Migrate to ubuntu-22.04 or ubuntu-latest.",
+        ),
+    ];
+
+    let mut violations = Vec::new();
+
+    for entry in std::fs::read_dir(&workflows_dir).expect("Read workflows dir") {
+        let entry = entry.expect("Dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("yml")
+            || path.extension().and_then(|ext| ext.to_str()) == Some("yaml")
+        {
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+
+            for (line_idx, line) in content.lines().enumerate() {
+                let trimmed = line.trim();
+                // Check runs-on lines or runner matrix definitions
+                if trimmed.starts_with("runs-on:") || trimmed.starts_with("- macos-") {
+                    for &(deprecated_runner, reason) in &deprecated_runner_patterns {
+                        if trimmed.contains(deprecated_runner) {
+                            violations.push(format!(
+                                "{}:{}: Found deprecated runner '{}': {}",
+                                path.file_name().unwrap().to_string_lossy(),
+                                line_idx + 1,
+                                deprecated_runner,
+                                reason
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Deprecated GitHub Actions runner images found:\n{}",
+        violations.join("\n")
+    );
+}
