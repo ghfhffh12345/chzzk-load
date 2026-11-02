@@ -274,6 +274,36 @@ impl RcloneBackend {
         }
     }
 
+    /// Downloads a remote file at `remote_src` directly to `local_dest` via `rclone copyto`.
+    pub async fn download_file(&self, remote_src: &str, local_dest: &Path) -> anyhow::Result<()> {
+        let bin = self.resolve_bin();
+        if let Some(parent) = local_dest.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let mut cmd = tokio::process::Command::new(bin.clone());
+        cmd.kill_on_drop(true);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::piped());
+        cmd.arg("copyto").arg(remote_src).arg(local_dest);
+        for arg in &self.config.extra_args {
+            cmd.arg(arg);
+        }
+        let output = cmd
+            .output()
+            .await
+            .with_context(|| format!("failed to execute rclone copyto (download) from '{bin}'"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let target = format!("{remote_src}' -> '{}'", local_dest.display());
+            anyhow::bail!(
+                "{}",
+                format_rclone_output_error("copyto (download)", &target, &output)
+            );
+        }
+    }
+
     /// Uploads a local file directly to a designated `remote_dest` via `rclone copyto`.
     pub async fn upload_file_to_dest(
         &self,
@@ -404,6 +434,14 @@ impl UploadBackend for RcloneBackend {
 
     fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(self.check_connection())
+    }
+
+    fn download_file<'a>(
+        &'a self,
+        remote_src: &'a str,
+        local_dest: &'a Path,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(self.download_file(remote_src, local_dest))
     }
 
     fn upload_file<'a>(

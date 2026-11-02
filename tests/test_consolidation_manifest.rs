@@ -5,8 +5,9 @@ use std::process::Command;
 use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::manifest::{
     ChunkGap, RawManifestEntry, TargetLocation, build_manifest_from_entries, detect_index_gaps,
-    discover_manifest, discover_remote_manifest, is_remote_path, parse_chat_chunk_index,
-    parse_rclone_lsjson, parse_video_chunk_index,
+    discover_manifest, discover_remote_manifest, extract_remote_session_name, is_remote_path,
+    parse_chat_chunk_index, parse_rclone_lsjson, parse_video_chunk_index,
+    resolve_consolidation_output_dir,
 };
 use chzzk_load::consolidation::{delete_original_chunks, run_consolidation};
 
@@ -1240,4 +1241,61 @@ async fn test_run_consolidation_video_failure_surfaces_video_error_not_chat_canc
     );
 
     let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_extract_remote_session_name_and_resolve_output_dir() {
+    // 1. extract_remote_session_name
+    assert_eq!(
+        extract_remote_session_name("remote:bucket/recordings/session_20261008"),
+        "session_20261008"
+    );
+    assert_eq!(
+        extract_remote_session_name("remote:session_20261008"),
+        "session_20261008"
+    );
+    assert_eq!(
+        extract_remote_session_name("remote:bucket/recordings/session_20261008/"),
+        "session_20261008"
+    );
+    assert_eq!(
+        extract_remote_session_name("gdrive:archive/streamer/"),
+        "streamer"
+    );
+    // Root remote fallback should use staging_folder_name
+    let fallback = extract_remote_session_name("remote:");
+    assert!(fallback.starts_with("chzzk-load-consolidation-"));
+
+    // 2. resolve_consolidation_output_dir
+    let custom = PathBuf::from("custom/output/dir");
+    let target_remote = TargetLocation::Remote("remote:recordings/session_abc".to_string());
+    let target_local = TargetLocation::Local(PathBuf::from("local/recordings/session_xyz"));
+
+    // When -o custom is provided, always resolves to custom
+    let resolved_custom =
+        resolve_consolidation_output_dir(&target_remote, Some(&custom), "recordings");
+    assert_eq!(resolved_custom, chzzk_load::app_path::resolve_path(&custom));
+
+    let resolved_custom_local =
+        resolve_consolidation_output_dir(&target_local, Some(&custom), "recordings");
+    assert_eq!(
+        resolved_custom_local,
+        chzzk_load::app_path::resolve_path(&custom)
+    );
+
+    // When -o is omitted for remote target: resolves to <recordings_dir>/<session_name>
+    let resolved_remote_default =
+        resolve_consolidation_output_dir(&target_remote, None, "recordings");
+    assert_eq!(
+        resolved_remote_default,
+        chzzk_load::app_path::resolve_path(std::path::Path::new("recordings")).join("session_abc")
+    );
+
+    // When -o is omitted for local target: resolves in-place to target dir
+    let resolved_local_default =
+        resolve_consolidation_output_dir(&target_local, None, "recordings");
+    assert_eq!(
+        resolved_local_default,
+        chzzk_load::app_path::resolve_path(std::path::Path::new("local/recordings/session_xyz"))
+    );
 }

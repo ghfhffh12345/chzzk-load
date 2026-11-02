@@ -32,8 +32,9 @@ pub use chat::{
 pub use manifest::{
     ChunkGap, ConsolidationChunk, ConsolidationManifest, RawManifestEntry, TargetLocation,
     build_manifest_from_entries, detect_index_gaps, discover_manifest, discover_manifest_with_bin,
-    is_remote_path, join_remote_path, parse_chat_chunk_index, parse_video_chunk_index,
-    resolve_rclone_bin, resolve_rclone_bin_with_config,
+    extract_remote_session_name, is_remote_path, join_remote_path, parse_chat_chunk_index,
+    parse_video_chunk_index, resolve_consolidation_output_dir, resolve_rclone_bin,
+    resolve_rclone_bin_with_config,
 };
 pub use video::{
     ConcatScriptGuard, VideoConsolidationOptions, VideoConsolidationResult, VideoProgressTelemetry,
@@ -52,7 +53,9 @@ use crate::config::RcloneConfig;
 use crate::uploader::backend::{ProgressCallback, UploadBackend};
 use crate::uploader::rclone::RcloneBackend;
 use crate::uploader::unlink_local_file_with_retry;
+use anyhow::Context;
 use futures_util::StreamExt;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -549,6 +552,36 @@ pub async fn run_consolidation_with_backend_and_cancel(
         );
     }
 
+    let dest_dir = resolve_consolidation_output_dir(
+        &manifest.target,
+        args.output_dir.as_deref(),
+        &settings.general.recordings_dir,
+    );
+
+    // Pre-flight conflict check: abort early if destination files exist and overwrite is false
+    if !args.upload && !args.overwrite {
+        let mut conflicting_files = Vec::new();
+        if has_video && dest_dir.join("livestream.mp4").exists() {
+            conflicting_files.push("livestream.mp4");
+        }
+        if has_chat && dest_dir.join("live_chat.jsonl").exists() {
+            conflicting_files.push("live_chat.jsonl");
+        }
+        if manifest.target.is_remote()
+            && manifest.has_metadata
+            && dest_dir.join("live_metadata.jsonl").exists()
+        {
+            conflicting_files.push("live_metadata.jsonl");
+        }
+        if !conflicting_files.is_empty() {
+            anyhow::bail!(
+                "Pre-existing destination file(s) found in local destination '{}': {}; pass --overwrite to replace",
+                dest_dir.display(),
+                conflicting_files.join(", ")
+            );
+        }
+    }
+
     let total_video_bytes: u64 = manifest.video_chunks.iter().map(|c| c.size).sum();
 
     // Pre-flight disk capacity verification and resume sanity check for remote recordings
@@ -560,8 +593,13 @@ pub async fn run_consolidation_with_backend_and_cancel(
             verify_staging_capacity(&dir, total_video_bytes)?;
             (Some(dir), false)
         } else if check_staging_resume_readiness(&dir, has_video, has_chat) {
+            let action = if args.upload {
+                "cloud upload"
+            } else {
+                "local finalization"
+            };
             println!(
-                "[INFO] Detected valid existing consolidated media in staging directory '{}' (moov atom verified). Resuming cloud upload directly.",
+                "[INFO] Detected valid existing consolidated media in staging directory '{}' (moov atom verified). Resuming {action} directly.",
                 dir.display()
             );
             (Some(dir), true)
@@ -807,89 +845,159 @@ pub async fn run_consolidation_with_backend_and_cancel(
         // Validate staging workspace prior to cloud upload
         validate_staging_workspace(staging_dir, has_video, has_chat)?;
 
-        // 1. Two-stage cloud upload: upload local files to remote .part destinations concurrently via rclone copyto
-        let video_bytes = if has_video {
-            let mp4_path = staging_dir.join("livestream.mp4");
-            tokio::fs::metadata(mp4_path)
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let chat_bytes = if has_chat {
-            let chat_path = staging_dir.join("live_chat.jsonl");
-            tokio::fs::metadata(chat_path)
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        if args.upload {
+            // 1. Two-stage cloud upload: upload local files to remote .part destinations concurrently via rclone copyto
+            let video_bytes = if has_video {
+                let mp4_path = staging_dir.join("livestream.mp4");
+                tokio::fs::metadata(mp4_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            let chat_bytes = if has_chat {
+                let chat_path = staging_dir.join("live_chat.jsonl");
+                tokio::fs::metadata(chat_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
-        let mut upload_session = coordinator.start_upload_tracks(
-            has_video.then_some(video_bytes),
-            has_chat.then_some(chat_bytes),
-        );
-
-        let upload_res = upload_remote_staged_media_with_progress(
-            upload_backend.as_ref(),
-            remote_base,
-            staging_dir,
-            has_video,
-            has_chat,
-            cancel_token.clone(),
-            upload_session.video_sender(),
-            upload_session.chat_sender(),
-        )
-        .await;
-
-        upload_session.finish(upload_res.is_ok()).await;
-
-        if let Err(upload_err) = upload_res {
-            eprintln!(
-                "[INFO] Cloud upload failed or was interrupted, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload without re-running FFmpeg.",
-                staging_dir.display()
+            let mut upload_session = coordinator.start_upload_tracks(
+                has_video.then_some(video_bytes),
+                has_chat.then_some(chat_bytes),
             );
-            return Err(upload_err);
-        }
 
-        // 2. Atomically rename remote .part files via backend.move_file
-        let rename_res = async {
+            let upload_res = upload_remote_staged_media_with_progress(
+                upload_backend.as_ref(),
+                remote_base,
+                staging_dir,
+                has_video,
+                has_chat,
+                cancel_token.clone(),
+                upload_session.video_sender(),
+                upload_session.chat_sender(),
+            )
+            .await;
+
+            upload_session.finish(upload_res.is_ok()).await;
+
+            if let Err(upload_err) = upload_res {
+                eprintln!(
+                    "[INFO] Cloud upload failed or was interrupted, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload without re-running FFmpeg.",
+                    staging_dir.display()
+                );
+                return Err(upload_err);
+            }
+
+            // 2. Atomically rename remote .part files via backend.move_file
+            let rename_res = async {
+                if has_video {
+                    finalize_staged_video(&manifest.target, Some(upload_backend.as_ref())).await?;
+                }
+                if has_chat {
+                    finalize_staged_chat(&manifest.target, Some(upload_backend.as_ref())).await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+
+            if let Err(rename_err) = rename_res {
+                let _ = cleanup_staged_video_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
+                let _ = cleanup_staged_chat_in(
+                    &manifest.target,
+                    args.temp_dir.as_deref(),
+                    Some(upload_backend.as_ref()),
+                )
+                .await;
+                let _ = upload_backend
+                    .delete_file(&join_remote_path(remote_base, "livestream.mp4"))
+                    .await;
+                let _ = upload_backend
+                    .delete_file(&join_remote_path(remote_base, "live_chat.jsonl"))
+                    .await;
+                eprintln!(
+                    "[INFO] Cloud finalization failed, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload.",
+                    staging_dir.display()
+                );
+                return Err(rename_err);
+            }
+        } else {
+            // Offline local consolidation: finalize staged artifacts directly into dest_dir
+            tokio::fs::create_dir_all(&dest_dir)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to create local destination directory '{}'",
+                        dest_dir.display()
+                    )
+                })?;
+
+            // 1. Promote seekable MP4 to dest_dir
             if has_video {
-                finalize_staged_video(&manifest.target, Some(upload_backend.as_ref())).await?;
+                let staged_mp4 = staging_dir.join("livestream.mp4");
+                let final_mp4 = dest_dir.join("livestream.mp4");
+                promote_local_staged_artifact(&staged_mp4, &final_mp4, args.overwrite).await?;
             }
-            if has_chat {
-                finalize_staged_chat(&manifest.target, Some(upload_backend.as_ref())).await?;
-            }
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
 
-        if let Err(rename_err) = rename_res {
-            let _ = cleanup_staged_video_in(
-                &manifest.target,
-                args.temp_dir.as_deref(),
-                Some(upload_backend.as_ref()),
-            )
-            .await;
-            let _ = cleanup_staged_chat_in(
-                &manifest.target,
-                args.temp_dir.as_deref(),
-                Some(upload_backend.as_ref()),
-            )
-            .await;
-            let _ = upload_backend
-                .delete_file(&join_remote_path(remote_base, "livestream.mp4"))
-                .await;
-            let _ = upload_backend
-                .delete_file(&join_remote_path(remote_base, "live_chat.jsonl"))
-                .await;
-            eprintln!(
-                "[INFO] Cloud finalization failed, but finalized local staging files were preserved in '{}'. Re-run consolidation to resume cloud upload.",
-                staging_dir.display()
-            );
-            return Err(rename_err);
+            // 2. Promote deduplicated chat to dest_dir
+            if has_chat {
+                let staged_jsonl = staging_dir.join("live_chat.jsonl");
+                let final_jsonl = dest_dir.join("live_chat.jsonl");
+                promote_local_staged_artifact(&staged_jsonl, &final_jsonl, args.overwrite).await?;
+            }
+
+            // 3. Download live_metadata.jsonl to complete the canonical Live Artifact Triad
+            if manifest.has_metadata {
+                if let Some(ref meta_name) = manifest.metadata_name {
+                    let remote_meta_src = join_remote_path(remote_base, meta_name);
+                    let final_meta = dest_dir.join("live_metadata.jsonl");
+                    let staged_meta = dest_dir.join("live_metadata.jsonl.part");
+
+                    let _ = unlink_local_file_with_retry(&staged_meta).await;
+                    upload_backend
+                        .download_file(&remote_meta_src, &staged_meta)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Failed to download live metadata from '{remote_meta_src}' to '{}'",
+                                staged_meta.display()
+                            )
+                        })?;
+
+                    if !args.overwrite && final_meta.exists() {
+                        anyhow::bail!(
+                            "Destination file '{}' already exists; pass --overwrite to replace",
+                            final_meta.display()
+                        );
+                    }
+                    if args.overwrite && final_meta.exists() {
+                        let _ = unlink_local_file_with_retry(&final_meta).await;
+                    }
+                    rename_local_file_with_retry(&staged_meta, &final_meta)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Failed to finalize live metadata from '{}' to '{}'",
+                                staged_meta.display(),
+                                final_meta.display()
+                            )
+                        })?;
+                }
+            } else {
+                eprintln!(
+                    "[WARN] Remote recording session '{}' does not contain live metadata; canonical triad will only contain livestream.mp4 and live_chat.jsonl",
+                    manifest.target.raw()
+                );
+            }
         }
     } else {
         // Local mode: atomically finalize local .part files directly
@@ -984,6 +1092,83 @@ pub async fn run_consolidation_with_backend_and_cancel(
         chat_stats,
         video_result,
     })
+}
+
+/// Promotes a staged file from `staged_src` to `dest_path`.
+///
+/// If `staged_src` and `dest_path` reside on the same filesystem, this performs an atomic rename.
+/// If renaming fails due to cross-device boundaries, it falls back to staging through a `.part`
+/// file inside `dest_path`'s parent directory before renaming the `.part` file to `dest_path`.
+/// This guarantees that partial copies are never visible to concurrent readers.
+async fn promote_local_staged_artifact(
+    staged_src: &Path,
+    dest_path: &Path,
+    overwrite: bool,
+) -> anyhow::Result<()> {
+    if !staged_src.exists() {
+        return Ok(());
+    }
+
+    if !overwrite && dest_path.exists() {
+        anyhow::bail!(
+            "Destination file '{}' already exists; pass --overwrite to replace",
+            dest_path.display()
+        );
+    }
+
+    // Fast-path: try direct atomic rename if destination doesn't exist yet
+    if !dest_path.exists()
+        && rename_local_file_with_retry(staged_src, dest_path)
+            .await
+            .is_ok()
+    {
+        return Ok(());
+    }
+
+    // Fallback: stage into a `.part` file inside destination's parent directory
+    let dest_parent = dest_path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = dest_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("artifact");
+    let dest_part = dest_parent.join(format!("{file_name}.part"));
+
+    let _ = unlink_local_file_with_retry(&dest_part).await;
+
+    // If on same volume, rename into .part, otherwise copy
+    if rename_local_file_with_retry(staged_src, &dest_part)
+        .await
+        .is_err()
+    {
+        tokio::fs::copy(staged_src, &dest_part)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to copy staged artifact from '{}' to temporary target '{}'",
+                    staged_src.display(),
+                    dest_part.display()
+                )
+            })?;
+        let _ = unlink_local_file_with_retry(staged_src).await;
+    }
+
+    // Now dest_part is 100% complete and on the same volume as dest_path.
+    // Unlink destination right before the final atomic rename if overwrite is true.
+    if overwrite && dest_path.exists() {
+        let _ = unlink_local_file_with_retry(dest_path).await;
+    }
+
+    rename_local_file_with_retry(&dest_part, dest_path)
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to atomically finalize artifact from '{}' to '{}'",
+                dest_part.display(),
+                dest_path.display()
+            )
+        })?;
+
+    Ok(())
 }
 
 fn is_cancellation_error(err: &anyhow::Error) -> bool {

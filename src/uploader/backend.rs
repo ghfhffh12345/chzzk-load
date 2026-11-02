@@ -75,6 +75,17 @@ pub trait UploadBackend: Send + Sync {
     /// Verifies connectivity to the storage backend.
     fn check_connection<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<()>>;
 
+    /// Downloads a remote file at `remote_src` directly to `local_dest`.
+    fn download_file<'a>(
+        &'a self,
+        _remote_src: &'a str,
+        _local_dest: &'a Path,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(
+            async move { anyhow::bail!("download_file is not supported by this storage backend") },
+        )
+    }
+
     /// Convenience default method wrapping `upload_file_to_dest`.
     fn upload_file<'a>(
         &'a self,
@@ -187,6 +198,42 @@ impl UploadBackend for MockUploadBackend {
                 return Err(anyhow::anyhow!("simulated error"));
             }
             Ok(())
+        })
+    }
+
+    fn download_file<'a>(
+        &'a self,
+        remote_src: &'a str,
+        local_dest: &'a Path,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            if self.should_fail.load(Ordering::SeqCst) {
+                return Err(anyhow::anyhow!("simulated error"));
+            }
+            {
+                let patterns = self.fail_patterns.lock().await;
+                for pat in patterns.iter() {
+                    if remote_src.contains(pat) || local_dest.to_string_lossy().contains(pat) {
+                        return Err(anyhow::anyhow!("simulated error for pattern: {pat}"));
+                    }
+                }
+            }
+            if let Some(parent) = local_dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let path_str = if let Some((_, rest)) = remote_src.split_once(':') {
+                rest
+            } else {
+                remote_src
+            };
+            let p = Path::new(path_str);
+            if p.exists() {
+                let content = tokio::fs::read(p).await?;
+                tokio::fs::write(local_dest, content).await?;
+                Ok(())
+            } else {
+                anyhow::bail!("MockUploadBackend: remote source not found on disk: {remote_src}")
+            }
         })
     }
 

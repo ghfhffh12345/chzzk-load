@@ -133,6 +133,7 @@ async fn test_remote_consolidation_complete_pipeline_loopback_upload_and_purge()
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -209,6 +210,7 @@ async fn test_remote_consolidation_delete_chunks_false_retains_chunks_and_cleans
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: false,
         overwrite: false,
         strict: false,
@@ -273,6 +275,7 @@ async fn test_remote_consolidation_dual_pipeline_failure_preserves_remote_chunks
     // strict: true causes chat failure
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: false,
         overwrite: false,
         strict: true,
@@ -326,6 +329,7 @@ async fn test_remote_consolidation_upload_failure_cleans_up_remote_part_and_pres
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -412,6 +416,7 @@ async fn test_remote_consolidation_resume_upload_bypasses_ffmpeg_on_valid_stagin
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -487,6 +492,7 @@ async fn test_remote_consolidation_overwrite_forces_clean_remux() {
     // overwrite: true MUST invalidate staging and attempt to spawn FFmpeg
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: false,
         overwrite: true,
         strict: false,
@@ -550,6 +556,7 @@ async fn test_remote_consolidation_upload_failure_then_resume_without_ffmpeg_end
     // Phase 1: First run fails during cloud upload because destination path contains fail_copy
     let args1 = ConsolidateArgs {
         path: remote_path_fail,
+        upload: true,
         delete_chunks: false,
         overwrite: false,
         strict: false,
@@ -601,6 +608,7 @@ async fn test_remote_consolidation_upload_failure_then_resume_without_ffmpeg_end
 
     let args2 = ConsolidateArgs {
         path: remote_path_ok,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -676,6 +684,7 @@ async fn test_remote_consolidation_upload_cancellation_preserves_local_files() {
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -792,6 +801,7 @@ consolidate_extra_args = ["--checkers", "12", "--stats", "500ms"]
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -858,6 +868,7 @@ async fn test_remote_consolidation_without_config_uses_default_high_performance_
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -916,6 +927,7 @@ async fn test_remote_consolidation_uploads_concurrently_parallel() {
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -962,6 +974,7 @@ async fn test_remote_consolidation_chat_failure_aborts_hanging_video_immediately
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -1009,6 +1022,7 @@ async fn test_remote_consolidation_video_failure_aborts_hanging_chat_immediately
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -1056,6 +1070,7 @@ async fn test_remote_consolidation_cancellation_token_promptly_terminates_active
 
     let args = ConsolidateArgs {
         path: remote_path,
+        upload: true,
         delete_chunks: true,
         overwrite: false,
         strict: false,
@@ -1629,6 +1644,7 @@ async fn test_remote_consolidation_interactive_upload_telemetry() {
     );
     let args = ConsolidateArgs {
         path: remote_target,
+        upload: true,
         temp_dir: Some(staging_parent),
         config: None,
         overwrite: false,
@@ -1684,6 +1700,7 @@ async fn test_remote_consolidation_non_interactive_upload_telemetry() {
     );
     let args = ConsolidateArgs {
         path: remote_target,
+        upload: true,
         temp_dir: Some(staging_parent),
         config: None,
         overwrite: false,
@@ -1746,6 +1763,7 @@ async fn test_run_consolidation_with_injected_mock_backend() {
     );
     let args = ConsolidateArgs {
         path: remote_target.clone(),
+        upload: true,
         temp_dir: Some(staging_parent),
         config: None,
         overwrite: false,
@@ -1787,4 +1805,402 @@ async fn test_run_consolidation_with_injected_mock_backend() {
         !files.contains_key(&format!("{remote_target}/live_chat.jsonl.part")),
         ".part file must be removed after promotion"
     );
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_to_local_default_recordings_dir() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_local_def");
+    let staging_parent = create_temp_test_dir("test_remote_cons_local_def_staging");
+    let local_recordings = create_temp_test_dir("test_remote_cons_local_def_recordings");
+
+    let (chunk0, chat0, meta) = setup_test_stream_chunks(&remote_dir);
+
+    // Create custom settings.toml pointing recordings_dir to local_recordings
+    let config_file = staging_parent.join("settings.toml");
+    let config_content = format!(
+        "[general]\nrecordings_dir = \"{}\"\n",
+        local_recordings.to_string_lossy().replace('\\', "\\\\")
+    );
+    fs::write(&config_file, config_content).unwrap();
+
+    let folder_name = remote_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    // upload: false is the default
+    let args = ConsolidateArgs {
+        path: remote_path,
+        upload: false,
+        output_dir: None,
+        delete_chunks: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: Some(config_file),
+        ..Default::default()
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("Offline remote consolidation to local recordings_dir should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+    assert!(summary.has_metadata);
+
+    // Target local destination: local_recordings / folder_name
+    let dest_dir = local_recordings.join(&folder_name);
+    assert!(
+        dest_dir.exists(),
+        "Resolved local session destination must exist"
+    );
+
+    // Verify complete canonical Live Artifact Triad exists on local disk
+    let local_mp4 = dest_dir.join("livestream.mp4");
+    let local_chat = dest_dir.join("live_chat.jsonl");
+    let local_meta = dest_dir.join("live_metadata.jsonl");
+
+    assert!(local_mp4.exists(), "Local livestream.mp4 must exist");
+    assert!(local_chat.exists(), "Local live_chat.jsonl must exist");
+    assert!(local_meta.exists(), "Local live_metadata.jsonl must exist");
+
+    // Verify NO files uploaded to remote
+    assert!(
+        !remote_dir.join("livestream.mp4").exists(),
+        "Remote livestream.mp4 must NOT exist when --upload is false"
+    );
+    assert!(
+        !remote_dir.join("live_chat.jsonl").exists(),
+        "Remote live_chat.jsonl must NOT exist when --upload is false"
+    );
+
+    // Verify remote chunks are preserved
+    assert!(chunk0.exists(), "Remote chunk_0000.ts must be preserved");
+    assert!(chat0.exists(), "Remote chat_0000.jsonl must be preserved");
+    assert!(meta.exists(), "Remote livemetadata.jsonl must be preserved");
+
+    // Verify local staging directory is unlinked
+    assert!(
+        !staging_parent.exists(),
+        "Local staging directory must be unlinked post-consolidation"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_to_local_custom_output_dir() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_custom_out");
+    let staging_parent = create_temp_test_dir("test_remote_cons_custom_out_staging");
+    let custom_output = create_temp_test_dir("test_remote_cons_custom_out_dest");
+
+    let (chunk0, chat0, meta) = setup_test_stream_chunks(&remote_dir);
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        upload: false,
+        output_dir: Some(custom_output.clone()),
+        delete_chunks: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: None,
+        ..Default::default()
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("Offline remote consolidation with custom -o directory should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify canonical triad files exist directly in custom_output
+    assert!(custom_output.join("livestream.mp4").exists());
+    assert!(custom_output.join("live_chat.jsonl").exists());
+    assert!(custom_output.join("live_metadata.jsonl").exists());
+
+    // Verify no remote promotion
+    assert!(!remote_dir.join("livestream.mp4").exists());
+    assert!(!remote_dir.join("live_chat.jsonl").exists());
+
+    // Verify chunks preserved
+    assert!(chunk0.exists());
+    assert!(chat0.exists());
+    assert!(meta.exists());
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_to_local_delete_chunks_purges_remote_chunks_preserves_metadata()
+{
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_del_chunks");
+    let staging_parent = create_temp_test_dir("test_remote_cons_del_chunks_staging");
+    let custom_output = create_temp_test_dir("test_remote_cons_del_chunks_dest");
+
+    let (chunk0, chat0, meta) = setup_test_stream_chunks(&remote_dir);
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        upload: false,
+        output_dir: Some(custom_output.clone()),
+        delete_chunks: true,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: None,
+        ..Default::default()
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("Offline remote consolidation with delete_chunks should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify local triad exists
+    assert!(custom_output.join("livestream.mp4").exists());
+    assert!(custom_output.join("live_chat.jsonl").exists());
+    assert!(custom_output.join("live_metadata.jsonl").exists());
+
+    // Verify remote chunks are purged
+    assert!(
+        !chunk0.exists(),
+        "Remote chunk_0000.ts must be purged when delete_chunks is true"
+    );
+    assert!(
+        !chat0.exists(),
+        "Remote chat_0000.jsonl must be purged when delete_chunks is true"
+    );
+
+    // Invariant: metadata on remote is strictly preserved
+    assert!(meta.exists(), "Remote livemetadata.jsonl must be preserved");
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_to_local_with_mock_backend_executes_zero_cloud_uploads() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_mock_backend");
+    let staging_parent = create_temp_test_dir("test_remote_cons_mock_backend_staging");
+    let custom_output = create_temp_test_dir("test_remote_cons_mock_backend_dest");
+
+    let (_chunk0, _chat0, _meta) = setup_test_stream_chunks(&remote_dir);
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path.clone(),
+        upload: false,
+        output_dir: Some(custom_output.clone()),
+        delete_chunks: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent),
+        config: None,
+        ..Default::default()
+    };
+
+    let mock = Arc::new(MockUploadBackend::new());
+
+    let (output, _buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let summary = run_consolidation_with_backend_and_cancel(
+        args,
+        coordinator,
+        CancellationToken::new(),
+        Some(mock.clone() as Arc<dyn UploadBackend>),
+    )
+    .await
+    .expect("Consolidation with mock backend should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify local triad exists in custom_output
+    assert!(custom_output.join("livestream.mp4").exists());
+    assert!(custom_output.join("live_chat.jsonl").exists());
+    assert!(custom_output.join("live_metadata.jsonl").exists());
+
+    // Acceptance criterion: No cloud upload calls executed when --upload is omitted
+    let uploads = mock.uploads.lock().await;
+    assert!(
+        uploads.is_empty(),
+        "mock.uploads must be empty when --upload is false! Found: {:?}",
+        *uploads
+    );
+
+    let files = mock.files.lock().await;
+    assert!(
+        !files.contains_key(&format!("{remote_path}/livestream.mp4")),
+        "Mock files must not contain livestream.mp4 when --upload is false"
+    );
+    assert!(
+        !files.contains_key(&format!("{remote_path}/live_chat.jsonl")),
+        "Mock files must not contain live_chat.jsonl when --upload is false"
+    );
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_to_local_overwrite_protection() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_overwrite");
+    let staging_parent = create_temp_test_dir("test_remote_cons_overwrite_staging");
+    let custom_output = create_temp_test_dir("test_remote_cons_overwrite_dest");
+
+    let (_chunk0, _chat0, _meta) = setup_test_stream_chunks(&remote_dir);
+
+    // Pre-create conflicting files in destination
+    let existing_mp4 = custom_output.join("livestream.mp4");
+    fs::write(&existing_mp4, b"pre-existing video").unwrap();
+    let existing_meta = custom_output.join("live_metadata.jsonl");
+    fs::write(&existing_meta, b"pre-existing meta").unwrap();
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    // 1. Without overwrite: must fail with pre-existing destination file error
+    let args_no_overwrite = ConsolidateArgs {
+        path: remote_path.clone(),
+        upload: false,
+        output_dir: Some(custom_output.clone()),
+        delete_chunks: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent.clone()),
+        config: None,
+        ..Default::default()
+    };
+
+    let res_no_overwrite = run_consolidation(args_no_overwrite).await;
+    assert!(
+        res_no_overwrite.is_err(),
+        "Must error when destination file exists and overwrite is false"
+    );
+    let err_msg = format!("{:#}", res_no_overwrite.err().unwrap());
+    assert!(
+        err_msg.contains("Pre-existing destination file(s)"),
+        "Error message must specify pre-existing destination files: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("livestream.mp4") && err_msg.contains("live_metadata.jsonl"),
+        "Error message must specify both conflicting files: {err_msg}"
+    );
+
+    // 2. With overwrite: must succeed and replace destination files
+    let args_overwrite = ConsolidateArgs {
+        path: remote_path,
+        upload: false,
+        output_dir: Some(custom_output.clone()),
+        delete_chunks: false,
+        overwrite: true,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent),
+        config: None,
+        ..Default::default()
+    };
+
+    let res_overwrite = run_consolidation(args_overwrite).await;
+    assert!(
+        res_overwrite.is_ok(),
+        "Must succeed with overwrite: true: {:?}",
+        res_overwrite.err()
+    );
+
+    // Verify new file content
+    assert!(custom_output.join("livestream.mp4").exists());
+    assert!(custom_output.join("live_chat.jsonl").exists());
+    assert!(custom_output.join("live_metadata.jsonl").exists());
+}
+
+#[tokio::test]
+async fn test_remote_consolidation_to_local_without_metadata_succeeds_with_video_and_chat() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+    let _mock_rclone = get_mock_rclone_bin();
+
+    let remote_dir = create_temp_test_dir("test_remote_cons_no_meta");
+    let staging_parent = create_temp_test_dir("test_remote_cons_no_meta_staging");
+    let custom_output = create_temp_test_dir("test_remote_cons_no_meta_dest");
+
+    // Only create video and chat, omit metadata
+    let chunk0 = remote_dir.join("chunk_0000.ts");
+    fs::write(&chunk0, b"ts_chunk_0000_data").unwrap();
+    let chat0 = remote_dir.join("chat_0000.jsonl");
+    let line1 = make_chat_line(10_000, "user1", "msg1");
+    fs::write(&chat0, format!("{line1}\n")).unwrap();
+
+    let remote_path = format!(
+        "mock_remote:{}",
+        remote_dir.to_string_lossy().replace('\\', "/")
+    );
+
+    let args = ConsolidateArgs {
+        path: remote_path,
+        upload: false,
+        output_dir: Some(custom_output.clone()),
+        delete_chunks: false,
+        overwrite: false,
+        strict: false,
+        delete_concurrency: 16,
+        temp_dir: Some(staging_parent),
+        config: None,
+        ..Default::default()
+    };
+
+    let summary = run_consolidation(args)
+        .await
+        .expect("Consolidation without metadata should succeed");
+
+    assert!(!summary.has_metadata);
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify video and chat exist, metadata does not
+    assert!(custom_output.join("livestream.mp4").exists());
+    assert!(custom_output.join("live_chat.jsonl").exists());
+    assert!(!custom_output.join("live_metadata.jsonl").exists());
 }

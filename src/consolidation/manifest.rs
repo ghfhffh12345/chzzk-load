@@ -91,6 +91,54 @@ pub fn join_remote_path(remote_base: &str, child: &str) -> String {
     }
 }
 
+/// Extracts the session folder name from a remote target string (e.g. `remote:bucket/path/session` -> `session`).
+///
+/// Strips trailing slashes, extracts the path segment after the first colon, and returns the last path component.
+/// If the remote path has no path components (e.g. `remote:`), falls back to the deterministic staging folder name.
+pub fn extract_remote_session_name(remote_path: &str) -> String {
+    let path_part = if let Some(colon_idx) = remote_path.find(':') {
+        &remote_path[colon_idx + 1..]
+    } else {
+        remote_path
+    };
+
+    let trimmed = path_part.trim_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return crate::consolidation::staging::staging_folder_name(remote_path);
+    }
+
+    trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+/// Resolves the local final output directory for consolidated media.
+///
+/// Priority:
+/// 1. `custom_output_dir` (e.g. `-o, --output-dir <DIR>`) resolved via `resolve_path`.
+/// 2. If omitted:
+///    - For `TargetLocation::Local(dir)`: resolved in-place to `resolve_path(dir)`.
+///    - For `TargetLocation::Remote(remote_path)`: resolved to `<resolve_path(recordings_dir)>/<session_folder_name>`.
+pub fn resolve_consolidation_output_dir(
+    target: &TargetLocation,
+    custom_output_dir: Option<&Path>,
+    recordings_dir: &str,
+) -> PathBuf {
+    if let Some(custom) = custom_output_dir {
+        crate::app_path::resolve_path(custom)
+    } else {
+        match target {
+            TargetLocation::Local(dir) => crate::app_path::resolve_path(dir),
+            TargetLocation::Remote(remote_base) => {
+                let session_name = extract_remote_session_name(remote_base);
+                crate::app_path::resolve_path(Path::new(recordings_dir)).join(session_name)
+            }
+        }
+    }
+}
+
 /// Represents a single discovered chunk (video or chat) with numeric index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsolidationChunk {
@@ -175,6 +223,7 @@ pub struct ConsolidationManifest {
     pub video_chunks: Vec<ConsolidationChunk>,
     pub chat_chunks: Vec<ConsolidationChunk>,
     pub has_metadata: bool,
+    pub metadata_name: Option<String>,
     pub pre_existing_video: bool,
     pub pre_existing_chat: bool,
     pub warnings: Vec<String>,
@@ -190,6 +239,7 @@ pub fn build_manifest_from_entries(
     let mut video_chunks = Vec::new();
     let mut chat_chunks = Vec::new();
     let mut has_metadata = false;
+    let mut metadata_name = None;
     let mut pre_existing_video = false;
     let mut pre_existing_chat = false;
     let mut warnings = Vec::new();
@@ -206,6 +256,7 @@ pub fn build_manifest_from_entries(
             pre_existing_chat = true;
         } else if name_lower == "live_metadata.jsonl" || name_lower == "livemetadata.jsonl" {
             has_metadata = true;
+            metadata_name = Some(entry.name.clone());
         } else if let Some(idx) = parse_video_chunk_index(&entry.name) {
             video_chunks.push(ConsolidationChunk {
                 index: idx,
@@ -260,6 +311,7 @@ pub fn build_manifest_from_entries(
         video_chunks,
         chat_chunks,
         has_metadata,
+        metadata_name,
         pre_existing_video,
         pre_existing_chat,
         warnings,
