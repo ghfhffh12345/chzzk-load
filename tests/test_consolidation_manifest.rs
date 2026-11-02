@@ -698,12 +698,13 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args)
@@ -729,7 +730,7 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
         "live_chat.jsonl must exist"
     );
 
-    // Original chunks deleted when keep_original is false
+    // Original chunks deleted when delete_chunks is true
     assert!(!chunk0.exists(), "Original chunk_0000.ts must be deleted");
     assert!(!chat0.exists(), "Original chat_0000.jsonl must be deleted");
 
@@ -740,7 +741,7 @@ async fn test_run_consolidation_concurrent_pipelines_and_chunk_cleanup() {
 }
 
 #[tokio::test]
-async fn test_run_consolidation_keep_original_flag() {
+async fn test_run_consolidation_delete_chunks_false_preserves_chunks() {
     let mock_bin = get_mock_ffmpeg_bin();
     unsafe {
         std::env::set_var("CHZZK_LOAD_FFMPEG_BIN", mock_bin);
@@ -763,12 +764,13 @@ async fn test_run_consolidation_keep_original_flag() {
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: true,
+        delete_chunks: false,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args)
@@ -778,7 +780,7 @@ async fn test_run_consolidation_keep_original_flag() {
     assert!(summary.video_result.is_some());
     assert!(summary.chat_stats.is_some());
 
-    // Original chunks must remain when keep_original is true
+    // Original chunks must remain when delete_chunks is false
     assert!(chunk0.exists(), "chunk_0000.ts must remain intact");
     assert!(chat0.exists(), "chat_0000.jsonl must remain intact");
     assert!(meta.exists(), "livemetadata.jsonl must remain intact");
@@ -803,12 +805,13 @@ async fn test_run_consolidation_single_media_video_only() {
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args)
@@ -843,12 +846,13 @@ async fn test_run_consolidation_single_media_chat_only() {
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args)
@@ -996,12 +1000,13 @@ async fn test_run_consolidation_dual_pipeline_failure_cleans_up_staged_and_prese
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: false,
+        delete_chunks: false,
         overwrite: false,
         strict: true,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let result = run_consolidation(args).await;
@@ -1068,12 +1073,13 @@ async fn test_run_consolidation_video_failure_surfaces_video_error_not_chat_canc
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let result = run_consolidation(args).await;

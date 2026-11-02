@@ -368,12 +368,13 @@ async fn test_local_consolidation_produces_livestream_mp4_and_live_chat_jsonl() 
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: true,
+        delete_chunks: false,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args)
@@ -444,12 +445,13 @@ async fn test_local_consolidation_overwrite_flag_replaces_existing_artifacts() {
     // 1. Without overwrite -> must fail citing pre-existing files
     let args_no_overwrite = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: true,
+        delete_chunks: false,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
     let err = run_consolidation(args_no_overwrite)
         .await
@@ -463,12 +465,13 @@ async fn test_local_consolidation_overwrite_flag_replaces_existing_artifacts() {
     // 2. With overwrite -> must succeed and cleanly replace destination files
     let args_overwrite = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: true,
+        delete_chunks: false,
         overwrite: true,
         strict: false,
         delete_concurrency: 16,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
     let summary = run_consolidation(args_overwrite)
         .await

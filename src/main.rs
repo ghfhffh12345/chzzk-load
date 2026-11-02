@@ -34,7 +34,10 @@ async fn main() -> anyhow::Result<()> {
         if consolidate_args.config.is_none() {
             consolidate_args.config = args.config;
         }
-        let is_tty = !args.headless && std::io::stdout().is_terminal();
+        if args.headless {
+            consolidate_args.headless = true;
+        }
+        let is_tty = !consolidate_args.headless && std::io::stdout().is_terminal();
         let coordinator = chzzk_load::consolidation::ConsolidationProgressCoordinator::new(is_tty);
         chzzk_load::consolidation::run_consolidation_with_coordinator(
             consolidate_args,

@@ -133,12 +133,13 @@ async fn test_remote_consolidation_complete_pipeline_loopback_upload_and_purge()
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args)
@@ -184,7 +185,7 @@ async fn test_remote_consolidation_complete_pipeline_loopback_upload_and_purge()
 }
 
 #[tokio::test]
-async fn test_remote_consolidation_keep_original_retains_chunks_and_cleans_staging() {
+async fn test_remote_consolidation_delete_chunks_false_retains_chunks_and_cleans_staging() {
     let _lock = REMOTE_TEST_MUTEX.lock().await;
     let _mock_ffmpeg = get_mock_ffmpeg_bin();
     let _mock_rclone = get_mock_rclone_bin();
@@ -208,17 +209,18 @@ async fn test_remote_consolidation_keep_original_retains_chunks_and_cleans_stagi
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: true,
+        delete_chunks: false,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args)
         .await
-        .expect("run_consolidation should succeed with keep_original");
+        .expect("run_consolidation should succeed with delete_chunks: false");
 
     assert_eq!(summary.video_chunks_count, 1);
     assert_eq!(summary.chat_chunks_count, 1);
@@ -230,18 +232,18 @@ async fn test_remote_consolidation_keep_original_retains_chunks_and_cleans_stagi
     // 2. Verify original chunks STILL exist on remote
     assert!(
         chunk0.exists(),
-        "chunk0 must be retained with --keep-original"
+        "chunk0 must be retained with delete_chunks: false"
     );
     assert!(
         chat0.exists(),
-        "chat0 must be retained with --keep-original"
+        "chat0 must be retained with delete_chunks: false"
     );
     assert!(meta.exists(), "livemetadata.jsonl must be retained");
 
     // 3. Verify local staging directory is STILL cleaned up
     assert!(
         !staging_parent.exists(),
-        "Local staging directory must be cleaned up even with keep_original"
+        "Local staging directory must be cleaned up even with delete_chunks: false"
     );
 }
 
@@ -271,12 +273,13 @@ async fn test_remote_consolidation_dual_pipeline_failure_preserves_remote_chunks
     // strict: true causes chat failure
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: false,
         overwrite: false,
         strict: true,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let res = run_consolidation(args).await;
@@ -323,12 +326,13 @@ async fn test_remote_consolidation_upload_failure_cleans_up_remote_part_and_pres
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let res = run_consolidation(args).await;
@@ -408,12 +412,13 @@ async fn test_remote_consolidation_resume_upload_bypasses_ffmpeg_on_valid_stagin
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args)
@@ -482,12 +487,13 @@ async fn test_remote_consolidation_overwrite_forces_clean_remux() {
     // overwrite: true MUST invalidate staging and attempt to spawn FFmpeg
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: false,
         overwrite: true,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let res = run_consolidation(args).await;
@@ -544,12 +550,13 @@ async fn test_remote_consolidation_upload_failure_then_resume_without_ffmpeg_end
     // Phase 1: First run fails during cloud upload because destination path contains fail_copy
     let args1 = ConsolidateArgs {
         path: remote_path_fail,
-        keep_original: false,
+        delete_chunks: false,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let res1 = run_consolidation(args1).await;
@@ -594,12 +601,13 @@ async fn test_remote_consolidation_upload_failure_then_resume_without_ffmpeg_end
 
     let args2 = ConsolidateArgs {
         path: remote_path_ok,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let summary2 = run_consolidation(args2)
@@ -668,12 +676,13 @@ async fn test_remote_consolidation_upload_cancellation_preserves_local_files() {
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let handle = tokio::spawn(async move { run_consolidation(args).await });
@@ -783,12 +792,13 @@ consolidate_extra_args = ["--checkers", "12", "--stats", "500ms"]
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: Some(config_file),
+        ..Default::default()
     };
 
     let summary = run_consolidation(args).await;
@@ -848,12 +858,13 @@ async fn test_remote_consolidation_without_config_uses_default_high_performance_
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args).await;
@@ -905,12 +916,13 @@ async fn test_remote_consolidation_uploads_concurrently_parallel() {
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let summary = run_consolidation(args).await;
@@ -950,12 +962,13 @@ async fn test_remote_consolidation_chat_failure_aborts_hanging_video_immediately
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let start = std::time::Instant::now();
@@ -996,12 +1009,13 @@ async fn test_remote_consolidation_video_failure_aborts_hanging_chat_immediately
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let start = std::time::Instant::now();
@@ -1042,12 +1056,13 @@ async fn test_remote_consolidation_cancellation_token_promptly_terminates_active
 
     let args = ConsolidateArgs {
         path: remote_path,
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 16,
         temp_dir: Some(staging_parent.clone()),
         config: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -1618,8 +1633,9 @@ async fn test_remote_consolidation_interactive_upload_telemetry() {
         config: None,
         overwrite: false,
         strict: false,
-        keep_original: false,
+        delete_chunks: false,
         delete_concurrency: 4,
+        ..Default::default()
     };
 
     let summary =
@@ -1672,8 +1688,9 @@ async fn test_remote_consolidation_non_interactive_upload_telemetry() {
         config: None,
         overwrite: false,
         strict: false,
-        keep_original: false,
+        delete_chunks: false,
         delete_concurrency: 4,
+        ..Default::default()
     };
 
     let summary =
@@ -1733,8 +1750,9 @@ async fn test_run_consolidation_with_injected_mock_backend() {
         config: None,
         overwrite: false,
         strict: false,
-        keep_original: false,
+        delete_chunks: false,
         delete_concurrency: 4,
+        ..Default::default()
     };
 
     let mock = Arc::new(MockUploadBackend::new());

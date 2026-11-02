@@ -135,6 +135,7 @@ async fn test_vod_archival_e2e_full_url_success() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -283,6 +284,7 @@ chunk_00.ts
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -325,6 +327,7 @@ async fn test_vod_archival_max_segments_truncates_download() {
         nid_aut: None,
         nid_ses: None,
         max_segments: Some(1), // Limit download to 1 segment instead of 3
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -367,6 +370,7 @@ async fn test_vod_archival_numeric_id_and_quality_selector() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -407,6 +411,7 @@ async fn test_vod_archival_fails_fast_on_missing_aria2c() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let options = VodOptions {
@@ -453,6 +458,7 @@ async fn test_vod_archival_cooperative_cancellation() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -565,6 +571,7 @@ async fn test_vod_archival_with_concurrent_chat_integration() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -626,6 +633,7 @@ async fn test_vod_archival_no_chat_flag_skips_chat() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -684,6 +692,7 @@ async fn test_vod_archival_dual_event_metadata_synthesis_and_promotion() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -763,6 +772,7 @@ async fn test_vod_archival_retains_part_files_and_staging_dir_on_failure() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -882,6 +892,7 @@ async fn test_vod_archival_resumes_partial_download_skipping_existing_segments()
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -950,6 +961,7 @@ async fn test_vod_archival_custom_temp_dir() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -1003,6 +1015,7 @@ async fn test_vod_archival_upload_preflight_failure() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let options = VodOptions {
@@ -1072,6 +1085,7 @@ async fn test_vod_archival_upload_default_retention_preserves_local_files() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let options = VodOptions {
@@ -1170,6 +1184,7 @@ async fn test_vod_archival_upload_delete_after_upload_purges_local_files() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let options = VodOptions {
@@ -1253,6 +1268,7 @@ async fn test_vod_archival_upload_failure_preserves_local_artifacts() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let options = VodOptions {
@@ -1328,6 +1344,7 @@ async fn test_vod_archival_unauthenticated_fails_with_actionable_guidance() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -1387,6 +1404,7 @@ async fn test_vod_archival_authenticated_propagates_cookies_and_succeeds() {
         nid_aut: Some("valid_aut".to_string()),
         nid_ses: Some("valid_ses".to_string()),
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -1437,6 +1455,7 @@ async fn test_vod_archival_diagnostics_on_adult_4001_and_subscriber_4003_errors(
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let err_4001 = run_vod_archival(args_4001, source_4001, CancellationToken::new())
@@ -1468,6 +1487,7 @@ async fn test_vod_archival_diagnostics_on_adult_4001_and_subscriber_4003_errors(
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let err_4003 = run_vod_archival(args_4003, source_4003, CancellationToken::new())
@@ -1710,6 +1730,7 @@ async fn test_vod_archival_progressive_zero_transcode_promotion() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     // Explicitly pass an invalid FFmpeg binary path to PROVE that FFmpeg is never invoked!
@@ -1785,6 +1806,7 @@ async fn test_vod_archival_progressive_repairs_when_container_not_faststart() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -1844,6 +1866,7 @@ async fn test_vod_archival_progressive_repairs_when_container_corrupted() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -1893,6 +1916,7 @@ async fn test_vod_archival_fallback_to_hls_when_progressive_absent_or_segregated
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let summary_1 = run_vod_archival(args_1, source_1, CancellationToken::new())
@@ -1977,6 +2001,7 @@ async fn test_vod_archival_fallback_to_hls_when_progressive_absent_or_segregated
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let summary_2 = run_vod_archival(args_2, source_2, CancellationToken::new())
@@ -2052,6 +2077,7 @@ async fn test_vod_archival_fallback_to_hls_when_progressive_resolution_unsatisfi
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let summary = run_vod_archival(args, source, CancellationToken::new())
@@ -2103,6 +2129,7 @@ async fn test_vod_archival_progressive_artifact_triad_and_upload() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let remote_storage = temp_dir.join("remote_storage");
@@ -2231,6 +2258,7 @@ async fn test_vod_archival_with_live_rewind_playback_json_fmp4_map() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -2318,6 +2346,7 @@ async fn test_vod_archival_with_live_rewind_fallback_on_playback_failure() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -2385,6 +2414,7 @@ async fn test_vod_archival_resumes_without_purging_transiently_locked_segments()
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let cancel_token = CancellationToken::new();
@@ -2715,6 +2745,7 @@ async fn test_vod_archival_with_injected_mock_upload_backend() {
         nid_aut: None,
         nid_ses: None,
         max_segments: None,
+        ..Default::default()
     };
 
     let mock_backend = Arc::new(MockUploadBackend::new());

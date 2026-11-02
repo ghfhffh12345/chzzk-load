@@ -1513,12 +1513,13 @@ async fn test_run_consolidation_with_coordinator_interactive_e2e() {
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 4,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let (output, buf) = CoordinatorOutput::buffer();
@@ -1577,12 +1578,13 @@ async fn test_run_consolidation_with_coordinator_interactive_video_only() {
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 4,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let (output, buf) = CoordinatorOutput::buffer();
@@ -1636,12 +1638,13 @@ async fn test_run_consolidation_with_coordinator_non_interactive_e2e() {
 
     let args = ConsolidateArgs {
         path: temp_dir.to_string_lossy().to_string(),
-        keep_original: false,
+        delete_chunks: true,
         overwrite: false,
         strict: false,
         delete_concurrency: 4,
         temp_dir: None,
         config: None,
+        ..Default::default()
     };
 
     let (output, buf) = CoordinatorOutput::buffer();

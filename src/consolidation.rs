@@ -489,7 +489,7 @@ pub async fn run_consolidation_with_coordinator(
 /// and chat deduplication pipelines via `tokio::join!`, atomically finalizes staged `.part`
 /// files upon zero-exit completion of all active pipelines, concurrently uploads finalized
 /// media files to cloud remotes with fail-fast sibling abort, and purges original chunks
-/// when `--keep-original` is false while strictly preserving `live_metadata.jsonl` and `livemetadata.jsonl`.
+/// when `--delete-chunks` is true while strictly preserving `live_metadata.jsonl` and `livemetadata.jsonl`.
 pub async fn run_consolidation_with_coordinator_and_cancel(
     args: ConsolidateArgs,
     coordinator: ConsolidationProgressCoordinator,
@@ -923,7 +923,7 @@ pub async fn run_consolidation_with_backend_and_cancel(
         );
     }
 
-    let purge_res = if !args.keep_original {
+    let purge_res = if args.delete_chunks {
         let eligible_chunks =
             collect_purgeable_chunks(&manifest.video_chunks, &manifest.chat_chunks);
         let total_purge = eligible_chunks.len();
@@ -1232,12 +1232,13 @@ consolidate_extra_args = ["--low-level-retries", "10"]
     fn test_consolidate_args_reexport() {
         let args = super::ConsolidateArgs {
             path: "remote:bucket/stream".to_string(),
-            keep_original: false,
+            delete_chunks: false,
             overwrite: true,
             strict: false,
             delete_concurrency: 16,
             temp_dir: None,
             config: None,
+            ..Default::default()
         };
         assert_eq!(args.path, "remote:bucket/stream");
         assert_eq!(args.delete_concurrency, 16);

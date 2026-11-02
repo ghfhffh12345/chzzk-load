@@ -126,6 +126,20 @@ pub struct VodArgs {
         help = "Maximum number of video segments to download (useful for quick verification or smoke-testing)"
     )]
     pub max_segments: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Overwrite existing VOD archive files (vod.mp4, vod_chat.jsonl, vod_metadata.jsonl)"
+    )]
+    pub overwrite: bool,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "upload",
+        help = "Custom destination remote path override for cloud upload"
+    )]
+    pub remote_path: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone, PartialEq, Eq)]
@@ -134,10 +148,46 @@ pub struct ConsolidateArgs {
     pub path: String,
 
     #[arg(
+        short,
         long,
-        help = "Retain original video and chat chunks after successful consolidation"
+        value_name = "DIR",
+        help = "Directory to store the consolidated archive (defaults to source directory for local, or recordings_dir for remote)"
     )]
-    pub keep_original: bool,
+    pub output_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Upload completed consolidated artifacts to remote cloud storage via rclone"
+    )]
+    pub upload: bool,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "upload",
+        help = "Custom destination remote path override for cloud upload"
+    )]
+    pub remote_path: Option<String>,
+
+    #[arg(
+        long,
+        requires = "upload",
+        help = "Delete local consolidated files after successful cloud upload (retained locally by default)"
+    )]
+    pub delete_after_upload: bool,
+
+    #[arg(
+        long,
+        help = "Purge original video and chat chunks after successful consolidation (chunks retained by default)"
+    )]
+    pub delete_chunks: bool,
+
+    #[arg(
+        long,
+        visible_alias = "no-tui",
+        help = "Run in headless console mode without interactive ANSI progress bars"
+    )]
+    pub headless: bool,
 
     #[arg(
         long,
@@ -173,6 +223,25 @@ pub struct ConsolidateArgs {
         help = "Path to dedicated settings.toml file"
     )]
     pub config: Option<PathBuf>,
+}
+
+impl Default for ConsolidateArgs {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            output_dir: None,
+            upload: false,
+            remote_path: None,
+            delete_after_upload: false,
+            delete_chunks: false,
+            headless: false,
+            overwrite: false,
+            strict: false,
+            delete_concurrency: 16,
+            temp_dir: None,
+            config: None,
+        }
+    }
 }
 
 fn parse_delete_concurrency(s: &str) -> Result<usize, String> {

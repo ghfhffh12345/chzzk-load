@@ -370,7 +370,12 @@ fn test_cli_consolidate_subcommand_parsing() {
         cli.command,
         Some(Commands::Consolidate(ConsolidateArgs {
             path: "recordings/my_stream".to_string(),
-            keep_original: false,
+            output_dir: None,
+            upload: false,
+            remote_path: None,
+            delete_after_upload: false,
+            delete_chunks: false,
+            headless: false,
             overwrite: false,
             strict: false,
             delete_concurrency: 16,
@@ -384,25 +389,39 @@ fn test_cli_consolidate_subcommand_parsing() {
         "chzzk-load",
         "consolidate",
         "remote:bucket/path",
-        "--keep-original",
+        "-o",
+        "/custom/output",
+        "--upload",
+        "--remote-path",
+        "remote:bucket/custom_target",
+        "--delete-after-upload",
+        "--delete-chunks",
+        "--headless",
         "--overwrite",
         "--strict",
         "--delete-concurrency",
         "8",
         "--temp-dir",
         "/mnt/staging",
+        "-c",
+        "custom_settings.toml",
     ])
     .expect("Parsing consolidate command with all flags should succeed");
     assert_eq!(
         cli_full.command,
         Some(Commands::Consolidate(ConsolidateArgs {
             path: "remote:bucket/path".to_string(),
-            keep_original: true,
+            output_dir: Some(std::path::PathBuf::from("/custom/output")),
+            upload: true,
+            remote_path: Some("remote:bucket/custom_target".to_string()),
+            delete_after_upload: true,
+            delete_chunks: true,
+            headless: true,
             overwrite: true,
             strict: true,
             delete_concurrency: 8,
             temp_dir: Some(std::path::PathBuf::from("/mnt/staging")),
-            config: None,
+            config: Some(std::path::PathBuf::from("custom_settings.toml")),
         }))
     );
 
@@ -419,7 +438,12 @@ fn test_cli_consolidate_subcommand_parsing() {
         cli_temp.command,
         Some(Commands::Consolidate(ConsolidateArgs {
             path: "recordings/my_stream".to_string(),
-            keep_original: false,
+            output_dir: None,
+            upload: false,
+            remote_path: None,
+            delete_after_upload: false,
+            delete_chunks: false,
+            headless: false,
             overwrite: false,
             strict: false,
             delete_concurrency: 16,
@@ -428,7 +452,21 @@ fn test_cli_consolidate_subcommand_parsing() {
         }))
     );
 
-    // 4. Binary smoke --help contains consolidate subcommand
+    // 4. Clean-break: --keep-original is rejected
+    let keep_orig_err = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/my_stream",
+        "--keep-original",
+    ])
+    .expect_err("--keep-original must be rejected as an unrecognized argument");
+    let keep_err_str = keep_orig_err.to_string();
+    assert!(
+        keep_err_str.contains("--keep-original") || keep_err_str.contains("unexpected argument"),
+        "Error message must indicate --keep-original is not recognized: {keep_err_str}"
+    );
+
+    // 5. Binary smoke --help contains consolidate subcommand
     let bin_path = env!("CARGO_BIN_EXE_chzzk-load");
     let output = Command::new(bin_path)
         .arg("--help")
@@ -441,7 +479,7 @@ fn test_cli_consolidate_subcommand_parsing() {
         "Top-level --help must list consolidate subcommand: {stdout}"
     );
 
-    // 4. Binary smoke consolidate --help
+    // 6. Binary smoke consolidate --help
     let sub_output = Command::new(bin_path)
         .args(["consolidate", "--help"])
         .output()
@@ -449,8 +487,36 @@ fn test_cli_consolidate_subcommand_parsing() {
     assert!(sub_output.status.success());
     let sub_stdout = String::from_utf8_lossy(&sub_output.stdout);
     assert!(
-        sub_stdout.contains("--keep-original"),
-        "Subcommand help must contain --keep-original: {sub_stdout}"
+        sub_stdout.contains("--output-dir") && sub_stdout.contains("-o"),
+        "Subcommand help must contain -o, --output-dir: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--upload"),
+        "Subcommand help must contain --upload: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--remote-path"),
+        "Subcommand help must contain --remote-path: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--delete-after-upload"),
+        "Subcommand help must contain --delete-after-upload: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--delete-chunks"),
+        "Subcommand help must contain --delete-chunks: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--headless"),
+        "Subcommand help must contain --headless: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--no-tui"),
+        "Subcommand help must contain --no-tui: {sub_stdout}"
+    );
+    assert!(
+        !sub_stdout.contains("--keep-original"),
+        "Subcommand help must NOT contain legacy --keep-original: {sub_stdout}"
     );
     assert!(
         sub_stdout.contains("--overwrite"),
@@ -498,10 +564,12 @@ fn test_cli_vod_subcommand_parsing() {
             nid_aut: None,
             nid_ses: None,
             max_segments: None,
+            overwrite: false,
+            remote_path: None,
         }))
     );
 
-    // 2. Numeric ID with all flags including headless, temp-dir, upload, and delete-after-upload
+    // 2. Numeric ID with all flags including headless, temp-dir, upload, delete-after-upload, overwrite, and remote-path
     let cli_full = Cli::try_parse_from([
         "chzzk-load",
         "vod",
@@ -517,7 +585,10 @@ fn test_cli_vod_subcommand_parsing() {
         "-c",
         "custom_settings.toml",
         "--upload",
+        "--remote-path",
+        "remote:bucket/vod_archive",
         "--delete-after-upload",
+        "--overwrite",
         "--max-segments",
         "5",
     ])
@@ -537,6 +608,8 @@ fn test_cli_vod_subcommand_parsing() {
             nid_aut: None,
             nid_ses: None,
             max_segments: Some(5),
+            overwrite: true,
+            remote_path: Some("remote:bucket/vod_archive".to_string()),
         }))
     );
 
@@ -577,8 +650,77 @@ fn test_cli_vod_subcommand_parsing() {
         "Subcommand help must contain --upload: {sub_stdout}"
     );
     assert!(
+        sub_stdout.contains("--remote-path"),
+        "Subcommand help must contain --remote-path: {sub_stdout}"
+    );
+    assert!(
         sub_stdout.contains("--delete-after-upload"),
         "Subcommand help must contain --delete-after-upload: {sub_stdout}"
+    );
+    assert!(
+        sub_stdout.contains("--overwrite"),
+        "Subcommand help must contain --overwrite: {sub_stdout}"
+    );
+}
+
+#[test]
+fn test_cli_consolidate_requires_upload_for_remote_path() {
+    let err = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/stream",
+        "--remote-path",
+        "remote:bucket/dest",
+    ])
+    .expect_err("--remote-path without --upload must fail Clap validation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("--upload"),
+        "Error message must mention missing required flag --upload: {msg}"
+    );
+}
+
+#[test]
+fn test_cli_consolidate_requires_upload_for_delete_after_upload() {
+    let err = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/stream",
+        "--delete-after-upload",
+    ])
+    .expect_err("--delete-after-upload without --upload must fail Clap validation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("--upload"),
+        "Error message must mention missing required flag --upload: {msg}"
+    );
+}
+
+#[test]
+fn test_cli_vod_requires_upload_for_remote_path() {
+    let err = Cli::try_parse_from([
+        "chzzk-load",
+        "vod",
+        "123456",
+        "--remote-path",
+        "remote:bucket/dest",
+    ])
+    .expect_err("--remote-path without --upload must fail Clap validation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("--upload"),
+        "Error message must mention missing required flag --upload: {msg}"
+    );
+}
+
+#[test]
+fn test_cli_vod_requires_upload_for_delete_after_upload() {
+    let err = Cli::try_parse_from(["chzzk-load", "vod", "123456", "--delete-after-upload"])
+        .expect_err("--delete-after-upload without --upload must fail Clap validation");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("--upload"),
+        "Error message must mention missing required flag --upload: {msg}"
     );
 }
 
@@ -667,6 +809,7 @@ fn test_cli_consolidate_config_flag_parsing() {
 
 #[test]
 fn test_cli_consolidate_with_headless_and_no_tui() {
+    // 1. Root-level --headless
     let cli_headless = Cli::try_parse_from([
         "chzzk-load",
         "--headless",
@@ -679,7 +822,12 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
         cli_headless.command,
         Some(Commands::Consolidate(ConsolidateArgs {
             path: "recordings/stream".to_string(),
-            keep_original: false,
+            output_dir: None,
+            upload: false,
+            remote_path: None,
+            delete_after_upload: false,
+            delete_chunks: false,
+            headless: false,
             overwrite: false,
             strict: false,
             delete_concurrency: 16,
@@ -688,6 +836,7 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
         }))
     );
 
+    // 2. Root-level --no-tui
     let cli_no_tui =
         Cli::try_parse_from(["chzzk-load", "--no-tui", "consolidate", "recordings/stream"])
             .expect("Parsing --no-tui consolidate should succeed");
@@ -696,7 +845,12 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
         cli_no_tui.command,
         Some(Commands::Consolidate(ConsolidateArgs {
             path: "recordings/stream".to_string(),
-            keep_original: false,
+            output_dir: None,
+            upload: false,
+            remote_path: None,
+            delete_after_upload: false,
+            delete_chunks: false,
+            headless: false,
             overwrite: false,
             strict: false,
             delete_concurrency: 16,
@@ -704,6 +858,30 @@ fn test_cli_consolidate_with_headless_and_no_tui() {
             config: None,
         }))
     );
+
+    // 3. Subcommand-level --headless
+    let cli_sub_headless = Cli::try_parse_from([
+        "chzzk-load",
+        "consolidate",
+        "recordings/stream",
+        "--headless",
+    ])
+    .expect("Parsing consolidate --headless should succeed");
+    if let Some(Commands::Consolidate(args)) = cli_sub_headless.command {
+        assert!(args.headless);
+    } else {
+        panic!("Expected Commands::Consolidate");
+    }
+
+    // 4. Subcommand-level --no-tui
+    let cli_sub_no_tui =
+        Cli::try_parse_from(["chzzk-load", "consolidate", "recordings/stream", "--no-tui"])
+            .expect("Parsing consolidate --no-tui should succeed");
+    if let Some(Commands::Consolidate(args)) = cli_sub_no_tui.command {
+        assert!(args.headless);
+    } else {
+        panic!("Expected Commands::Consolidate");
+    }
 }
 
 #[test]
