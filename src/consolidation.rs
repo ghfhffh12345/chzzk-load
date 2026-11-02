@@ -32,9 +32,9 @@ pub use chat::{
 pub use manifest::{
     ChunkGap, ConsolidationChunk, ConsolidationManifest, RawManifestEntry, TargetLocation,
     build_manifest_from_entries, detect_index_gaps, discover_manifest, discover_manifest_with_bin,
-    extract_remote_session_name, is_remote_path, join_remote_path, parse_chat_chunk_index,
-    parse_video_chunk_index, resolve_consolidation_output_dir, resolve_rclone_bin,
-    resolve_rclone_bin_with_config,
+    extract_local_session_name, extract_remote_session_name, is_remote_path, join_remote_path,
+    parse_chat_chunk_index, parse_video_chunk_index, resolve_consolidation_output_dir,
+    resolve_local_consolidation_cloud_dest, resolve_rclone_bin, resolve_rclone_bin_with_config,
 };
 pub use video::{
     ConcatScriptGuard, VideoConsolidationOptions, VideoConsolidationResult, VideoProgressTelemetry,
@@ -438,6 +438,181 @@ pub async fn upload_remote_staged_media(
     .await
 }
 
+/// Measures size in bytes for finalized consolidated media artifacts (`livestream.mp4` and `live_chat.jsonl`).
+pub(crate) async fn measure_media_artifact_bytes(
+    dir: &Path,
+    has_video: bool,
+    has_chat: bool,
+) -> (u64, u64) {
+    let video_bytes = if has_video {
+        let mp4_path = dir.join("livestream.mp4");
+        tokio::fs::metadata(mp4_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let chat_bytes = if has_chat {
+        let chat_path = dir.join("live_chat.jsonl");
+        tokio::fs::metadata(chat_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    (video_bytes, chat_bytes)
+}
+
+/// Options and track telemetry handles for uploading locally consolidated artifacts.
+#[derive(Debug, Clone, Default)]
+pub struct LocalUploadArtifactsOptions<'a> {
+    pub has_video: bool,
+    pub has_chat: bool,
+    pub has_metadata: bool,
+    pub metadata_name: Option<&'a str>,
+    pub delete_after_upload: bool,
+    pub video_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
+    pub chat_tx: Option<mpsc::UnboundedSender<UploadProgressUpdate>>,
+}
+
+/// Concurrently uploads locally consolidated artifacts (`livestream.mp4`, `live_chat.jsonl`, `live_metadata.jsonl`)
+/// to cloud destination `cloud_dest` via `UploadBackend`.
+///
+/// Implements two-stage atomic staging (`.part` files promoted via `move_file`) for media files,
+/// uploads `live_metadata.jsonl` to complete the canonical Live Artifact Triad,
+/// cleans up remote partials on failure/cancellation, and selectively deletes the local Live Artifact Triad
+/// post-upload when `delete_after_upload` is true, strictly preserving unpurged source chunks.
+pub async fn upload_local_consolidated_artifacts(
+    backend: &dyn UploadBackend,
+    cloud_dest: &str,
+    local_dir: &std::path::Path,
+    options: &LocalUploadArtifactsOptions<'_>,
+    cancel_token: CancellationToken,
+) -> anyhow::Result<()> {
+    if !options.has_video && !options.has_chat && !options.has_metadata {
+        return Ok(());
+    }
+
+    // 1. Two-stage atomic media upload to remote .part destinations
+    let remote_video_part = join_remote_path(cloud_dest, "livestream.mp4.part");
+    let remote_video_final = join_remote_path(cloud_dest, "livestream.mp4");
+    let remote_chat_part = join_remote_path(cloud_dest, "live_chat.jsonl.part");
+    let remote_chat_final = join_remote_path(cloud_dest, "live_chat.jsonl");
+
+    let upload_res = upload_remote_staged_media_with_progress(
+        backend,
+        cloud_dest,
+        local_dir,
+        options.has_video,
+        options.has_chat,
+        cancel_token.clone(),
+        options.video_tx.clone(),
+        options.chat_tx.clone(),
+    )
+    .await;
+
+    if let Err(upload_err) = upload_res {
+        eprintln!(
+            "[INFO] Cloud upload failed or was interrupted, but local consolidated files were preserved in '{}'.",
+            local_dir.display()
+        );
+        return Err(upload_err);
+    }
+
+    // 2. Atomically promote remote .part files via backend.move_file
+    let rename_res = async {
+        if options.has_video {
+            backend
+                .move_file(&remote_video_part, &remote_video_final)
+                .await?;
+        }
+        if options.has_chat {
+            backend
+                .move_file(&remote_chat_part, &remote_chat_final)
+                .await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    if let Err(rename_err) = rename_res {
+        let _ = backend.delete_file(&remote_video_part).await;
+        let _ = backend.delete_file(&remote_chat_part).await;
+        let _ = backend.delete_file(&remote_video_final).await;
+        let _ = backend.delete_file(&remote_chat_final).await;
+        eprintln!(
+            "[INFO] Cloud finalization failed, but local consolidated files were preserved in '{}'.",
+            local_dir.display()
+        );
+        return Err(rename_err);
+    }
+
+    // 3. Upload live_metadata.jsonl to complete the canonical Live Artifact Triad
+    if options.has_metadata {
+        let meta_file_name = options.metadata_name.unwrap_or("live_metadata.jsonl");
+        let local_meta = local_dir.join(meta_file_name);
+        let remote_meta = join_remote_path(cloud_dest, "live_metadata.jsonl");
+
+        if local_meta.exists() {
+            backend
+                .upload_file_to_dest(&local_meta, &remote_meta, None)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to upload live metadata from '{}' to '{}'",
+                        local_meta.display(),
+                        remote_meta
+                    )
+                })?;
+        }
+    }
+
+    // 4. Local retention policy: unlink Live Artifact Triad when delete_after_upload is true
+    if options.delete_after_upload {
+        if options.has_video {
+            let mp4_path = local_dir.join("livestream.mp4");
+            if mp4_path.exists() {
+                unlink_local_file_with_retry(&mp4_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to delete local consolidated video '{}'",
+                            mp4_path.display()
+                        )
+                    })?;
+            }
+        }
+        if options.has_chat {
+            let chat_path = local_dir.join("live_chat.jsonl");
+            if chat_path.exists() {
+                unlink_local_file_with_retry(&chat_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to delete local consolidated chat '{}'",
+                            chat_path.display()
+                        )
+                    })?;
+            }
+        }
+        if options.has_metadata {
+            let meta_file_name = options.metadata_name.unwrap_or("live_metadata.jsonl");
+            let local_meta = local_dir.join(meta_file_name);
+            if local_meta.exists() {
+                unlink_local_file_with_retry(&local_meta)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to delete local metadata '{}'", local_meta.display())
+                    })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolves configuration for consolidation.
 ///
 /// Priority:
@@ -517,15 +692,11 @@ pub async fn run_consolidation_with_backend_and_cancel(
     let manifest =
         discover_manifest_with_bin(&target, args.strict, args.overwrite, Some(&rclone_bin)).await?;
 
-    let upload_backend: Arc<dyn UploadBackend> = if manifest.target.is_remote() {
-        if let Some(injected) = backend {
-            injected
-        } else {
-            let rclone_config = settings.rclone.clone();
-            Arc::new(RcloneBackend::for_consolidation(rclone_config).with_bin(rclone_bin.clone()))
-        }
+    let upload_backend: Arc<dyn UploadBackend> = if let Some(injected) = backend {
+        injected
     } else {
-        Arc::new(RcloneBackend::new(settings.rclone.clone()))
+        let rclone_config = settings.rclone.clone();
+        Arc::new(RcloneBackend::for_consolidation(rclone_config).with_bin(rclone_bin.clone()))
     };
 
     println!(
@@ -847,24 +1018,8 @@ pub async fn run_consolidation_with_backend_and_cancel(
 
         if args.upload {
             // 1. Two-stage cloud upload: upload local files to remote .part destinations concurrently via rclone copyto
-            let video_bytes = if has_video {
-                let mp4_path = staging_dir.join("livestream.mp4");
-                tokio::fs::metadata(mp4_path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let chat_bytes = if has_chat {
-                let chat_path = staging_dir.join("live_chat.jsonl");
-                tokio::fs::metadata(chat_path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+            let (video_bytes, chat_bytes) =
+                measure_media_artifact_bytes(staging_dir, has_video, has_chat).await;
 
             let mut upload_session = coordinator.start_upload_tracks(
                 has_video.then_some(video_bytes),
@@ -1016,6 +1171,49 @@ pub async fn run_consolidation_with_backend_and_cancel(
             let _ = cleanup_staged_video(&manifest.target, None).await;
             let _ = cleanup_staged_chat(&manifest.target, None).await;
             return Err(e);
+        }
+
+        if args.upload {
+            let local_dir = match manifest.target {
+                TargetLocation::Local(ref d) => d,
+                TargetLocation::Remote(_) => unreachable!(),
+            };
+
+            let cloud_dest = resolve_local_consolidation_cloud_dest(
+                local_dir,
+                args.remote_path.as_deref(),
+                &settings.rclone.remote_path,
+            )?;
+
+            let (video_bytes, chat_bytes) =
+                measure_media_artifact_bytes(local_dir, has_video, has_chat).await;
+
+            let mut upload_session = coordinator.start_upload_tracks(
+                has_video.then_some(video_bytes),
+                has_chat.then_some(chat_bytes),
+            );
+
+            let upload_options = LocalUploadArtifactsOptions {
+                has_video,
+                has_chat,
+                has_metadata: manifest.has_metadata,
+                metadata_name: manifest.metadata_name.as_deref(),
+                delete_after_upload: args.delete_after_upload,
+                video_tx: upload_session.video_sender(),
+                chat_tx: upload_session.chat_sender(),
+            };
+
+            let upload_res = upload_local_consolidated_artifacts(
+                upload_backend.as_ref(),
+                &cloud_dest,
+                local_dir,
+                &upload_options,
+                cancel_token.clone(),
+            )
+            .await;
+
+            upload_session.finish(upload_res.is_ok()).await;
+            upload_res?;
         }
     }
 

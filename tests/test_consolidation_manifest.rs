@@ -5,9 +5,10 @@ use std::process::Command;
 use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::consolidation::manifest::{
     ChunkGap, RawManifestEntry, TargetLocation, build_manifest_from_entries, detect_index_gaps,
-    discover_manifest, discover_remote_manifest, extract_remote_session_name, is_remote_path,
-    parse_chat_chunk_index, parse_rclone_lsjson, parse_video_chunk_index,
-    resolve_consolidation_output_dir,
+    discover_manifest, discover_remote_manifest, extract_local_session_name,
+    extract_remote_session_name, is_remote_path, parse_chat_chunk_index, parse_rclone_lsjson,
+    parse_video_chunk_index, resolve_consolidation_output_dir,
+    resolve_local_consolidation_cloud_dest,
 };
 use chzzk_load::consolidation::{delete_original_chunks, run_consolidation};
 
@@ -1297,5 +1298,44 @@ fn test_extract_remote_session_name_and_resolve_output_dir() {
     assert_eq!(
         resolved_local_default,
         chzzk_load::app_path::resolve_path(std::path::Path::new("local/recordings/session_xyz"))
+    );
+}
+
+#[test]
+fn test_extract_local_session_name_and_resolve_local_cloud_dest() {
+    let p1 = std::path::Path::new("recordings/streamer_20261102_120000");
+    assert_eq!(extract_local_session_name(p1), "streamer_20261102_120000");
+
+    let p2 = std::path::Path::new("recordings/streamer_20261102_120000/");
+    assert_eq!(extract_local_session_name(p2), "streamer_20261102_120000");
+
+    // 1. Explicit remote_path override takes priority
+    let res_override = resolve_local_consolidation_cloud_dest(
+        p1,
+        Some("gdrive:custom/target_dest"),
+        "remote:chzzk",
+    )
+    .unwrap();
+    assert_eq!(res_override, "gdrive:custom/target_dest");
+
+    // 2. Default when remote_path is omitted: join configured_remote_path and session_name
+    let res_default = resolve_local_consolidation_cloud_dest(p1, None, "remote:chzzk").unwrap();
+    assert_eq!(res_default, "remote:chzzk/streamer_20261102_120000");
+
+    // 3. Trailing slash on configured_remote_path
+    let res_slash = resolve_local_consolidation_cloud_dest(p1, None, "remote:chzzk/").unwrap();
+    assert_eq!(res_slash, "remote:chzzk/streamer_20261102_120000");
+
+    // 4. Remote root bucket (e.g. "remote:")
+    let res_root = resolve_local_consolidation_cloud_dest(p1, None, "remote:").unwrap();
+    assert_eq!(res_root, "remote:streamer_20261102_120000");
+
+    // 5. Empty remote path and empty configured path should fail
+    let res_err = resolve_local_consolidation_cloud_dest(p1, None, "");
+    assert!(res_err.is_err());
+    let err_msg = res_err.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("remote destination path is not configured"),
+        "Unexpected error message: {err_msg}"
     );
 }

@@ -114,6 +114,49 @@ pub fn extract_remote_session_name(remote_path: &str) -> String {
         .to_string()
 }
 
+/// Extracts the session folder name from a local path.
+///
+/// Strips trailing slashes, resolves the path, and returns the last path component.
+/// If empty, falls back to `"session"`.
+pub fn extract_local_session_name(local_path: &Path) -> String {
+    let path_str = local_path.to_string_lossy();
+    let trimmed = path_str.trim_end_matches(['/', '\\']);
+    let path = Path::new(trimmed);
+    let resolved = crate::app_path::resolve_path(path);
+    resolved
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("session")
+        .to_string()
+}
+
+/// Resolves the cloud destination remote path for local consolidation uploads.
+///
+/// Priority:
+/// 1. Explicit `--remote-path <PATH>` from CLI arguments if non-empty.
+/// 2. Default: `<settings.rclone.remote_path>/<session_folder_name>`.
+///
+/// Bails with an actionable diagnostic error if both `--remote-path` and `settings.rclone.remote_path` are empty.
+pub fn resolve_local_consolidation_cloud_dest(
+    local_dir: &Path,
+    remote_path_arg: Option<&str>,
+    configured_remote_path: &str,
+) -> anyhow::Result<String> {
+    if let Some(custom) = remote_path_arg.map(str::trim).filter(|s| !s.is_empty()) {
+        Ok(custom.to_string())
+    } else {
+        let trimmed_configured = configured_remote_path.trim();
+        if trimmed_configured.is_empty() {
+            anyhow::bail!(
+                "Cannot upload consolidated artifacts: remote destination path is not configured (empty remote_path); pass --remote-path <PATH> or configure settings.rclone.remote_path"
+            );
+        }
+        let session_name = extract_local_session_name(local_dir);
+        Ok(join_remote_path(trimmed_configured, &session_name))
+    }
+}
+
 /// Resolves the local final output directory for consolidated media.
 ///
 /// Priority:

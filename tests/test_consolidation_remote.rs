@@ -9,11 +9,12 @@ use common::mock_rclone::get_mock_rclone_bin;
 use chzzk_load::cli::ConsolidateArgs;
 use chzzk_load::config::RcloneConfig;
 use chzzk_load::consolidation::{
-    ConsolidationChunk, ConsolidationProgressCoordinator, CoordinatorOutput, UploadProgressUpdate,
-    delete_original_chunks_with_backend, finalize_staged_chat, finalize_staged_video,
-    run_consolidation, run_consolidation_with_backend_and_cancel, run_consolidation_with_cancel,
-    run_consolidation_with_coordinator_and_cancel, upload_remote_staged_media,
-    upload_remote_staged_media_with_progress,
+    ConsolidationChunk, ConsolidationProgressCoordinator, CoordinatorOutput,
+    LocalUploadArtifactsOptions, UploadProgressUpdate, delete_original_chunks_with_backend,
+    finalize_staged_chat, finalize_staged_video, run_consolidation,
+    run_consolidation_with_backend_and_cancel, run_consolidation_with_cancel,
+    run_consolidation_with_coordinator_and_cancel, upload_local_consolidated_artifacts,
+    upload_remote_staged_media, upload_remote_staged_media_with_progress,
 };
 use chzzk_load::uploader::backend::{MockUploadBackend, UploadBackend};
 use chzzk_load::uploader::rclone::RcloneBackend;
@@ -2203,4 +2204,425 @@ async fn test_remote_consolidation_to_local_without_metadata_succeeds_with_video
     assert!(custom_output.join("livestream.mp4").exists());
     assert!(custom_output.join("live_chat.jsonl").exists());
     assert!(!custom_output.join("live_metadata.jsonl").exists());
+}
+
+#[tokio::test]
+async fn test_upload_local_consolidated_artifacts_retains_local_files_when_delete_after_upload_false()
+ {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let local_dir = create_temp_test_dir("test_upload_local_retain");
+
+    // Populate local directory with consolidated Live Artifact Triad + original chunks
+    let mp4_path = local_dir.join("livestream.mp4");
+    let chat_path = local_dir.join("live_chat.jsonl");
+    let meta_path = local_dir.join("live_metadata.jsonl");
+    let chunk0 = local_dir.join("chunk_0000.ts");
+    let chat0 = local_dir.join("chat_0000.jsonl");
+
+    fs::write(&mp4_path, b"mp4_payload").unwrap();
+    fs::write(&chat_path, b"chat_payload\n").unwrap();
+    fs::write(&meta_path, b"{\"type\":\"SESSION_START\"}\n").unwrap();
+    fs::write(&chunk0, b"chunk_payload").unwrap();
+    fs::write(&chat0, b"chat0_payload\n").unwrap();
+
+    let mock = MockUploadBackend::new();
+    let cloud_dest = "remote:bucket/session123";
+
+    let opts = LocalUploadArtifactsOptions {
+        has_video: true,
+        has_chat: true,
+        has_metadata: true,
+        metadata_name: Some("live_metadata.jsonl"),
+        delete_after_upload: false,
+        ..Default::default()
+    };
+
+    let res = upload_local_consolidated_artifacts(
+        &mock,
+        cloud_dest,
+        &local_dir,
+        &opts,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(res.is_ok(), "Upload should succeed: {:?}", res.err());
+
+    // Verify mock backend received the canonical triad
+    let files = mock.files.lock().await;
+    assert!(files.contains_key(&format!("{cloud_dest}/livestream.mp4")));
+    assert!(files.contains_key(&format!("{cloud_dest}/live_chat.jsonl")));
+    assert!(files.contains_key(&format!("{cloud_dest}/live_metadata.jsonl")));
+    assert!(!files.contains_key(&format!("{cloud_dest}/livestream.mp4.part")));
+    assert!(!files.contains_key(&format!("{cloud_dest}/live_chat.jsonl.part")));
+
+    // Verify local files are ALL retained
+    assert!(mp4_path.exists(), "livestream.mp4 must remain on disk");
+    assert!(chat_path.exists(), "live_chat.jsonl must remain on disk");
+    assert!(
+        meta_path.exists(),
+        "live_metadata.jsonl must remain on disk"
+    );
+    assert!(chunk0.exists(), "chunk_0000.ts must remain on disk");
+    assert!(chat0.exists(), "chat_0000.jsonl must remain on disk");
+}
+
+#[tokio::test]
+async fn test_upload_local_consolidated_artifacts_delete_after_upload_unlinks_triad_and_preserves_chunks()
+ {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let local_dir = create_temp_test_dir("test_upload_local_delete");
+
+    let mp4_path = local_dir.join("livestream.mp4");
+    let chat_path = local_dir.join("live_chat.jsonl");
+    let meta_path = local_dir.join("livemetadata.jsonl");
+    let chunk0 = local_dir.join("chunk_0000.ts");
+    let chat0 = local_dir.join("chat_0000.jsonl");
+
+    fs::write(&mp4_path, b"mp4_payload").unwrap();
+    fs::write(&chat_path, b"chat_payload\n").unwrap();
+    fs::write(&meta_path, b"{\"type\":\"SESSION_START\"}\n").unwrap();
+    fs::write(&chunk0, b"chunk_payload").unwrap();
+    fs::write(&chat0, b"chat0_payload\n").unwrap();
+
+    let mock = MockUploadBackend::new();
+    let cloud_dest = "remote:bucket/session123";
+
+    let opts = LocalUploadArtifactsOptions {
+        has_video: true,
+        has_chat: true,
+        has_metadata: true,
+        metadata_name: Some("livemetadata.jsonl"),
+        delete_after_upload: true,
+        ..Default::default()
+    };
+
+    let res = upload_local_consolidated_artifacts(
+        &mock,
+        cloud_dest,
+        &local_dir,
+        &opts,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(res.is_ok(), "Upload should succeed: {:?}", res.err());
+
+    // Verify mock backend received the canonical triad
+    let files = mock.files.lock().await;
+    assert!(files.contains_key(&format!("{cloud_dest}/livestream.mp4")));
+    assert!(files.contains_key(&format!("{cloud_dest}/live_chat.jsonl")));
+    assert!(files.contains_key(&format!("{cloud_dest}/live_metadata.jsonl")));
+
+    // Verify local consolidated triad is unlinked
+    assert!(
+        !mp4_path.exists(),
+        "livestream.mp4 must be deleted post-upload"
+    );
+    assert!(
+        !chat_path.exists(),
+        "live_chat.jsonl must be deleted post-upload"
+    );
+    assert!(
+        !meta_path.exists(),
+        "livemetadata.jsonl must be deleted post-upload"
+    );
+
+    // Strictly verify source chunks remain intact
+    assert!(chunk0.exists(), "chunk_0000.ts must strictly remain intact");
+    assert!(
+        chat0.exists(),
+        "chat_0000.jsonl must strictly remain intact"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_local_consolidated_artifacts_failure_preserves_local_triad_and_cleans_remote_parts()
+ {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let local_dir = create_temp_test_dir("test_upload_local_fail");
+
+    let mp4_path = local_dir.join("livestream.mp4");
+    let chat_path = local_dir.join("live_chat.jsonl");
+    let meta_path = local_dir.join("live_metadata.jsonl");
+
+    fs::write(&mp4_path, b"mp4_payload").unwrap();
+    fs::write(&chat_path, b"chat_payload\n").unwrap();
+    fs::write(&meta_path, b"{\"type\":\"SESSION_START\"}\n").unwrap();
+
+    let mock = MockUploadBackend::new();
+    mock.fail_patterns
+        .lock()
+        .await
+        .push("live_chat.jsonl".to_string());
+
+    let cloud_dest = "remote:bucket/session_fail";
+
+    let opts = LocalUploadArtifactsOptions {
+        has_video: true,
+        has_chat: true,
+        has_metadata: true,
+        metadata_name: Some("live_metadata.jsonl"),
+        delete_after_upload: true,
+        ..Default::default()
+    };
+
+    let res = upload_local_consolidated_artifacts(
+        &mock,
+        cloud_dest,
+        &local_dir,
+        &opts,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(res.is_err(), "Upload must fail due to simulated failure");
+
+    // Remote .part files must be cleaned up
+    let files = mock.files.lock().await;
+    assert!(!files.contains_key(&format!("{cloud_dest}/livestream.mp4.part")));
+    assert!(!files.contains_key(&format!("{cloud_dest}/live_chat.jsonl.part")));
+    assert!(!files.contains_key(&format!("{cloud_dest}/livestream.mp4")));
+    assert!(!files.contains_key(&format!("{cloud_dest}/live_chat.jsonl")));
+
+    // Local files must strictly remain intact because upload failed
+    assert!(
+        mp4_path.exists(),
+        "Local livestream.mp4 must remain preserved upon upload failure"
+    );
+    assert!(
+        chat_path.exists(),
+        "Local live_chat.jsonl must remain preserved upon upload failure"
+    );
+    assert!(
+        meta_path.exists(),
+        "Local live_metadata.jsonl must remain preserved upon upload failure"
+    );
+}
+
+#[tokio::test]
+async fn test_local_consolidation_cloud_upload_default_destination() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let local_dir = create_temp_test_dir("test_local_cons_upload_def");
+    let (chunk0, chat0, meta) = setup_test_stream_chunks(&local_dir);
+
+    let session_name = local_dir.file_name().unwrap().to_string_lossy().to_string();
+
+    let config_file = local_dir.join("test_settings.toml");
+    fs::write(&config_file, "[rclone]\nremote_path = \"remote:chzzk\"\n").unwrap();
+
+    let args = ConsolidateArgs {
+        path: local_dir.to_string_lossy().to_string(),
+        upload: true,
+        remote_path: None,
+        delete_after_upload: false,
+        delete_chunks: false,
+        config: Some(config_file),
+        ..Default::default()
+    };
+
+    let mock = Arc::new(MockUploadBackend::new());
+    let (output, _buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let summary = run_consolidation_with_backend_and_cancel(
+        args,
+        coordinator,
+        CancellationToken::new(),
+        Some(mock.clone() as Arc<dyn UploadBackend>),
+    )
+    .await
+    .expect("Local consolidation with --upload should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+    assert!(summary.has_metadata);
+
+    // Default remote path is settings.rclone.remote_path ("remote:chzzk") / session_name
+    let expected_dest = format!("remote:chzzk/{session_name}");
+    let files = mock.files.lock().await;
+    assert!(
+        files.contains_key(&format!("{expected_dest}/livestream.mp4")),
+        "livestream.mp4 must exist in mock cloud store at '{expected_dest}/livestream.mp4'"
+    );
+    assert!(
+        files.contains_key(&format!("{expected_dest}/live_chat.jsonl")),
+        "live_chat.jsonl must exist in mock cloud store at '{expected_dest}/live_chat.jsonl'"
+    );
+    assert!(
+        files.contains_key(&format!("{expected_dest}/live_metadata.jsonl")),
+        "live_metadata.jsonl must exist in mock cloud store at '{expected_dest}/live_metadata.jsonl'"
+    );
+
+    // Because delete_after_upload is false and delete_chunks is false: all files must remain
+    assert!(local_dir.join("livestream.mp4").exists());
+    assert!(local_dir.join("live_chat.jsonl").exists());
+    assert!(meta.exists());
+    assert!(chunk0.exists());
+    assert!(chat0.exists());
+}
+
+#[tokio::test]
+async fn test_local_consolidation_cloud_upload_with_remote_path_override() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let local_dir = create_temp_test_dir("test_local_cons_upload_override");
+    let (chunk0, chat0, meta) = setup_test_stream_chunks(&local_dir);
+
+    let custom_remote = "my_rclone:backup/custom_archive";
+
+    let args = ConsolidateArgs {
+        path: local_dir.to_string_lossy().to_string(),
+        upload: true,
+        remote_path: Some(custom_remote.to_string()),
+        delete_after_upload: false,
+        delete_chunks: false,
+        ..Default::default()
+    };
+
+    let mock = Arc::new(MockUploadBackend::new());
+    let (output, _buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let summary = run_consolidation_with_backend_and_cancel(
+        args,
+        coordinator,
+        CancellationToken::new(),
+        Some(mock.clone() as Arc<dyn UploadBackend>),
+    )
+    .await
+    .expect("Local consolidation with --remote-path override should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify mock cloud store has files under custom_remote
+    let files = mock.files.lock().await;
+    assert!(files.contains_key(&format!("{custom_remote}/livestream.mp4")));
+    assert!(files.contains_key(&format!("{custom_remote}/live_chat.jsonl")));
+    assert!(files.contains_key(&format!("{custom_remote}/live_metadata.jsonl")));
+
+    // All local files preserved
+    assert!(local_dir.join("livestream.mp4").exists());
+    assert!(local_dir.join("live_chat.jsonl").exists());
+    assert!(meta.exists());
+    assert!(chunk0.exists());
+    assert!(chat0.exists());
+}
+
+#[tokio::test]
+async fn test_local_consolidation_delete_after_upload_unlinks_triad_and_preserves_chunks() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let local_dir = create_temp_test_dir("test_local_cons_del_triad");
+    let (chunk0, chat0, meta) = setup_test_stream_chunks(&local_dir);
+
+    let custom_remote = "gdrive:stream_archive/session_del";
+
+    let args = ConsolidateArgs {
+        path: local_dir.to_string_lossy().to_string(),
+        upload: true,
+        remote_path: Some(custom_remote.to_string()),
+        delete_after_upload: true,
+        delete_chunks: false,
+        ..Default::default()
+    };
+
+    let mock = Arc::new(MockUploadBackend::new());
+    let (output, _buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let summary = run_consolidation_with_backend_and_cancel(
+        args,
+        coordinator,
+        CancellationToken::new(),
+        Some(mock.clone() as Arc<dyn UploadBackend>),
+    )
+    .await
+    .expect("Local consolidation with --delete-after-upload should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify mock cloud store has files under custom_remote
+    let files = mock.files.lock().await;
+    assert!(files.contains_key(&format!("{custom_remote}/livestream.mp4")));
+    assert!(files.contains_key(&format!("{custom_remote}/live_chat.jsonl")));
+    assert!(files.contains_key(&format!("{custom_remote}/live_metadata.jsonl")));
+
+    // Verify local consolidated triad is unlinked
+    assert!(
+        !local_dir.join("livestream.mp4").exists(),
+        "Local livestream.mp4 must be deleted post-upload"
+    );
+    assert!(
+        !local_dir.join("live_chat.jsonl").exists(),
+        "Local live_chat.jsonl must be deleted post-upload"
+    );
+    assert!(!meta.exists(), "Local metadata must be deleted post-upload");
+
+    // Verify original source chunks are strictly preserved
+    assert!(
+        chunk0.exists(),
+        "Source video chunk must strictly remain on disk"
+    );
+    assert!(
+        chat0.exists(),
+        "Source chat chunk must strictly remain on disk"
+    );
+}
+
+#[tokio::test]
+async fn test_local_consolidation_delete_after_upload_and_delete_chunks_unlinks_both() {
+    let _lock = REMOTE_TEST_MUTEX.lock().await;
+    let _mock_ffmpeg = get_mock_ffmpeg_bin();
+
+    let local_dir = create_temp_test_dir("test_local_cons_del_both");
+    let (chunk0, chat0, meta) = setup_test_stream_chunks(&local_dir);
+
+    let custom_remote = "gdrive:stream_archive/session_both";
+
+    let args = ConsolidateArgs {
+        path: local_dir.to_string_lossy().to_string(),
+        upload: true,
+        remote_path: Some(custom_remote.to_string()),
+        delete_after_upload: true,
+        delete_chunks: true,
+        ..Default::default()
+    };
+
+    let mock = Arc::new(MockUploadBackend::new());
+    let (output, _buf) = CoordinatorOutput::buffer();
+    let coordinator = ConsolidationProgressCoordinator::with_output(output, false);
+
+    let summary = run_consolidation_with_backend_and_cancel(
+        args,
+        coordinator,
+        CancellationToken::new(),
+        Some(mock.clone() as Arc<dyn UploadBackend>),
+    )
+    .await
+    .expect("Local consolidation with --delete-after-upload and --delete-chunks should succeed");
+
+    assert_eq!(summary.video_chunks_count, 1);
+    assert_eq!(summary.chat_chunks_count, 1);
+
+    // Verify mock cloud store has files under custom_remote
+    let files = mock.files.lock().await;
+    assert!(files.contains_key(&format!("{custom_remote}/livestream.mp4")));
+    assert!(files.contains_key(&format!("{custom_remote}/live_chat.jsonl")));
+    assert!(files.contains_key(&format!("{custom_remote}/live_metadata.jsonl")));
+
+    // Verify local consolidated triad is unlinked
+    assert!(!local_dir.join("livestream.mp4").exists());
+    assert!(!local_dir.join("live_chat.jsonl").exists());
+    assert!(!meta.exists());
+
+    // Verify original source chunks are also purged
+    assert!(!chunk0.exists(), "Source video chunk must be purged");
+    assert!(!chat0.exists(), "Source chat chunk must be purged");
 }
